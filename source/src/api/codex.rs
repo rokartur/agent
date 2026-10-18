@@ -121,9 +121,8 @@ pub fn parse_stream(reader: &mut dyn BufRead, abort: &AtomicBool, on_delta: &mut
             "response.output_text.delta" => {
                 let text = event["delta"].as_str().unwrap_or_default();
                 on_delta(Delta::Text(text));
-                if let Some(block) = slots[index].as_mut() {
-                    let joined = format!("{}{text}", block["text"].as_str().unwrap_or_default());
-                    block["text"] = json!(joined);
+                if let Some(Value::String(joined)) = slots[index].as_mut().and_then(|block| block.get_mut("text")) {
+                    joined.push_str(text);
                 }
             }
             "response.reasoning_summary_text.delta" => on_delta(Delta::Thinking(event["delta"].as_str().unwrap_or_default())),
@@ -155,11 +154,8 @@ pub fn parse_stream(reader: &mut dyn BufRead, abort: &AtomicBool, on_delta: &mut
                 };
                 break;
             }
-            "response.failed" => {
-                let error = &event["response"]["error"];
-                return Err(ApiError::fatal(format!("Codex error {}: {}", error["code"].as_str().unwrap_or("unknown"), error["message"].as_str().unwrap_or("no message"))));
-            }
-            "error" => return Err(ApiError::fatal(format!("Codex error {}: {}", event["code"].as_str().unwrap_or("unknown"), event["message"].as_str().unwrap_or("no message")))),
+            "response.failed" => return Err(stream_error(&event["response"]["error"])),
+            "error" => return Err(stream_error(&event)),
             _ => {}
         }
     }
@@ -168,6 +164,15 @@ pub fn parse_stream(reader: &mut dyn BufRead, abort: &AtomicBool, on_delta: &mut
         stop_reason = "tool_use".into();
     }
     Ok(Reply { message: json!({"role": "assistant", "content": blocks}), stop_reason, usage, id, ..Reply::default() })
+}
+
+/// Classified like the Anthropic stream's `error`: a rate limit switches accounts, an overloaded server retries.
+fn stream_error(error: &Value) -> ApiError {
+    let code = error["code"].as_str().unwrap_or("unknown");
+    let message = format!("Codex error {code}: {}", error["message"].as_str().unwrap_or("no message"));
+    let quota = matches!(code, "rate_limit_exceeded" | "usage_limit_reached" | "insufficient_quota");
+    let retryable = quota || matches!(code, "server_error" | "server_is_overloaded" | "slow_down");
+    ApiError { message, retryable, quota }
 }
 
 #[cfg(test)]
@@ -228,5 +233,16 @@ mod tests {
         assert_eq!(reply.stop_reason, "tool_use");
         assert_eq!((reply.usage.input, reply.usage.cache_read, reply.usage.output), (40, 60, 7));
         assert_eq!(reply.message["content"], json!([{"type": "text", "text": "Hi"}, {"type": "tool_use", "id": "call_1", "name": "bash", "input": {"command": "ls"}}]));
+    }
+
+    #[test]
+    fn stream_errors_retry_only_when_the_server_is_busy() {
+        let parse = |event: &str| parse_stream(&mut format!("data: {event}\n\n").as_bytes(), &AtomicBool::new(false), &mut |_| {}).err().unwrap();
+        let busy = parse(r#"{"type":"response.failed","response":{"error":{"code":"server_is_overloaded","message":"busy"}}}"#);
+        assert!(busy.retryable && !busy.quota, "{}", busy.message);
+        let limited = parse(r#"{"type":"error","code":"rate_limit_exceeded","message":"slow"}"#);
+        assert!(limited.retryable && limited.quota, "{}", limited.message);
+        let bad = parse(r#"{"type":"error","code":"invalid_prompt","message":"no"}"#);
+        assert!(!bad.retryable, "{}", bad.message);
     }
 }

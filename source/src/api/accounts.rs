@@ -98,7 +98,8 @@ fn save(home: &Path, accounts: &[Account]) -> Result<(), String> {
 pub(crate) fn write_private(path: &Path, text: &str) -> Result<(), String> {
     // Renaming over a symlink would replace a dotfiles link with a plain file.
     let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    let temp = path.with_extension("json.tmp");
+    // Per process: two agents sharing one temp name would rename each other's half-written file into place.
+    let temp = path.with_extension(format!("json.{}.tmp", std::process::id()));
     let mut out = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&temp).map_err(|e| format!("Cannot write {}: {e}", temp.display()))?;
     // mode() applies only on create, so a leftover temp file is made private before the secrets go in.
     let written = out.set_permissions(std::fs::Permissions::from_mode(0o600)).and_then(|()| out.write_all(text.as_bytes())).and_then(|()| out.sync_all()).and_then(|()| std::fs::rename(&temp, &path));

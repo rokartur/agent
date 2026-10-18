@@ -118,7 +118,8 @@ impl Client {
     pub fn new(home: &Path) -> Result<Client, String> {
         let base = |var: &str, default: &str| std::env::var(var).unwrap_or_else(|_| default.into()).trim_end_matches('/').to_string();
         let client = Client {
-            http: ureq::Agent::config_builder().http_status_as_error(false).timeout_connect(Some(Duration::from_secs(30))).build().into(),
+            // Every request streams, so headers come before the model thinks; a stuck server would otherwise hold the turn past Esc.
+            http: ureq::Agent::config_builder().http_status_as_error(false).timeout_connect(Some(Duration::from_secs(30))).timeout_recv_response(Some(STREAM_IDLE)).build().into(),
             home: home.to_path_buf(),
             anthropic_base: base("ANTHROPIC_BASE_URL", "https://api.anthropic.com"),
             chatgpt_base: base("CHATGPT_BASE_URL", "https://chatgpt.com/backend-api"),
@@ -210,6 +211,15 @@ impl Client {
 
     /// Streams one model turn into `on_delta` on a fitting account. Setting `abort` ends the stream with stop reason "aborted".
     pub fn send(&self, request: &Value, abort: &AtomicBool, on_delta: &mut dyn FnMut(Delta)) -> Result<Reply, String> {
+        self.send_on_account(request, abort, on_delta, true)
+    }
+
+    /// Like `send` for callers that only read the `Reply`, so a stream that breaks off partway can still be retried.
+    pub fn send_quiet(&self, request: &Value, abort: &AtomicBool) -> Result<Reply, String> {
+        self.send_on_account(request, abort, &mut |_| {}, false)
+    }
+
+    fn send_on_account(&self, request: &Value, abort: &AtomicBool, on_delta: &mut dyn FnMut(Delta), shown: bool) -> Result<Reply, String> {
         let mut request = request.clone();
         let mut fell_back = false;
         let mut rate_limited: Vec<String> = Vec::new();
@@ -224,13 +234,22 @@ impl Client {
                     continue;
                 }
             };
-            let error = match self.try_send(&account, &request, abort, on_delta) {
+            let mut streamed = false;
+            let sent = self.try_send(&account, &request, abort, &mut |delta| {
+                streamed |= !matches!(delta, Delta::Notice(_));
+                on_delta(delta);
+            });
+            let error = match sent {
                 Ok(reply) => {
                     let model = request["model"].as_str().unwrap_or_default().to_string();
                     return Ok(Reply { provider: account.provider.clone(), account_id: account.account_id().map(String::from), model, ..reply });
                 }
                 Err(error) => error,
             };
+            // A retry streams the whole reply again, and text already shown (stdout in --print) cannot be taken back.
+            if streamed && shown {
+                return Err(format!("{} The reply broke off partway and was not retried.", error.message));
+            }
             let key = key(&account);
             // A quota error moves the same request to the next account once; a second one waits like any retry.
             if error.quota && !rate_limited.contains(&key) {
