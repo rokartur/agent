@@ -74,7 +74,8 @@ impl Goal {
     }
 
     pub fn from_entry(entry: &Value) -> Option<Goal> {
-        let goal = entry["goal"].as_object()?;
+        // A `Value`, not its `Map`: indexing a Map panics on a key an older session lacks.
+        let goal = entry.get("goal").filter(|goal| goal.is_object())?;
         let status = match goal["status"].as_str() {
             Some("paused") => Status::Paused,
             Some("complete") => Status::Complete,
@@ -105,5 +106,6 @@ mod tests {
         assert_eq!(goal.after_turn(false), AfterTurn::Paused("Goal paused: its token budget of 100 is used up (120 tokens).".into()));
         assert_eq!(Goal::from_entry(&Goal::entry(Some(&goal))), Some(goal));
         assert_eq!(Goal::from_entry(&Goal::entry(None)), None);
+        assert_eq!(Goal::from_entry(&json!({"type": "goal", "goal": {"objective": "old", "status": "paused"}})).unwrap().evidence, None);
     }
 }

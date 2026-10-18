@@ -20,8 +20,11 @@ impl Snapshots {
         let work_tree = PathBuf::from(top);
         let exclude = PathBuf::from(run(crate::process::command("git").arg("-C").arg(cwd).args(["rev-parse", "--path-format=absolute", "--git-path", "info/exclude"])).ok()?);
         let git_dir = home.join(".agents/snapshots").join(work_tree.to_string_lossy().replace('/', "-"));
-        // One index per process, so two agents in the same repo do not fight over index.lock.
-        let index = std::env::temp_dir().join(format!("agent-snapshot-{}.index", std::process::id()));
+        // One index per process, so two agents in the same repo do not fight over index.lock; the private
+        // spill dir keeps other local users from locking or planting it, and quitting removes it.
+        let spills = crate::tools::spill_dir();
+        crate::process::private_dir(&spills).ok()?;
+        let index = spills.join("snapshot.index");
         let snapshots = Snapshots { git_dir, work_tree, index, exclude };
         if snapshots.git_dir.exists() {
             // Only costs disk space when it fails, so it never turns snapshots off.

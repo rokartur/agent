@@ -1,6 +1,6 @@
 # Plugins
 
-A plugin is a directory with a `plugin.json` and the program it names. The agent starts each enabled plugin at startup, and again after it exits when anything changes in `/plugins`. It talks to it in JSON-RPC 2.0 over stdin and stdout, one JSON message per line. Stderr is not part of the protocol. The agent keeps the last stderr line and shows it in `/plugins` when the plugin exits.
+A plugin is a directory with a `plugin.json` and the program it names. The agent starts each enabled plugin at startup, and again after it exits when anything changes in `/plugins`. It talks to it in JSON-RPC 2.0 over stdin and stdout, one JSON message per line. When stdin closes, the agent has quit: exit then, because the plugin runs in its own session and gets no SIGHUP. Stderr is not part of the protocol. The agent keeps the last stderr line and shows it in `/plugins` when the plugin exits.
 
 ## Install
 

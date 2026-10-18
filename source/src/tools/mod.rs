@@ -27,6 +27,7 @@ use rtk::Rtk;
 pub const MAX_LINES: usize = 2000;
 pub const MAX_BYTES: usize = 50 * 1024;
 const MAX_COLUMNS: usize = 500;
+const SEARCH_ANCHOR_BUDGET: u32 = 10 * MAX_LINES as u32;
 
 const SCHEMAS: &str = include_str!("tools.json");
 
@@ -311,17 +312,20 @@ fn rg(input: &Value, cwd: &Path, anchors: &mut Anchors, abort: &AtomicBool) -> R
 
 /// rg's JSON events as `path:anchor│line` rows, `path-anchor│line` for context, so an edit can follow without a read.
 /// A file the anchors cannot track (binary, not UTF-8) shows line numbers instead, and so does every file past the
-/// MAX_LINES rows the page shows, so anchoring them costs nothing.
+/// MAX_LINES rows the page shows, so anchoring them costs nothing. Past SEARCH_ANCHOR_BUDGET new anchors in one call
+/// the rest show line numbers too: anchors are never freed, and 2000 hit files of 2000 lines would use up the session's.
 fn rg_rows(json: &str, cwd: &Path, anchors: &mut Anchors) -> Result<String, String> {
     let mut rows = Vec::new();
     let mut tracked: Option<PathBuf> = None;
+    let minted_before = anchors.minted();
     for line in json.lines() {
         let event: Value = serde_json::from_str(line).map_err(|e| format!("Cannot parse rg output: {e}"))?;
         let data = &event["data"];
         let path = data["path"]["text"].as_str().unwrap_or("[path is not UTF-8]");
         let separator = match event["type"].as_str() {
             Some("begin") => {
-                tracked = if rows.len() < MAX_LINES { cwd.join(path).canonicalize().ok().filter(|file| anchors.track(file, MAX_LINES).is_ok()) } else { None };
+                let in_budget = rows.len() < MAX_LINES && anchors.minted() - minted_before < SEARCH_ANCHOR_BUDGET;
+                tracked = if in_budget { cwd.join(path).canonicalize().ok().filter(|file| anchors.track(file, MAX_LINES).is_ok()) } else { None };
                 continue;
             }
             Some("match") => ':',
@@ -486,7 +490,7 @@ impl SpillFile {
     }
 }
 
-fn spill_dir() -> PathBuf {
+pub(crate) fn spill_dir() -> PathBuf {
     std::env::temp_dir().join(format!("agent-{}", std::process::id()))
 }
 
@@ -664,6 +668,20 @@ mod tests {
         std::fs::write(dir.join("long.txt"), format!("needle\n{}", "x\n".repeat(MAX_LINES))).unwrap();
         let found = rg(&json!({"pattern": "needle"}), &dir, &mut Anchors::new("t"), &AtomicBool::new(false)).unwrap();
         assert_eq!(found, "long.txt:1:needle");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn one_rg_call_stops_minting_anchors_past_its_budget() {
+        let dir = std::env::temp_dir().join(format!("agent-rg-budget-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file_lines = MAX_LINES - 1;
+        let files = SEARCH_ANCHOR_BUDGET as usize / file_lines + 2;
+        for index in 0..files {
+            std::fs::write(dir.join(format!("{index}.txt")), format!("needle\n{}", "x\n".repeat(file_lines - 1))).unwrap();
+        }
+        let found = rg(&json!({"pattern": "needle"}), &dir, &mut Anchors::new("t"), &AtomicBool::new(false)).unwrap();
+        assert_eq!(found.lines().filter(|row| row.ends_with(":1:needle")).count(), 1, "{found}");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

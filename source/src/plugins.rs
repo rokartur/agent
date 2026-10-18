@@ -97,7 +97,8 @@ impl Plugins {
             let plugin = &mut state.plugins[index];
             if !installed.contains(&plugin.name) || disabled.contains(&plugin.name) {
                 if let Some(mut process) = plugin.process.take() {
-                    let _ = process.child.kill();
+                    // The plugin leads its own process group, so `sh plugin.sh` starting `bun` stops as a whole.
+                    crate::process::signal_group(process.child.id(), crate::process::SIGKILL);
                     let _ = process.child.wait();
                 }
                 // `exited` skips a stopped plugin, so its waiting calls would never get Disconnected.

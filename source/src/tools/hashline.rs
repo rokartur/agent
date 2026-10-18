@@ -116,6 +116,10 @@ impl Anchors {
         Ok(())
     }
 
+    pub fn minted(&self) -> u32 {
+        self.minted
+    }
+
     /// Syncs a canonical `path` from disk so search rows can carry its anchors.
     /// Files over `max_lines` stay untracked: anchors are never freed, and a few hits in large generated files would use them all.
     pub fn track(&mut self, path: &Path, max_lines: usize) -> Result<(), String> {

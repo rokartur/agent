@@ -1,5 +1,5 @@
 // shortcut: no Readability scoring; the whole body minus page chrome is converted. Port a scorer if menus or ads swamp real pages.
-// shortcut: tag scanner, not an HTML5 parser; unclosed block tags simply end at the next block.
+// shortcut: tag scanner, not an HTML5 parser; unclosed block tags end at the next block.
 
 const SKIPPED: [&str; 12] = ["script", "style", "nav", "header", "footer", "aside", "noscript", "svg", "template", "head", "iframe", "button"];
 

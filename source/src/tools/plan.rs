@@ -36,8 +36,8 @@ const EDITING_TOOLS: [&str; 8] = ["write", "replace", "replace_match", "insert",
 
 const READ_ONLY_COMMANDS: [&str; 18] = ["ls", "cat", "head", "tail", "wc", "rg", "fd", "pwd", "tree", "file", "stat", "which", "echo", "jq", "diff", "du", "cd", "true"];
 const READ_ONLY_GIT: [&str; 7] = ["status", "log", "diff", "show", "blame", "ls-files", "rev-parse"];
-// Matched as prefixes, so attached values (`--pre=sh`, `-xrm`) count too; `--output`/`-o` write a file.
-const RUNS_OTHER_COMMANDS: [&str; 6] = ["-x", "-X", "--exec", "--pre", "--output", "-o"];
+// Matched as prefixes, so attached values (`--pre=sh`) count too; `--output` writes a file.
+const RUNS_OTHER_COMMANDS: [&str; 3] = ["--exec", "--pre", "--output"];
 
 pub fn tool() -> Value {
     json!({
@@ -75,7 +75,15 @@ fn read_only(command: &str) -> bool {
 
 fn read_only_segment(segment: &str) -> bool {
     let words: Vec<&str> = segment.split_whitespace().collect();
-    if words.iter().any(|word| RUNS_OTHER_COMMANDS.iter().any(|flag| word.starts_with(flag))) {
+    // Short forms of RUNS_OTHER_COMMANDS: fd's `-x`/`-X` run a command, tree's `-o` writes a file and `-R` writes 00Tree.html per directory.
+    // Searched in the whole cluster, since `fd -Hx rm` bundles them.
+    let risky: &[char] = match words.first() {
+        Some(&"fd") => &['x', 'X'],
+        Some(&"tree") => &['o', 'R'],
+        _ => &[],
+    };
+    let short_cluster = |word: &str| word.starts_with('-') && !word.starts_with("--") && word.contains(risky);
+    if words.iter().any(|word| short_cluster(word) || RUNS_OTHER_COMMANDS.iter().any(|flag| word.starts_with(flag))) {
         return false;
     }
     match words[0] {
@@ -98,10 +106,27 @@ mod tests {
         }
         assert!(blocked("bg_start", &json!({"command": "rm -rf x"})).is_some());
         assert!(blocked("bg_start", &json!({"command": "git log"})).is_none());
-        for command in ["rg -n plan src", "git log --oneline | head -5 && git status", "cd . && ls"] {
+        for command in ["rg -n plan src", "git log --oneline | head -5 && git status", "cd . && ls", "ls -lX", "du -xh", "rg -o x"] {
             assert!(blocked("bash", &json!({ "command": command })).is_none(), "{command}");
         }
-        for command in ["rm -rf x", "cat a > b", "git commit -m x", "fd -x rm", "ls; touch x", "echo $(rm x)", "cat <(rm x)", "rg --pre=sh x", "fd --exec=rm", "git diff --output=f", "tree -o f", ""] {
+        for command in [
+            "rm -rf x",
+            "cat a > b",
+            "git commit -m x",
+            "fd -x rm",
+            "fd -Hx rm",
+            "fd -HX sh",
+            "ls; touch x",
+            "echo $(rm x)",
+            "cat <(rm x)",
+            "rg --pre=sh x",
+            "fd --exec=rm",
+            "git diff --output=f",
+            "tree -o f",
+            "tree -fo f",
+            "tree -RL 1 -H . .",
+            "",
+        ] {
             assert!(blocked("bash", &json!({ "command": command })).is_some(), "{command}");
         }
     }
