@@ -120,8 +120,14 @@ fn parse_args(args: Vec<String>) -> Result<Options, String> {
         let mut value = |name: &str| args.next().ok_or(format!("{name} needs a value."));
         match arg.as_str() {
             "--model" => options.model = Some(value("--model")?),
-            "--thinking" | "--effort" => options.thinking = Some(value("--thinking")?),
-            "--session" | "--resume" => options.resume = Some(Resume::Id(value("--resume")?)),
+            "--thinking" => {
+                let level = value("--thinking")?;
+                if !tui::THINKING_LEVELS.contains(&level.as_str()) {
+                    return Err(format!("--thinking takes one of: {}.", tui::THINKING_LEVELS.join(", ")));
+                }
+                options.thinking = Some(level);
+            }
+            "--resume" => options.resume = Some(Resume::Id(value("--resume")?)),
             "-c" | "--continue" => options.resume = Some(Resume::Latest),
             "-p" | "--print" => options.print = true,
             "--json" => options.json = true,
@@ -158,9 +164,8 @@ fn parse_args(args: Vec<String>) -> Result<Options, String> {
 fn run(options: Options) -> Result<(), String> {
     let home = PathBuf::from(std::env::var("HOME").map_err(|_| "HOME is not set.")?);
     let agent_dir = home.join(".agents");
-    // The flags below apply to this run only; the TUI saves its changes over `saved_settings`.
-    let saved_settings = settings::load(&home)?;
-    let mut settings = saved_settings.clone();
+    // The flags below apply to this run only; /settings saves only the keys it changes.
+    let mut settings = settings::load(&home)?;
     if let Some(model) = options.model {
         settings.model = model;
     }
@@ -319,7 +324,7 @@ fn run(options: Options) -> Result<(), String> {
     let templates = prompt::load_templates(&agent_dir, &agent.cwd);
     agent.interactive = true;
     agent.snapshots = snapshots::Snapshots::open(&home, &agent.cwd);
-    tui::run(agent, tui::Setup { home, settings, saved_settings, skills, templates, prompt, modes_error, plugin_updates }, model_lists)
+    tui::run(agent, tui::Setup { home, settings, skills, templates, prompt, modes_error, plugin_updates }, model_lists)
 }
 
 /// The panic hook's terminal restore does not run when a signal ends the process, so a `kill` would leave the shell in raw mode.
@@ -334,16 +339,16 @@ fn clean_up_on_signal() {
 fn print_mode(agent: &mut Agent, prompt: &str, json: bool) -> Result<(), String> {
     let answer = agent.prompt(prompt, &mut |event| match event {
         Event::Text(text) if !json => {
-            print!("{text}");
+            print!("{}", terminal_safe(&text));
             let _ = std::io::stdout().flush();
         }
         Event::ToolStart { name, input, .. } if !json => eprintln!("· {name} {}", preview(&input)),
-        Event::Notice(text) => eprintln!("{text}"),
+        Event::Notice(text) => eprintln!("{}", terminal_safe(&text)),
         Event::Permission { request, reply } => {
-            eprintln!("Denied {}: {} (print mode cannot ask; use --auto or --full-access)", request.kind.label(), request.detail);
+            eprintln!("Denied {}: {} (print mode cannot ask; use --auto or --full-access)", request.kind.label(), terminal_safe(&request.detail));
             let _ = reply.send(Decision::Deny);
         }
-        Event::Reviewed { allowed, detail, reason } => eprintln!("auto: {} {detail}: {reason}", if allowed { "allowed" } else { "denied" }),
+        Event::Reviewed { allowed, detail, reason } => eprintln!("auto: {} {}: {}", if allowed { "allowed" } else { "denied" }, terminal_safe(&detail), terminal_safe(&reason)),
         Event::TurnEnd { .. } if !json => println!(),
         _ => {}
     })?;
@@ -387,6 +392,11 @@ fn preview(input: &Value) -> String {
     }
 }
 
+/// Model and tool text can carry escape sequences (OSC 52 writes the clipboard); the TUI drops them in `to_ansi`.
+fn terminal_safe(text: &str) -> String {
+    text.chars().filter(|c| matches!(c, '\n' | '\t') || !c.is_control()).collect()
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -394,5 +404,16 @@ mod tests {
         let options = super::parse_args(vec!["--account".into(), "anthropic=work".into()]).unwrap();
         assert_eq!(options.account, Some(("anthropic".into(), "work".into())));
         assert!(super::parse_args(vec!["--account".into(), "work".into()]).is_err());
+    }
+
+    #[test]
+    fn thinking_flag_takes_only_known_levels() {
+        assert_eq!(super::parse_args(vec!["--thinking".into(), "low".into()]).unwrap().thinking.as_deref(), Some("low"));
+        assert!(super::parse_args(vec!["--thinking".into(), "huge".into()]).is_err());
+    }
+
+    #[test]
+    fn terminal_safe_drops_escape_sequences() {
+        assert_eq!(super::terminal_safe("a\x1b]52;c;eA==\x07b\n\tc\u{9b}"), "a]52;c;eA==b\n\tc");
     }
 }

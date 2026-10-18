@@ -99,6 +99,8 @@ enum Msg {
     },
     LoginFinished {
         provider: &'static str,
+        /// The exchange's cancel flag, which tells it apart from a newer /login.
+        cancel: Arc<AtomicBool>,
         result: Result<Tokens, String>,
     },
     /// Account usage arrived for /account.
@@ -311,50 +313,59 @@ enum Command {
     Context,
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum MidTurn {
+    /// Panels, settings and local info leave the turn alone, so they run mid-turn too.
+    /// Settings changes reach the agent through Command::Apply, which the worker takes after the turn.
+    Runs,
+    /// Waits in `queued_commands` and runs when the turn ends.
+    Waits,
+}
+
 /// Built-in commands: pi's wording for pi's commands, fx's for the ones taken from fx.
-const BUILTIN_COMMANDS: &[(&str, &str)] = &[
-    ("help", "show available slash commands"),
-    ("clear", "start a fresh conversation"),
-    ("resume", "resume a saved session"),
-    ("rename-title", "rename the current session"),
-    ("rename-title-ai", "Name the session again from its first prompt"),
-    ("clone", "Duplicate the current session at the current position"),
-    ("import", "<file.jsonl> — Import and resume a session from a JSONL file"),
-    ("export", "[path] — Export session: .jsonl (default) or .md for plain text"),
-    ("model", "[search] — Select model"),
-    ("settings", "Open settings menu"),
-    ("permissions", "<mode> — ask, auto or full access"),
-    ("thinking", "<level> — Set thinking level"),
-    ("ponytail", "<off | lite | full | ultra> — Set the ponytail level"),
-    ("caveman", "<off | full | ultra | wenyan> — Set the caveman level"),
-    ("voice", "Dictate in any language with whisper.cpp, Enter to stop"),
-    ("context", "Show what fills the context window and how well it caches"),
-    ("context-window", "<100k to 1M | auto> — Set this model's context window"),
-    ("copy", "Copy last agent message to clipboard"),
-    ("session", "Show session info and stats"),
-    ("hotkeys", "Show all keyboard shortcuts"),
-    ("compact", "Manually compact the session context"),
-    ("todos", "Show and edit the todo list"),
-    ("plugins", "Install, enable and disable plugins"),
-    ("skills", "Enable and disable skills"),
-    ("mcp", "Show MCP servers: reconnect, log in, enable and disable"),
-    ("usage", "Show token usage and subscription limits"),
-    ("history", "Search previous prompts"),
-    ("changes", "List files changed in this session and show their diffs"),
-    ("skill-usage", "Show how often each skill was used, least used first"),
-    ("rtk", "Show rtk token savings"),
-    ("ps", "Show background terminals"),
-    ("subagents", "Show subagent runs"),
-    ("goal", "[objective | pause | resume | stop | done] — Set a goal the agent keeps working toward, or manage it"),
-    ("plan", "[prompt | export [file] | implement | exit] — Plan mode: read-only until you pick what to do with the plan; /plan again turns it off"),
-    ("grill", "<topic> — Plan mode plus the grilling skill: the agent interviews you about the topic in rounds, changing nothing"),
-    ("btw", "<question> — Ask a side question without touching the session"),
-    ("worktree", "[name] — Move this session to a git worktree: pick one, or name a branch to open or create"),
-    ("worktree-remove", "Remove a git worktree, keeping its branch"),
-    ("login", "Add a Claude or ChatGPT account or an API key"),
-    ("logout", "Remove a saved account"),
-    ("account", "Show accounts and their usage; pick one to use until it hits the limit"),
-    ("quit", "Quit agent"),
+const BUILTIN_COMMANDS: &[(&str, MidTurn, &str)] = &[
+    ("help", MidTurn::Runs, "show available slash commands"),
+    ("clear", MidTurn::Waits, "start a fresh conversation"),
+    ("resume", MidTurn::Waits, "resume a saved session"),
+    ("rename-title", MidTurn::Runs, "rename the current session"),
+    ("rename-title-ai", MidTurn::Waits, "Name the session again from its first prompt"),
+    ("clone", MidTurn::Waits, "Duplicate the current session at the current position"),
+    ("import", MidTurn::Waits, "<file.jsonl> — Import and resume a session from a JSONL file"),
+    ("export", MidTurn::Runs, "[path] — Export session: .jsonl (default) or .md for plain text"),
+    ("model", MidTurn::Runs, "[search] — Select model"),
+    ("settings", MidTurn::Runs, "Open settings menu"),
+    ("permissions", MidTurn::Runs, "<mode> — ask, auto or full access"),
+    ("thinking", MidTurn::Runs, "<level> — Set thinking level"),
+    ("ponytail", MidTurn::Runs, "<off | lite | full | ultra> — Set the ponytail level"),
+    ("caveman", MidTurn::Runs, "<off | full | ultra | wenyan> — Set the caveman level"),
+    ("voice", MidTurn::Runs, "Dictate in any language with whisper.cpp, Enter to stop"),
+    ("context", MidTurn::Waits, "Show what fills the context window and how well it caches"),
+    ("context-window", MidTurn::Runs, "<100k to 1M | auto> — Set this model's context window"),
+    ("copy", MidTurn::Runs, "Copy last agent message to clipboard"),
+    ("session", MidTurn::Runs, "Show session info and stats"),
+    ("hotkeys", MidTurn::Runs, "Show all keyboard shortcuts"),
+    ("compact", MidTurn::Waits, "Manually compact the session context"),
+    ("todos", MidTurn::Runs, "Show and edit the todo list"),
+    ("plugins", MidTurn::Runs, "Install, enable and disable plugins"),
+    ("skills", MidTurn::Runs, "Enable and disable skills"),
+    ("mcp", MidTurn::Waits, "Show MCP servers: reconnect, log in, enable and disable"),
+    ("usage", MidTurn::Waits, "Show token usage and subscription limits"),
+    ("history", MidTurn::Waits, "Search previous prompts"),
+    ("changes", MidTurn::Waits, "List files changed in this session and show their diffs"),
+    ("skill-usage", MidTurn::Runs, "Show how often each skill was used, least used first"),
+    ("rtk", MidTurn::Runs, "Show rtk token savings"),
+    ("ps", MidTurn::Runs, "Show background terminals"),
+    ("subagents", MidTurn::Runs, "Show subagent runs"),
+    ("goal", MidTurn::Runs, "[objective | pause | resume | stop | done] — Set a goal the agent keeps working toward, or manage it"),
+    ("plan", MidTurn::Waits, "[prompt | export [file] | implement | exit] — Plan mode: read-only until you pick what to do with the plan; /plan again turns it off"),
+    ("grill", MidTurn::Waits, "<topic> — Plan mode plus the grilling skill: the agent interviews you about the topic in rounds, changing nothing"),
+    ("btw", MidTurn::Runs, "<question> — Ask a side question without touching the session"),
+    ("worktree", MidTurn::Waits, "[name] — Move this session to a git worktree: pick one, or name a branch to open or create"),
+    ("worktree-remove", MidTurn::Waits, "Remove a git worktree, keeping its branch"),
+    ("login", MidTurn::Runs, "Add a Claude or ChatGPT account or an API key"),
+    ("logout", MidTurn::Runs, "Remove a saved account"),
+    ("account", MidTurn::Runs, "Show accounts and their usage; pick one to use until it hits the limit"),
+    ("quit", MidTurn::Runs, "Quit agent"),
 ];
 const MENU_ROWS: [usize; 5] = [4, 6, 8, 10, 12];
 const PANEL_ROWS: usize = 8;
@@ -408,7 +419,7 @@ const HOTKEYS: [(&str, &[(&str, &str)]); 4] = [
     (
         "Send",
         &[
-            ("Enter", "send, queues as steering while working"),
+            ("Enter", "send; while working, steers the turn (commands and images wait for it to end)"),
             ("Shift+Enter", "new line (also Alt+Enter, Ctrl+J)"),
             ("Tab", "complete a slash command or an @path"),
             ("Up, Down", "history, menu selection"),
@@ -487,8 +498,6 @@ struct App {
     scroll: usize,
     home: PathBuf,
     settings: Settings,
-    /// What settings.json holds: `settings` without the command-line flags.
-    saved_settings: Settings,
     context_tokens: u64,
     /// The last request's usage, for /context's cache line.
     last_usage: Usage,
@@ -499,8 +508,8 @@ struct App {
     plugins: crate::plugins::Plugins,
     mcp: crate::mcp::Mcp,
     steering: Arc<Mutex<Vec<String>>>,
-    /// Slash commands and `!bash` typed while the agent works; they run one by one once it is idle.
-    queued_commands: Vec<String>,
+    /// Slash commands, `!bash` and prompts with pasted images typed while the agent works, with those images; they run one by one once it is idle.
+    queued_commands: Vec<(String, Vec<Value>)>,
     abort: Arc<AtomicBool>,
     permission_mode: Arc<Mutex<Mode>>,
     hint: Option<(String, Instant)>,
@@ -547,9 +556,8 @@ struct App {
 /// What the TUI needs besides the agent itself.
 pub struct Setup {
     pub home: PathBuf,
-    /// With the command-line flags applied; `saved_settings` is the file without them.
+    /// With the command-line flags applied; /settings writes only the keys it changes to the file.
     pub settings: Settings,
-    pub saved_settings: Settings,
     pub skills: Vec<Skill>,
     pub templates: Vec<Template>,
     pub prompt: Option<String>,
@@ -875,8 +883,11 @@ fn event_loop(app: &mut App, inbox: &Receiver<Msg>, out: &mut Stdout) -> Result<
             app.start(Command::FollowUps);
         }
         while app.working.is_none() && !app.queued_commands.is_empty() {
-            let text = app.queued_commands.remove(0);
+            let (text, images) = app.queued_commands.remove(0);
+            // Images pasted into the editor meanwhile belong to the next prompt, so they sit out this one.
+            let pasted = std::mem::replace(&mut app.images, images);
             app.submit(text);
+            app.images = pasted;
         }
         if app.quit {
             return Ok(());
@@ -886,10 +897,10 @@ fn event_loop(app: &mut App, inbox: &Receiver<Msg>, out: &mut Stdout) -> Result<
 
 impl App {
     fn new(agent: &Agent, setup: Setup, commands: Sender<Command>, events: Sender<Msg>) -> App {
-        let Setup { home, settings, saved_settings, skills, templates, modes_error, plugin_updates, .. } = setup;
+        let Setup { home, settings, skills, templates, modes_error, plugin_updates, .. } = setup;
         let mut recent_prompts: Vec<String> = history::load(&home.join(".agents")).into_iter().map(|entry| entry.prompt).collect();
         recent_prompts.drain(..recent_prompts.len().saturating_sub(100));
-        let mut slash_commands: Vec<(String, String)> = BUILTIN_COMMANDS.iter().map(|(name, description)| (name.to_string(), description.to_string())).collect();
+        let mut slash_commands: Vec<(String, String)> = BUILTIN_COMMANDS.iter().map(|(name, _, description)| (name.to_string(), description.to_string())).collect();
         for template in &templates {
             slash_commands.push((template.name.clone(), template.description.clone()));
         }
@@ -907,7 +918,6 @@ impl App {
             scroll: 0,
             home,
             settings,
-            saved_settings,
             context_tokens: 0,
             last_usage: Usage::default(),
             git: git_info(&agent.cwd),
@@ -1192,9 +1202,9 @@ impl App {
                 self.session_id = id;
                 self.session_path = path;
             }
-            Msg::LoginFinished { provider, result } => {
+            Msg::LoginFinished { provider, cancel, result } => {
                 let Some(Panel::Login(login)) = self.panel.as_mut() else { return };
-                if let Err(error) = login.finished(provider, result) {
+                if let Err(error) = login.finished(provider, &cancel, result) {
                     self.panel = None;
                     self.push(Item::Error(error));
                 }
@@ -1226,10 +1236,10 @@ impl App {
                 }
             }
             Msg::RewindPoints(points) if points.is_empty() => self.hint = Some(("Nothing to rewind yet".into(), Instant::now())),
-            Msg::RewindPoints(points) => self.panel = Some(Panel::Rewind { index: points.len() - 1, points }),
+            Msg::RewindPoints(points) => self.replace_panel(Panel::Rewind { index: points.len() - 1, points }),
             Msg::Changes(Ok(None)) => self.system("changes", "File snapshots are off outside a git repo."),
             Msg::Changes(Ok(Some(files))) if files.is_empty() => self.system("changes", "No files changed in this session."),
-            Msg::Changes(Ok(Some(files))) => self.panel = Some(Panel::Changes { files, index: 0 }),
+            Msg::Changes(Ok(Some(files))) => self.replace_panel(Panel::Changes { files, index: 0 }),
             Msg::Changes(Err(error)) => self.push(Item::Error(error)),
             Msg::Context { split, session } => {
                 let window = self.context_window();
@@ -1353,7 +1363,15 @@ impl App {
             KeyCode::BackTab => self.cycle_thinking(),
             KeyCode::Up if alt => {
                 let mut queued = std::mem::take(&mut *self.steering.lock().unwrap());
-                queued.append(&mut self.queued_commands);
+                for (mut text, images) in std::mem::take(&mut self.queued_commands) {
+                    let offset = self.images.len();
+                    // Highest first: with offset 1, #1 becomes #2 only after the old #2 became #3.
+                    for number in (1..=images.len()).rev() {
+                        text = text.replace(&format!("[Image #{number}]"), &format!("[Image #{}]", number + offset));
+                    }
+                    self.images.extend(images);
+                    queued.push(text);
+                }
                 if !queued.is_empty() {
                     self.editor.set(&queued.join("\n\n"));
                 }
@@ -1512,8 +1530,7 @@ impl App {
             self.push(Item::Error(error));
         }
         let _ = self.commands.send(Command::Apply(Box::new(self.settings.clone())));
-        self.saved_settings = settings::saved_after(&old, &self.settings, &self.saved_settings);
-        if let Err(error) = settings::save(&self.home, &self.saved_settings) {
+        if let Err(error) = settings::save_change(&self.home, &old, &self.settings) {
             self.push(Item::Error(error));
         }
     }
@@ -1582,45 +1599,15 @@ impl App {
             self.plan_command(&format!("Load the grilling skill, then grill me about: {topic}"));
             return;
         }
-        // Panels, settings and local info leave the turn alone, so they run mid-turn too.
-        // Settings changes reach the agent through Command::Apply, which the worker takes after the turn.
-        let local = [
-            "/subagents",
-            "/ps",
-            "/todos",
-            "/help",
-            "/hotkeys",
-            "/session",
-            "/copy",
-            "/voice",
-            "/settings",
-            "/model",
-            "/thinking",
-            "/ponytail",
-            "/caveman",
-            "/permissions",
-            "/context-window",
-            "/plugins",
-            "/skills",
-            "/skill-usage",
-            "/rtk",
-            "/login",
-            "/logout",
-            "/account",
-            "/rename-title",
-            "/export",
-            "/quit",
-            "/exit",
-        ]
-        .iter()
-        .any(|name| command_args(&text, name).is_some());
+        let local = command_args(&text, "/exit").is_some() || BUILTIN_COMMANDS.iter().any(|(name, mid_turn, _)| *mid_turn == MidTurn::Runs && command_args(&text, &format!("/{name}")).is_some());
         // Plugin commands can carry secrets such as tokens, so they never become steering text.
         let plugin = self.plugins.commands().iter().any(|(name, _)| command_args(&text, &format!("/{name}")).is_some());
         if self.working.is_some() && !local && !plugin {
-            // Steering reaches the model as plain text, so commands wait for the turn to end and run then.
+            // Steering reaches the model as plain text, so commands and prompts with pasted images wait for the turn to end and run then.
             let command = text.starts_with('!') || text.trim().starts_with("/skill:") || self.slash_commands.iter().any(|(name, _)| command_args(&text, &format!("/{name}")).is_some());
-            if command {
-                self.queued_commands.push(text);
+            if command || !self.images.is_empty() {
+                // The images travel with their text, so an image pasted for the next prompt starts again at #1.
+                self.queued_commands.push((text, std::mem::take(&mut self.images)));
             } else {
                 self.steering.lock().unwrap().push(text);
             }
@@ -2250,7 +2237,7 @@ impl App {
                 let events = self.events.clone();
                 std::thread::spawn(move || {
                     let result = exchange(&cancel);
-                    let _ = events.send(Msg::LoginFinished { provider, result });
+                    let _ = events.send(Msg::LoginFinished { provider, cancel, result });
                 });
             }
             login::Action::Save(account) => {
@@ -3198,8 +3185,14 @@ impl App {
 
     fn start(&mut self, command: Command) {
         self.scroll = 0;
+        if self.commands.send(command).is_err() {
+            self.push(Item::Error("The agent thread stopped.".into()));
+            // Otherwise the event loop would retry FollowUps on every tick.
+            self.steering.lock().unwrap().clear();
+            self.follow_ups.lock().unwrap().clear();
+            return;
+        }
         self.working = Some(Instant::now());
-        let _ = self.commands.send(command);
     }
 
     fn agent_event(&mut self, event: Event) {
@@ -3237,11 +3230,11 @@ impl App {
             }
             Event::Permission { request, reply } => {
                 self.notify(&format!("{} {}", request.question, request.detail));
-                self.panel = Some(Panel::Permission { request, reply, index: 0 });
+                self.open_agent_panel(Panel::Permission { request, reply, index: 0 });
             }
             Event::Ask { questions, reply } => {
                 self.notify(&questions.first().map_or(String::new(), |question| question.question.clone()));
-                self.panel = Some(Panel::Ask(ask::AskPanel::new(questions, reply)));
+                self.open_agent_panel(Panel::Ask(ask::AskPanel::new(questions, reply)));
             }
             Event::Reviewed { allowed, detail, reason } => {
                 let verdict = if allowed { "allowed" } else { "denied" };
@@ -3253,6 +3246,22 @@ impl App {
                 self.system("compact", format!("Compacted context into a {lines}-line summary"));
             }
         }
+    }
+
+    /// The agent thread blocks on this panel's reply, so it replaces any open one; a waiting /login loses its tokens.
+    fn open_agent_panel(&mut self, panel: Panel) {
+        if matches!(self.panel, Some(Panel::Login(_))) {
+            self.push(Item::Error("Login cancelled: the agent needs an answer first. Run /login again.".into()));
+        }
+        self.replace_panel(panel);
+    }
+
+    /// A reply opens its panel over any open one; a waiting /login it replaces frees its callback port.
+    fn replace_panel(&mut self, panel: Panel) {
+        if let Some(Panel::Login(login)) = &self.panel {
+            login.cancel();
+        }
+        self.panel = Some(panel);
     }
 
     fn append_assistant(&mut self, delta: &str, is_thinking: bool) {
@@ -3322,7 +3331,7 @@ impl App {
         for text in &queued {
             bottom.push(vec![span(format!(" Steering: {}", text.replace('\n', " ")), DIM)]);
         }
-        for text in &self.queued_commands {
+        for (text, _) in &self.queued_commands {
             bottom.push(vec![span(format!(" Queued: {}", text.replace('\n', " ")), DIM)]);
         }
         if !queued.is_empty() || !self.queued_commands.is_empty() {

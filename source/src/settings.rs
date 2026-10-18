@@ -134,28 +134,32 @@ pub fn model_key(model: &Model) -> String {
     format!("{}/{}", model.provider, model.id)
 }
 
-/// `saved` with the change a /settings edit made from `before` to `after`. The keys the command line sets
-/// (`--model`, `--thinking`, the permission flags, `--account`) keep their saved value unless this edit changed them.
-pub fn saved_after(before: &Settings, after: &Settings, saved: &Settings) -> Settings {
-    let mut next = after.clone();
-    if after.model == before.model {
-        next.model = saved.model.clone();
-    }
-    if after.thinking == before.thinking {
-        next.thinking = saved.thinking.clone();
-    }
-    if after.permission_mode == before.permission_mode {
-        next.permission_mode = saved.permission_mode;
-    }
-    next.default_accounts = saved.default_accounts.clone();
-    for provider in before.default_accounts.keys().chain(after.default_accounts.keys()) {
-        match after.default_accounts.get(provider) {
-            changed if changed == before.default_accounts.get(provider) => {}
-            Some(name) => _ = next.default_accounts.insert(provider.clone(), name.clone()),
-            None => _ = next.default_accounts.remove(provider),
+/// Writes the change a /settings edit made from `before` to `after` over the file as it is now, under its lock,
+/// so another agent's edits to other keys survive.
+pub fn save_change(home: &Path, before: &Settings, after: &Settings) -> Result<(), String> {
+    crate::api::accounts::locked(&path(home), || save(home, &saved_after(before, after, &load(home)?)))
+}
+
+/// `saved` with only the keys a /settings edit changed from `before` to `after`, objects merged key by key. So the
+/// keys the command line sets (`--model`, `--thinking`, the permission flags, `--account`) keep their saved value too.
+fn saved_after(before: &Settings, after: &Settings, saved: &Settings) -> Settings {
+    let mut next = to_json(saved);
+    apply_changes(&mut next, &to_json(before), &to_json(after));
+    from_json(&next)
+}
+
+fn apply_changes(saved: &mut Value, before: &Value, after: &Value) {
+    let (Some(before), Some(after), Some(saved)) = (before.as_object(), after.as_object(), saved.as_object_mut()) else {
+        *saved = after.clone();
+        return;
+    };
+    for key in before.keys().chain(after.keys()) {
+        match (before.get(key), after.get(key)) {
+            (old, new) if old == new => {}
+            (_, None) => _ = saved.remove(key),
+            (old, Some(new)) => apply_changes(saved.entry(key).or_insert(Value::Null), old.unwrap_or(&Value::Null), new),
         }
     }
-    next
 }
 
 pub fn path(home: &Path) -> PathBuf {
@@ -170,12 +174,17 @@ pub fn load(home: &Path) -> Result<Settings, String> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Value::Null,
         Err(e) => return Err(format!("Cannot read {}: {e}", path.display())),
     };
-    Ok(Settings {
+    Ok(from_json(&own))
+}
+
+fn from_json(own: &Value) -> Settings {
+    Settings {
         model: own["model"].as_str().unwrap_or("claude-opus-5-5").to_string(),
         thinking: level(&own["thinking"], &crate::tui::THINKING_LEVELS, "high"),
         permission_mode: own["permission_mode"].as_str().and_then(Mode::parse).unwrap_or(Mode::Ask),
         auto_compact: own["auto_compact"].as_bool().unwrap_or(true),
-        reserve_tokens: own["reserve_tokens"].as_u64().unwrap_or(16_384),
+        // Compaction asks for 4/5 of it as max_tokens; 0 is an API error and a few hundred cut the summary off.
+        reserve_tokens: own["reserve_tokens"].as_u64().unwrap_or(16_384).max(4_096),
         keep_recent_tokens: own["keep_recent_tokens"].as_u64().unwrap_or(20_000),
         expand_tools: own["expand_tools"].as_bool().unwrap_or(false),
         condense: own["condense"]["enabled"].as_bool().unwrap_or(true),
@@ -208,7 +217,7 @@ pub fn load(home: &Path) -> Result<Settings, String> {
         prune_sessions: own["prune_sessions"].as_str().unwrap_or("never").to_string(),
         on_start: string_list(&own["on_start"]),
         lsp: lsp_servers(&own["lsp"]),
-    })
+    }
 }
 
 /// A value from settings.json limited to `levels`; an unknown one loads as the default, like an unknown permission mode.
@@ -256,9 +265,16 @@ fn default_lsp_servers() -> BTreeMap<String, LspServer> {
 /// Editors fetch it for completion; `settings_schema_matches_what_save_writes` keeps it in step with `save`.
 const SCHEMA_URL: &str = "https://raw.githubusercontent.com/rokartur/agent/main/source/src/settings.schema.json";
 
-pub fn save(home: &Path, settings: &Settings) -> Result<(), String> {
+/// Callers hold the file lock; see `save_change`.
+fn save(home: &Path, settings: &Settings) -> Result<(), String> {
     let path = path(home);
-    let value = json!({
+    std::fs::create_dir_all(path.parent().unwrap()).map_err(|e| format!("Cannot create {}: {e}", path.display()))?;
+    // plugin_settings can hold tokens.
+    crate::api::accounts::write_private(&path, &format!("{:#}\n", to_json(settings)))
+}
+
+fn to_json(settings: &Settings) -> Value {
+    json!({
         "$schema": SCHEMA_URL,
         "model": settings.model,
         "thinking": settings.thinking,
@@ -291,10 +307,7 @@ pub fn save(home: &Path, settings: &Settings) -> Result<(), String> {
         "condense": {"enabled": settings.condense, "model": settings.condense_model, "min_batch_chars": settings.condense_min_batch_chars},
         "subagents": {"concurrency": settings.subagent_concurrency, "implementation_effort": settings.subagent_effort},
         "accounts": {"switch_at_percent": settings.switch_at_percent, "when_all_over_limit": settings.when_all_over_limit.label(), "fallback_model": settings.fallback_model, "default": settings.default_accounts},
-    });
-    std::fs::create_dir_all(path.parent().unwrap()).map_err(|e| format!("Cannot create {}: {e}", path.display()))?;
-    // plugin_settings can hold tokens.
-    crate::api::accounts::write_private(&path, &format!("{value:#}\n"))
+    })
 }
 
 #[cfg(test)]
@@ -326,7 +339,7 @@ mod tests {
 
     #[test]
     fn command_line_values_stay_out_of_the_file_until_settings_change_them() {
-        let saved = load(Path::new("/nonexistent")).unwrap();
+        let mut saved = load(Path::new("/nonexistent")).unwrap();
         let mut flagged = saved.clone();
         flagged.model = "gpt-5.5".into();
         flagged.permission_mode = Mode::FullAccess;
@@ -335,7 +348,9 @@ mod tests {
         edited.rtk = false;
         edited.thinking = "low".into();
         edited.default_accounts.insert("openai".into(), "home".into());
+        saved.ponytail = "ultra".into();
         let next = saved_after(&flagged, &edited, &saved);
+        assert_eq!(next.ponytail, "ultra", "another agent's edit to a key this one did not change survives");
         assert_eq!((next.model.as_str(), next.permission_mode, next.thinking.as_str(), next.rtk), (saved.model.as_str(), saved.permission_mode, "low", false));
         assert_eq!(next.default_accounts, HashMap::from([("openai".to_string(), "home".to_string())]));
     }

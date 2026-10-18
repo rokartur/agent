@@ -46,6 +46,8 @@ impl Btw {
             };
             messages.push(json!({"role": "user", "content": [{"type": "text", "text": prompt}]}));
             if index + 1 < self.turns.len() {
+                // A failed turn keeps an empty answer, and the API rejects an empty text block.
+                let answer = if answer.trim().is_empty() { "(no answer)" } else { answer.as_str() };
                 messages.push(json!({"role": "assistant", "content": [{"type": "text", "text": answer}]}));
             }
         }
@@ -97,5 +99,12 @@ mod tests {
         assert_eq!(messages[1]["content"][0]["text"], "because");
         assert!(messages[2]["content"][0]["text"].as_str().unwrap().starts_with("Continue the same side conversation."));
         assert_eq!(request["tools"], json!([]));
+    }
+
+    #[test]
+    fn a_failed_answer_is_never_sent_as_an_empty_text_block() {
+        let mut btw = Btw::new(String::new());
+        btw.turns = vec![("why?".into(), String::new()), ("again?".into(), String::new())];
+        assert_eq!(btw.request("m", 100, "off")["messages"][1]["content"][0]["text"], "(no answer)");
     }
 }

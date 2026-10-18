@@ -84,6 +84,13 @@ pub enum Action {
 }
 
 impl Login {
+    /// Stops a running exchange, so the Codex callback frees 127.0.0.1:1455 for the next /login.
+    pub fn cancel(&self) {
+        if let Login::Waiting { cancel, .. } = self {
+            cancel.store(true, Ordering::Relaxed);
+        }
+    }
+
     pub fn key(&mut self, key: KeyEvent) -> Action {
         let code = key.code;
         if code == KeyCode::Char('y') && key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -94,9 +101,7 @@ impl Login {
                 *self = Login::Kind { index: *api as usize };
                 return Action::None;
             }
-            if let Login::Waiting { cancel, .. } = self {
-                cancel.store(true, Ordering::Relaxed);
-            }
+            self.cancel();
             return Action::Close;
         }
         match self {
@@ -134,9 +139,9 @@ impl Login {
         }
     }
 
-    /// An exchange ended. Tokens move on to naming the account; after Esc the result is dropped.
-    pub fn finished(&mut self, provider: &'static str, result: Result<Tokens, String>) -> Result<(), String> {
-        if !matches!(self, Login::Waiting { .. }) {
+    /// An exchange ended. Tokens move on to naming the account; after Esc, or from an older /login, the result is dropped.
+    pub fn finished(&mut self, provider: &'static str, exchange_cancel: &Arc<AtomicBool>, result: Result<Tokens, String>) -> Result<(), String> {
+        if !matches!(self, Login::Waiting { cancel, .. } if Arc::ptr_eq(cancel, exchange_cancel)) {
             return Ok(());
         }
         let name = if provider == "anthropic" { "claude" } else { "codex" };
@@ -303,5 +308,14 @@ mod tests {
         assert!(shown.contains(&url));
         let ctrl_y = KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL);
         assert!(matches!(login.key(ctrl_y), Action::Copy(copied) if copied == url));
+    }
+
+    #[test]
+    fn an_older_exchange_finishing_leaves_the_new_login_waiting() {
+        let current = Arc::default();
+        let mut login = Login::Waiting { cancel: Arc::clone(&current), url: None };
+        assert_eq!(login.finished("openai-codex", &Arc::default(), Err("cancelled".into())), Ok(()));
+        assert!(matches!(login, Login::Waiting { .. }));
+        assert_eq!(login.finished("openai-codex", &current, Err("denied".into())), Err("denied".into()));
     }
 }

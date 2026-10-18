@@ -16,6 +16,7 @@ pub struct Style {
     pub bold: bool,
     pub italic: bool,
     pub underline: bool,
+    pub strikethrough: bool,
     pub selected: bool,
 }
 
@@ -59,11 +60,14 @@ impl Style {
         if self.underline {
             codes.push("4".into());
         }
+        if self.strikethrough {
+            codes.push("9".into());
+        }
         format!("\x1b[{}m", codes.join(";"))
     }
 }
 
-pub const PLAIN: Style = Style { fg: Color::Default, bg: None, bold: false, italic: false, underline: false, selected: false };
+pub const PLAIN: Style = Style { fg: Color::Default, bg: None, bold: false, italic: false, underline: false, strikethrough: false, selected: false };
 pub const BRIGHT: Style = Style::fg(255);
 pub const MUTED: Style = Style::fg(245);
 
@@ -237,7 +241,9 @@ fn split_columns(line: &Line, from: usize, to: usize) -> [Line; 3] {
     let mut column = 0;
     for s in line {
         for ch in s.text.chars() {
-            let part = if column < from {
+            let w = ch.width().unwrap_or(0);
+            // A wide glyph that crosses `from` goes in the middle, or the part before would end past `from`.
+            let part = if column + w <= from {
                 0
             } else if column < to {
                 1
@@ -248,7 +254,7 @@ fn split_columns(line: &Line, from: usize, to: usize) -> [Line; 3] {
                 Some(last) if last.style == s.style => last.text.push(ch),
                 _ => parts[part].push(span(ch.to_string(), s.style)),
             }
-            column += ch.width().unwrap_or(0);
+            column += w;
         }
     }
     parts
@@ -445,6 +451,7 @@ mod tests {
         let text = |line: Line| line.iter().map(|s| s.text.as_str()).collect::<String>();
         assert_eq!(text(overlay_center(&vec![span("abcdefgh", PLAIN)], vec![span("XY", PLAIN)], 8)), "abcXYfgh");
         assert_eq!(text(overlay_center(&vec![span("a", PLAIN)], vec![span("XY", PLAIN)], 8)), "a  XY");
+        assert_eq!(text(overlay_center(&vec![span("ab字defg", PLAIN)], vec![span("XY", PLAIN)], 8)), "ab XYefg");
     }
 
     #[test]

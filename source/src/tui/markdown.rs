@@ -1,6 +1,6 @@
 use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 
-use super::render::{Line, PLAIN, Span, Style, line_width, span, wrap};
+use super::render::{Line, MUTED, PLAIN, Span, Style, line_width, span, wrap};
 
 const BULLET: Style = Style::fg(245);
 const INLINE_CODE: Style = Style::fg(245);
@@ -19,6 +19,8 @@ pub fn render(text: &str, width: usize) -> Vec<Line> {
     let mut quote_depth = 0;
     let mut in_code = false;
     let mut table: Vec<Vec<Line>> = Vec::new();
+    // The open link's URL and where its text starts in `spans`.
+    let mut link: Option<(String, usize)> = None;
     let base = |depth: usize, quote: usize| -> Line {
         let mut indent = vec![span(" ", PLAIN)];
         for _ in 0..quote {
@@ -124,9 +126,20 @@ pub fn render(text: &str, width: usize) -> Vec<Line> {
             Event::Code(text) => spans.push(span(text.to_string(), INLINE_CODE)),
             Event::Start(Tag::Strong) => styles.push(Style { bold: true, ..style }),
             Event::Start(Tag::Emphasis) => styles.push(Style { italic: true, ..style }),
-            Event::Start(Tag::Strikethrough) => styles.push(style),
-            Event::Start(Tag::Link { .. }) => styles.push(LINK),
-            Event::End(TagEnd::Strong | TagEnd::Emphasis | TagEnd::Strikethrough | TagEnd::Link) => {
+            Event::Start(Tag::Strikethrough) => styles.push(Style { strikethrough: true, ..style }),
+            Event::Start(Tag::Link { dest_url, .. }) => {
+                link = Some((dest_url.to_string(), spans.len()));
+                styles.push(LINK);
+            }
+            Event::End(TagEnd::Link) => {
+                styles.pop();
+                let (url, start) = link.take().expect("a link ends after it starts");
+                let label: String = spans[start..].iter().map(|s| s.text.as_str()).collect();
+                if label != url {
+                    spans.push(span(format!(" ({url})"), MUTED));
+                }
+            }
+            Event::End(TagEnd::Strong | TagEnd::Emphasis | TagEnd::Strikethrough) => {
                 styles.pop();
             }
             Event::SoftBreak => spans.push(span(" ", style)),
@@ -248,5 +261,12 @@ mod tests {
     fn table_too_wide_wraps_inside_its_columns() {
         let lines = render("| a | b |\n|---|---|\n| one two three | x |", 12);
         assert_eq!(text(&lines), [" a       │ b", " ────────┼──", " one two │ x", " three   │"]);
+    }
+
+    #[test]
+    fn links_show_their_url_and_strikethrough_is_styled() {
+        assert_eq!(text(&render("[docs](https://a.dev) <https://b.dev>", 60)), [" docs (https://a.dev) https://b.dev"]);
+        let lines = render("~~old~~", 20);
+        assert!(lines[0].iter().any(|s| s.text == "old" && s.style.strikethrough));
     }
 }

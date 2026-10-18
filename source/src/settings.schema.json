@@ -10,7 +10,7 @@
     "thinking": { "enum": ["off", "minimal", "low", "medium", "high", "xhigh", "max"], "default": "high" },
     "permission_mode": { "enum": ["ask", "auto", "full access"], "default": "ask" },
     "auto_compact": { "type": "boolean", "default": true },
-    "reserve_tokens": { "type": "integer", "minimum": 0, "default": 16384, "description": "Context tokens kept free for the answer; compaction starts before they run out." },
+    "reserve_tokens": { "type": "integer", "minimum": 4096, "default": 16384, "description": "Context tokens kept free for the answer; compaction starts before they run out." },
     "keep_recent_tokens": { "type": "integer", "minimum": 0, "default": 20000, "description": "Recent tokens compaction keeps verbatim." },
     "expand_tools": { "type": "boolean", "default": false },
     "context_windows": {
