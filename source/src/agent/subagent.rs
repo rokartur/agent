@@ -258,7 +258,12 @@ pub fn tasks(input: &Value) -> Result<Vec<Task>, String> {
         let label = item["label"].as_str().filter(|l| !l.trim().is_empty()).ok_or("Each task needs a label.")?;
         let prompt = item["prompt"].as_str().filter(|p| !p.trim().is_empty()).ok_or("Each task needs a prompt.")?;
         let model = item["model"].as_str().filter(|m| *m != "inherit").map(String::from);
-        Ok(Task { label: label.to_string(), prompt: prompt.to_string(), model, effort: item["effort"].as_str().map(String::from) })
+        let effort = item["effort"].as_str().map(String::from);
+        // The child rejects an unknown --thinking before its first JSONL line, so the parent would see no answer.
+        if let Some(effort) = effort.as_deref().filter(|e| !crate::tui::THINKING_LEVELS.contains(e)) {
+            return Err(format!("Unknown effort {effort}; use one of: {}.", crate::tui::THINKING_LEVELS.join(", ")));
+        }
+        Ok(Task { label: label.to_string(), prompt: prompt.to_string(), model, effort })
     };
     match input["tasks"].as_array() {
         Some(list) if !list.is_empty() => list.iter().map(one).collect(),
@@ -292,6 +297,7 @@ mod tests {
         let one = tasks(&json!({"label": "scout", "prompt": "look", "model": "inherit", "effort": "low"})).unwrap();
         assert_eq!(one, [Task { label: "scout".into(), prompt: "look".into(), model: None, effort: Some("low".into()) }]);
         assert_eq!(tasks(&json!({"tasks": [{"label": "a", "prompt": "x"}, {"label": "b", "prompt": "y"}]})).unwrap().len(), 2);
+        assert!(tasks(&json!({"label": "a", "prompt": "x", "effort": "huge"})).unwrap_err().starts_with("Unknown effort huge;"));
         assert_eq!(tasks(&json!({"tasks": [{"label": " ", "prompt": "x"}]})).unwrap_err(), "Each task needs a label.");
     }
 

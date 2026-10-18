@@ -672,7 +672,11 @@ impl Agent {
                 let provider = self.client.catalog().iter().find(|c| c.id == model).map(|c| c.provider.clone());
                 let account = provider.and_then(|provider| Some(format!("{provider}={}", self.client.account(&provider)?.0)));
                 let launch = Launch { label: task.label.clone(), task: task.prompt.clone(), cwd: cwd.clone(), model, thinking, mode, parent_session: self.session.id.clone(), account };
-                started.push(self.subagents.lock().unwrap().spawn(launch, background, &self.follow_ups)?);
+                // The tool reports failure, so this chunk's runs must not keep going; earlier chunks have finished.
+                match self.subagents.lock().unwrap().spawn(launch, background, &self.follow_ups) {
+                    Ok(run) => started.push(run),
+                    Err(error) => return Err(stop_after_failed_spawn(error, &started, &runs)),
+                }
             }
             if !background {
                 subagent::wait(&started, &self.abort);
@@ -692,8 +696,7 @@ impl Agent {
         if let [run] = runs.as_slice() {
             return Ok(run.result_text());
         }
-        let sections: Vec<String> = runs.iter().map(|r| format!("## {} ({})\n\n{}", r.label, r.id, r.result_text())).collect();
-        Ok(sections.join("\n\n"))
+        Ok(result_sections(&runs))
     }
 
     fn complete_plan(&mut self, input: &Value) -> Result<String, String> {
@@ -812,7 +815,7 @@ impl Agent {
         let first_ref = self.next_ref;
         self.next_ref += calls.len();
         self.pending_condense.push(std::thread::spawn(move || {
-            let reply = client.send(&request, &AtomicBool::new(false), &mut |_| {})?;
+            let reply = client.send_quiet(&request, &AtomicBool::new(false))?;
             let summary = text_of(&reply.message);
             if summary.trim().is_empty() || reply.stop_reason == "max_tokens" {
                 return Err("the summary came back empty or cut off".to_string());
@@ -875,7 +878,7 @@ impl Agent {
     }
 
     fn ask_reviewer(&mut self, prompt: &str) -> (bool, String) {
-        match self.client.send(&api::plain_request(&self.cheap_model, permissions::REVIEW_SYSTEM, prompt, 200), &self.abort, &mut |_| {}) {
+        match self.client.send_quiet(&api::plain_request(&self.cheap_model, permissions::REVIEW_SYSTEM, prompt, 200), &self.abort) {
             Ok(reply) => {
                 self.usage.add(reply.usage);
                 permissions::parse_review(&text_of(&reply.message))
@@ -949,7 +952,7 @@ impl Agent {
         let prompt = format!("<conversation>\n{conversation}\n</conversation>\n\n{SUMMARY_PROMPT}");
         let max_tokens = (self.reserve_tokens * 4 / 5).min(128_000);
         let request = api::plain_request(&self.model, SUMMARY_SYSTEM, &prompt, max_tokens);
-        let reply = self.client.send(&request, &self.abort, &mut |_| {})?;
+        let reply = self.client.send_quiet(&request, &self.abort)?;
         self.usage.add(reply.usage);
         if reply.stop_reason != "end_turn" {
             return Err(format!("Compaction summary stopped with {}.", reply.stop_reason));
@@ -1023,15 +1026,17 @@ impl Agent {
 
     /// /worktree: pi pins a session to its cwd, so the history moves to a new session started in `cwd`.
     pub fn move_to(&mut self, cwd: PathBuf) -> Result<(), String> {
+        // Everything that can fail runs before the agent changes, so an error leaves it in the old checkout.
+        let disabled_skills = crate::settings::load(&self.home)?.disabled_skills;
         let session = self.copy_session(&cwd)?;
+        // Earlier snapshots belong to the old checkout's snapshot repo.
+        session.append(&json!({"type": "checkpoints_reset"}))?;
         self.grants = Grants::default();
         let from = self.cwd.display();
         self.shell_context.push(format!("Session moved from {from} to {}. Paths and git state from earlier messages refer to the old checkout.", cwd.display()));
-        self.system = prompt::system_prompt(&self.agent_dir, &cwd, &crate::settings::load(&self.home)?.disabled_skills);
+        self.system = prompt::system_prompt(&self.agent_dir, &cwd, &disabled_skills);
         self.anchors = Anchors::new(&session.id);
         self.nested_instructions.clear();
-        // Earlier snapshots belong to the old checkout's snapshot repo.
-        session.append(&json!({"type": "checkpoints_reset"}))?;
         self.checkpoints.clear();
         if self.snapshots.is_some() {
             self.snapshots = Snapshots::open(&self.home, &cwd);
@@ -1074,12 +1079,16 @@ impl Agent {
             let path = self.session.path.as_ref().ok_or("This session is not saved (--no-session); export to a .md path.")?;
             std::fs::read_to_string(path).map_err(|e| format!("Cannot read {}: {e}", path.display()))?
         };
-        // create_new: `/export README.md` must not replace a project file that no snapshot covers.
-        let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(out).map_err(|e| match e.kind() {
+        // create_new: `/export README.md` must not replace a project file that no snapshot covers. 0600 like the session file it copies.
+        let mut file = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(out).map_err(|e| match e.kind() {
             std::io::ErrorKind::AlreadyExists => format!("{} exists.", out.display()),
             _ => format!("Cannot write {}: {e}", out.display()),
         })?;
-        std::io::Write::write_all(&mut file, text.as_bytes()).map_err(|e| format!("Cannot write {}: {e}", out.display()))
+        if let Err(e) = std::io::Write::write_all(&mut file, text.as_bytes()) {
+            _ = std::fs::remove_file(out);
+            return Err(format!("Cannot write {}: {e}", out.display()));
+        }
+        Ok(())
     }
 
     /// The system prompt and tool schemas the next request sends, with modes, plugin tools and plan mode applied.
@@ -1354,7 +1363,13 @@ impl Session {
             return Err(format!("Session {id} is already here; /resume {id}."));
         }
         std::fs::create_dir_all(dir).map_err(|e| format!("Cannot create {}: {e}", dir.display()))?;
-        std::fs::write(&target, text).map_err(|e| format!("Cannot write {}: {e}", target.display()))?;
+        // 0600 like `append`: a transcript holds file contents and command output.
+        let mut out = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&target).map_err(|e| format!("Cannot write {}: {e}", target.display()))?;
+        if let Err(e) = out.write_all(text.as_bytes()) {
+            // A partial file would pass as "already here" on the next import.
+            _ = std::fs::remove_file(&target);
+            return Err(format!("Cannot write {}: {e}", target.display()));
+        }
         Ok(id.to_string())
     }
 }
@@ -1536,9 +1551,29 @@ fn text_of(message: &Value) -> String {
     blocks.filter(|b| b["type"] == "text").filter_map(|b| b["text"].as_str()).collect::<Vec<_>>().join("\n")
 }
 
+fn result_sections(runs: &[Arc<subagent::Run>]) -> String {
+    let sections: Vec<String> = runs.iter().map(|r| format!("## {} ({})\n\n{}", r.label, r.id, r.result_text())).collect();
+    sections.join("\n\n")
+}
+
+/// Stops the runs of the chunk whose spawn failed, and keeps the answers of earlier chunks, which have finished.
+fn stop_after_failed_spawn(error: String, started: &[Arc<subagent::Run>], finished: &[Arc<subagent::Run>]) -> String {
+    let mut message = error;
+    if !started.is_empty() {
+        started.iter().for_each(|run| run.stop());
+        // A stopped background run still reports as a follow-up, so the model needs its id.
+        let ids: Vec<&str> = started.iter().map(|run| run.id.as_str()).collect();
+        message = format!("{message} Stopped the ones already started: {}.", ids.join(", "));
+    }
+    if !finished.is_empty() {
+        message = format!("{message}\n\nEarlier subagents finished:\n\n{}", result_sections(finished));
+    }
+    message
+}
+
 /// Asks `request`'s model for a topic and saves `project｜topic` as the session name.
 fn name_session(client: &Client, session: &Session, cwd: &Path, request: &Value) -> Result<String, String> {
-    let reply = client.send(request, &AtomicBool::new(false), &mut |_| {})?;
+    let reply = client.send_quiet(request, &AtomicBool::new(false))?;
     let text = text_of(&reply.message);
     let topic = text.lines().next().unwrap_or_default().trim().trim_matches('"');
     if topic.is_empty() {
