@@ -401,7 +401,7 @@ fn run(options: Options) -> Result<(), String> {
         max_tokens: 0,
         cheap_model: String::new(),
         reviewer_model: String::new(),
-        fast: settings.fast,
+        speed: settings.speed.clone(),
         cache_ttl: settings.cache_ttl.clone(),
         auto_compact: settings.auto_compact,
         reserve_tokens: settings.reserve_tokens,

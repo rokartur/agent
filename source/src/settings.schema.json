@@ -8,7 +8,7 @@
     "$schema": { "type": "string" },
     "model": { "type": "string", "default": "claude-opus-5-5" },
     "thinking": { "enum": ["off", "minimal", "low", "medium", "high", "xhigh", "max"], "default": "high" },
-    "fast": { "type": "boolean", "default": false, "description": "Anthropic fast output (speed: fast), billed at a higher rate." },
+    "speed": { "enum": ["standard", "fast", "ultrafast"], "default": "standard", "description": "Faster output at a higher price: Anthropic speed fast (ultrafast counts as fast), OpenAI Codex service_tier priority or ultrafast." },
     "cache_ttl": { "enum": ["5m", "1h"], "default": "5m", "description": "Anthropic prompt cache lifetime; 1h writes cost more." },
     "permission_mode": { "enum": ["ask", "auto", "full access"], "default": "ask" },
     "reviewer_model": { "type": "string", "default": "", "description": "Model for the auto-mode reviewer; empty means the provider's small model." },
@@ -51,6 +51,37 @@
     "update_channel": { "enum": ["latest", "pre-release", "off"], "default": "latest" },
     "prune_sessions": { "enum": ["never", "24h", "3d", "7d", "14d", "30d"], "default": "never", "description": "Delete saved sessions untouched this long, at start." },
     "on_start": { "type": "array", "items": { "type": "string" }, "default": [], "description": "Shell commands the TUI runs in the background at start." },
+    "custom_providers": {
+      "type": "array",
+      "default": [],
+      "description": "OpenAI-compatible Chat Completions or Anthropic-compatible Messages endpoints. Models show as <name>/<model id>. A preset name (README lists them, e.g. ollama, groq, deepseek) fills in base_url and api_key_env.",
+      "items": {
+        "type": "object",
+        "required": ["name"],
+        "additionalProperties": false,
+        "properties": {
+          "name": { "type": "string", "description": "Not anthropic, openai-codex or openrouter, and without a slash." },
+          "base_url": { "type": "string", "description": "Up to /v1, e.g. http://127.0.0.1:11434/v1." },
+          "api_key_env": { "type": "string", "default": "", "description": "Name of the environment variable that holds the key; empty sends no key." },
+          "api": { "enum": ["openai", "anthropic"], "default": "openai", "description": "openai sends Chat Completions to {base_url}/chat/completions; anthropic sends Messages to {base_url}/v1/messages with x-api-key." },
+          "models": {
+            "type": "array",
+            "default": [],
+            "description": "Empty means GET {base_url}/models lists them.",
+            "items": {
+              "type": "object",
+              "required": ["id"],
+              "additionalProperties": false,
+              "properties": {
+                "id": { "type": "string" },
+                "context_window": { "type": "integer", "minimum": 1, "default": 32768 },
+                "max_tokens": { "type": "integer", "minimum": 1, "default": 16384 }
+              }
+            }
+          }
+        }
+      }
+    },
     "lsp": {
       "type": "object",
       "description": "Language name to the server that checks a file after each edit. Built in: typescript, rust, swift, go, python, cpp, php. A field you leave out keeps its built-in value; a new name adds a language.",

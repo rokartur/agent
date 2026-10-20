@@ -4,7 +4,61 @@ use serde_json::Value;
 const CODEX_MAX_TOKENS: u64 = 128_000;
 
 /// The providers this agent can talk to.
-pub const PROVIDERS: [&str; 3] = ["anthropic", "openai-codex", "openrouter"];
+pub const PROVIDERS: [&str; 4] = ["anthropic", "openai-codex", "openrouter", "github-copilot"];
+pub struct Preset {
+    pub name: &'static str,
+    pub base_url: &'static str,
+    /// Empty for local servers, which take no key.
+    pub api_key_env: &'static str,
+}
+
+/// OpenAI-compatible providers `custom_providers` can name without a `base_url`; URLs and variables as jcode and pi use them.
+pub const PRESETS: [Preset; 40] = [
+    Preset { name: "groq", base_url: "https://api.groq.com/openai/v1", api_key_env: "GROQ_API_KEY" },
+    Preset { name: "cerebras", base_url: "https://api.cerebras.ai/v1", api_key_env: "CEREBRAS_API_KEY" },
+    Preset { name: "mistral", base_url: "https://api.mistral.ai/v1", api_key_env: "MISTRAL_API_KEY" },
+    Preset { name: "xai", base_url: "https://api.x.ai/v1", api_key_env: "XAI_API_KEY" },
+    Preset { name: "deepseek", base_url: "https://api.deepseek.com", api_key_env: "DEEPSEEK_API_KEY" },
+    Preset { name: "together", base_url: "https://api.together.xyz/v1", api_key_env: "TOGETHER_API_KEY" },
+    Preset { name: "fireworks", base_url: "https://api.fireworks.ai/inference/v1", api_key_env: "FIREWORKS_API_KEY" },
+    Preset { name: "deepinfra", base_url: "https://api.deepinfra.com/v1/openai", api_key_env: "DEEPINFRA_API_KEY" },
+    Preset { name: "novita", base_url: "https://api.novita.ai/openai", api_key_env: "NOVITA_API_KEY" },
+    Preset { name: "perplexity", base_url: "https://api.perplexity.ai", api_key_env: "PERPLEXITY_API_KEY" },
+    Preset { name: "huggingface", base_url: "https://router.huggingface.co/v1", api_key_env: "HF_TOKEN" },
+    Preset { name: "nvidia", base_url: "https://integrate.api.nvidia.com/v1", api_key_env: "NVIDIA_API_KEY" },
+    Preset { name: "baseten", base_url: "https://inference.baseten.co/v1", api_key_env: "BASETEN_API_KEY" },
+    Preset { name: "nebius", base_url: "https://api.tokenfactory.nebius.com/v1", api_key_env: "NEBIUS_API_KEY" },
+    Preset { name: "scaleway", base_url: "https://api.scaleway.ai/v1", api_key_env: "SCALEWAY_API_KEY" },
+    Preset { name: "stackit", base_url: "https://api.openai-compat.model-serving.eu01.onstackit.cloud/v1", api_key_env: "STACKIT_API_KEY" },
+    Preset { name: "chutes", base_url: "https://llm.chutes.ai/v1", api_key_env: "CHUTES_API_KEY" },
+    Preset { name: "cortecs", base_url: "https://api.cortecs.ai/v1", api_key_env: "CORTECS_API_KEY" },
+    Preset { name: "fpt", base_url: "https://mkp-api.fptcloud.com", api_key_env: "FPT_API_KEY" },
+    Preset { name: "firmware", base_url: "https://app.frogbot.ai/api/v1", api_key_env: "FIRMWARE_API_KEY" },
+    Preset { name: "302ai", base_url: "https://api.302.ai/v1", api_key_env: "302AI_API_KEY" },
+    Preset { name: "conifer", base_url: "https://api.conifer.build/v1", api_key_env: "CONIFER_API_KEY" },
+    Preset { name: "celeris", base_url: "https://inference.celeris.ai/celeris-1/v1", api_key_env: "CELERIS_API_KEY" },
+    Preset { name: "orcarouter", base_url: "https://api.orcarouter.ai/v1", api_key_env: "ORCAROUTER_API_KEY" },
+    Preset { name: "vercel-ai-gateway", base_url: "https://ai-gateway.vercel.sh/v1", api_key_env: "AI_GATEWAY_API_KEY" },
+    Preset { name: "opencode", base_url: "https://opencode.ai/inference/v1", api_key_env: "OPENCODE_API_KEY" },
+    Preset { name: "opencode-go", base_url: "https://opencode.ai/inference/go/v1", api_key_env: "OPENCODE_API_KEY" },
+    Preset { name: "moonshotai", base_url: "https://api.moonshot.ai/v1", api_key_env: "MOONSHOT_API_KEY" },
+    Preset { name: "moonshotai-cn", base_url: "https://api.moonshot.cn/v1", api_key_env: "MOONSHOT_API_KEY" },
+    Preset { name: "kimi-coding", base_url: "https://api.kimi.com/coding/v1", api_key_env: "KIMI_API_KEY" },
+    Preset { name: "zai", base_url: "https://api.z.ai/api/coding/paas/v4", api_key_env: "ZAI_API_KEY" },
+    Preset { name: "zai-coding-cn", base_url: "https://open.bigmodel.cn/api/coding/paas/v4", api_key_env: "ZAI_CODING_CN_API_KEY" },
+    Preset { name: "minimax", base_url: "https://api.minimax.io/v1", api_key_env: "MINIMAX_API_KEY" },
+    Preset { name: "minimax-cn", base_url: "https://api.minimaxi.com/v1", api_key_env: "MINIMAX_CN_API_KEY" },
+    Preset { name: "alibaba-coding-plan", base_url: "https://coding-intl.dashscope.aliyuncs.com/v1", api_key_env: "BAILIAN_CODING_PLAN_API_KEY" },
+    Preset { name: "qwen-token-plan", base_url: "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1", api_key_env: "QWEN_TOKEN_PLAN_API_KEY" },
+    Preset { name: "xiaomi", base_url: "https://api.xiaomimimo.com/v1", api_key_env: "XIAOMI_API_KEY" },
+    Preset { name: "ant-ling", base_url: "https://api.ant-ling.com/v1", api_key_env: "ANT_LING_API_KEY" },
+    Preset { name: "ollama", base_url: "http://127.0.0.1:11434/v1", api_key_env: "" },
+    Preset { name: "lmstudio", base_url: "http://127.0.0.1:1234/v1", api_key_env: "" },
+];
+/// For a custom provider's model whose list gives no window; Ollama's `/v1/models` never does.
+pub const DEFAULT_CONTEXT_WINDOW: u64 = 32_768;
+pub const DEFAULT_MAX_TOKENS: u64 = 16_384;
+
 /// OpenRouter's routers (`openrouter/auto`) list no output limit.
 const OPENROUTER_MAX_TOKENS: u64 = 32_000;
 
@@ -94,6 +148,17 @@ pub fn parse_openrouter(body: &Value) -> Vec<Model> {
     models
 }
 
+/// An OpenAI-compatible `GET /models` as `<provider>/<id>`; `context_length` is a common extension, not the standard.
+pub fn parse_openai(provider: &str, body: &Value) -> Vec<Model> {
+    let mut models = Vec::new();
+    for m in body["data"].as_array().into_iter().flatten() {
+        let Some(id) = m["id"].as_str() else { continue };
+        let context_window = m["context_length"].as_u64().or(m["context_window"].as_u64()).unwrap_or(DEFAULT_CONTEXT_WINDOW);
+        models.push(Model { provider: provider.into(), id: format!("{provider}/{id}"), name: id.into(), context_window, max_tokens: DEFAULT_MAX_TOKENS, accounts: Vec::new(), price: None });
+    }
+    models
+}
+
 /// None for routers like `openrouter/auto`, which list -1 since the routed model decides.
 fn openrouter_price(pricing: &Value) -> Option<Price> {
     let mut long_prompt = Vec::new();
@@ -179,6 +244,14 @@ mod tests {
 
     fn model(provider: &str, id: &str) -> Model {
         Model { provider: provider.into(), id: id.into(), name: id.into(), context_window: 1, max_tokens: 1, accounts: Vec::new(), price: None }
+    }
+
+    #[test]
+    fn an_openai_model_list_prefixes_ids_and_reads_either_context_field() {
+        let body = json!({"data": [{"id": "a", "context_length": 8192}, {"id": "b", "context_window": 4096}, {"id": "c"}, {"object": "model"}]});
+        let models = parse_openai("groq", &body);
+        let listed: Vec<_> = models.iter().map(|m| (m.id.as_str(), m.name.as_str(), m.context_window)).collect();
+        assert_eq!(listed, [("groq/a", "a", 8192), ("groq/b", "b", 4096), ("groq/c", "c", DEFAULT_CONTEXT_WINDOW)]);
     }
 
     #[test]

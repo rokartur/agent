@@ -180,8 +180,8 @@ pub struct Agent {
     pub cheap_model: String,
     /// Auto-mode reviews: `reviewer_model` from settings, else `cheap_model`.
     pub reviewer_model: String,
-    /// Sends `speed: "fast"`; only Anthropic models that offer fast mode accept it.
-    pub fast: bool,
+    /// One of `SPEEDS`; anything but "standard" goes out as the request's `speed`, which `api` maps per provider.
+    pub speed: String,
     pub cache_ttl: String,
     pub auto_compact: bool,
     pub reserve_tokens: u64,
@@ -406,8 +406,8 @@ impl Agent {
             let messages = condense::view(&self.messages, &self.condensed);
             let (system, tools) = self.system_and_tools();
             let mut request = api::request(&self.model, self.max_tokens, &self.effort, &self.cache_ttl, &system, &prompt::cwd_section(&self.cwd, &self.extra_dirs), &tools, &messages);
-            if self.fast {
-                request["speed"] = json!("fast");
+            if self.speed != "standard" {
+                request["speed"] = json!(self.speed);
             }
             let mut reply = self.client.send(&request, &self.abort, &mut |delta| match delta {
                 Delta::Text(text) => emit(Event::Text(text.to_string())),
@@ -1021,7 +1021,7 @@ impl Agent {
         self.trusted_projects = settings.trusted_projects.clone();
         self.model = settings.model.clone();
         self.effort = settings.thinking.clone();
-        self.fast = settings.fast;
+        self.speed = settings.speed.clone();
         self.cache_ttl = settings.cache_ttl.clone();
         self.context_window = settings.context_window(model);
         self.max_tokens = model.max_tokens;

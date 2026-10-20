@@ -13,7 +13,13 @@ curl -fsSL https://agent.rokartur.com/install.sh | sh
 
 A coding agent in one Rust binary. No Node. No Electron.
 
-You already pay for Claude or ChatGPT. Log in. That's the setup. Prefer pay as you go? Paste an Anthropic or OpenRouter API key, and every OpenRouter model is in `/model`.
+You already pay for Claude, ChatGPT or GitHub Copilot. Log in. That's the setup. Prefer pay as you go? Paste an Anthropic or OpenRouter API key, and every OpenRouter model is in `/model`. Any OpenAI- or Anthropic-compatible server works too, local ones included:
+
+```json
+"custom_providers": [{"name": "ollama"}, {"name": "groq"}]
+```
+
+Known names fill in the URL and the key variable: `ollama`, `lmstudio`, `groq`, `cerebras`, `mistral`, `xai`, `deepseek`, `together`, `fireworks`, `deepinfra`, `novita`, `perplexity`, `huggingface`, `nvidia`, `baseten`, `nebius`, `scaleway`, `stackit`, `chutes`, `cortecs`, `fpt`, `firmware`, `302ai`, `conifer`, `celeris`, `orcarouter`, `vercel-ai-gateway`, `opencode`, `opencode-go`, `moonshotai`, `moonshotai-cn`, `kimi-coding`, `zai`, `zai-coding-cn`, `minimax`, `minimax-cn`, `alibaba-coding-plan`, `qwen-token-plan`, `xiaomi`, `ant-ling`. For another server, set `base_url` and, if it needs a key, `api_key_env`. For an Anthropic Messages endpoint, add `"api": "anthropic"`. Their models show in `/model` as `<name>/<model id>`.
 
 ## Features
 
@@ -62,7 +68,7 @@ Same model (Claude Opus 5.5, medium thinking), same prompt, two coding tasks, 6 
 /voice      talk instead of type (whisper.cpp)
 /caveman    answers without the fluff
 /ponytail   writes less code
-/fast       faster output at a higher price (Anthropic)
+/fast       standard, fast, ultrafast: quicker output, higher price
 ```
 
 ## Scripts and CI

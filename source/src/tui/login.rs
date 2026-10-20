@@ -7,10 +7,11 @@ use super::panel;
 use super::render::{BRIGHT, Line, MUTED, span, wrap};
 use crate::api::AccountView;
 use crate::api::accounts::{Account, Secret};
+use crate::api::copilot;
 use crate::api::oauth::{self, Pending, Tokens};
 
 const KINDS: [&str; 2] = ["Account (subscription)", "API key"];
-const METHODS: [Method; 4] = [Method::ClaudeMax, Method::AnthropicKey, Method::OpenRouterKey, Method::Codex];
+const METHODS: [Method; 5] = [Method::ClaudeMax, Method::AnthropicKey, Method::OpenRouterKey, Method::Codex, Method::Copilot];
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Method {
@@ -18,6 +19,7 @@ enum Method {
     AnthropicKey,
     OpenRouterKey,
     Codex,
+    Copilot,
 }
 
 impl Method {
@@ -27,6 +29,7 @@ impl Method {
             Method::AnthropicKey => "Anthropic API key",
             Method::OpenRouterKey => "OpenRouter API key",
             Method::Codex => "ChatGPT Plus/Pro (Codex)",
+            Method::Copilot => "GitHub Copilot",
         }
     }
 
@@ -55,10 +58,12 @@ pub enum Login {
         title: &'static str,
         input: Editor,
     },
-    /// A token exchange or the Codex browser callback is running; Esc sets `cancel`. `url` is the Codex sign-in page.
+    /// A token exchange, the Codex browser callback or the Copilot device poll is running; Esc sets `cancel`.
+    /// `url` is the sign-in page, `code` what Copilot asks the user to enter there.
     Waiting {
         cancel: Arc<AtomicBool>,
         url: Option<String>,
+        code: Option<String>,
     },
     /// `overwrite` is set once the user confirmed replacing the saved account with the typed name.
     Name {
@@ -84,6 +89,8 @@ pub enum Action {
         exchange: Exchange,
     },
     Save(Account),
+    /// Asks GitHub for a Copilot device code off the UI thread, then hands it to `device`.
+    StartDevice(Arc<AtomicBool>),
 }
 
 impl Login {
@@ -158,9 +165,25 @@ impl Login {
         if !matches!(self, Login::Waiting { cancel, .. } if Arc::ptr_eq(cancel, exchange_cancel)) {
             return Ok(());
         }
-        let name = if provider == "anthropic" { "claude" } else { "codex" };
+        let name = match provider {
+            "anthropic" => "claude",
+            copilot::PROVIDER => "copilot",
+            _ => "codex",
+        };
         *self = Login::Name { provider, secret: Secret::OAuth(result?), input: Editor::from_text(name), overwrite: false };
         Ok(())
+    }
+
+    /// Shows the Copilot device code, opens its sign-in page and polls until the user approves it.
+    pub fn device(&mut self, start_cancel: &Arc<AtomicBool>, device: copilot::Device) -> Action {
+        let Login::Waiting { cancel, url, code } = self else { return Action::None };
+        if !Arc::ptr_eq(cancel, start_cancel) {
+            return Action::None;
+        }
+        oauth::open_browser(&device.verification_uri);
+        *url = Some(device.verification_uri.clone());
+        *code = Some(device.user_code.clone());
+        Action::Exchange { provider: copilot::PROVIDER, cancel: cancel.clone(), exchange: Box::new(move |cancel| copilot::finish(&device, cancel)) }
     }
 
     /// On the naming step, true when the typed name is taken for its provider and the user has not confirmed replacing
@@ -200,15 +223,20 @@ impl Login {
                 let url = pending.url.clone();
                 oauth::open_browser(&url);
                 let cancel = Arc::new(AtomicBool::new(false));
-                *self = Login::Waiting { cancel: cancel.clone(), url: Some(url) };
+                *self = Login::Waiting { cancel: cancel.clone(), url: Some(url), code: None };
                 Action::Exchange { provider: "openai-codex", cancel, exchange: Box::new(move |cancel| oauth::finish_codex(&pending, cancel)) }
+            }
+            Method::Copilot => {
+                let cancel = Arc::new(AtomicBool::new(false));
+                *self = Login::Waiting { cancel: cancel.clone(), url: None, code: None };
+                Action::StartDevice(cancel)
             }
         }
     }
 
     fn submit(&mut self) -> Action {
         let cancel = Arc::new(AtomicBool::new(false));
-        match std::mem::replace(self, Login::Waiting { cancel: cancel.clone(), url: None }) {
+        match std::mem::replace(self, Login::Waiting { cancel: cancel.clone(), url: None, code: None }) {
             Login::ClaudeCode { pending, input } => {
                 let code = input.text();
                 Action::Exchange { provider: "anthropic", cancel, exchange: Box::new(move |_| oauth::finish_claude(&pending, &code)) }
@@ -240,9 +268,12 @@ impl Login {
                 ("Claude login".into(), vec![field("Code", input.field(Some('•')))], "paste the code#state shown after sign-in     enter continue     ctrl+y copy link     esc cancel")
             }
             Login::ApiKey { title, input, .. } => ((*title).into(), vec![field("Key", input.field(Some('•')))], "paste the key     enter continue     esc cancel"),
-            Login::Waiting { url, .. } => (
+            Login::Waiting { url, code, .. } => (
                 "Login".into(),
-                vec![panel::Row { left: "Waiting for the sign-in to finish…".into(), right: Vec::new() }],
+                match code {
+                    Some(code) => vec![field("Enter this code on the sign-in page", code.clone())],
+                    None => vec![panel::Row { left: "Waiting for the sign-in to finish…".into(), right: Vec::new() }],
+                },
                 if url.is_some() { "ctrl+y copy link     esc cancel" } else { "esc cancel" },
             ),
             Login::Name { input, overwrite: false, .. } => ("Account name".into(), vec![field("Name", input.field(None))], "enter save     esc cancel"),
@@ -337,7 +368,7 @@ mod tests {
         let mut login = Login::Kind { index: 0 };
         login.key(KeyCode::Enter.into());
         let Login::Choose { api, query, .. } = &login else { panic!("expected the method list") };
-        assert_eq!(methods(*api, query), [Method::ClaudeMax, Method::Codex]);
+        assert_eq!(methods(*api, query), [Method::ClaudeMax, Method::Codex, Method::Copilot]);
         login.paste("codex");
         let Login::Choose { api, query, .. } = &login else { panic!("expected the method list") };
         assert_eq!(methods(*api, query), [Method::Codex]);
@@ -348,9 +379,9 @@ mod tests {
     #[test]
     fn sign_in_link_is_shown_whole_in_the_panel_and_copied_with_ctrl_y() {
         let url = format!("https://auth.example/{}", "x".repeat(150));
-        let mut login = Login::Waiting { cancel: Arc::default(), url: Some(url.clone()) };
+        let mut login = Login::Waiting { cancel: Arc::default(), url: Some(url.clone()), code: Some("AB12-CD34".into()) };
         let shown: String = login.render(60, 8).iter().flatten().map(|s| s.text.as_str()).collect();
-        assert!(shown.contains(&url));
+        assert!(shown.contains(&url) && shown.contains("AB12-CD34"));
         let ctrl_y = KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL);
         assert!(matches!(login.key(ctrl_y), Action::Copy(copied) if copied == url));
     }
@@ -358,7 +389,7 @@ mod tests {
     #[test]
     fn an_older_exchange_finishing_leaves_the_new_login_waiting() {
         let current = Arc::default();
-        let mut login = Login::Waiting { cancel: Arc::clone(&current), url: None };
+        let mut login = Login::Waiting { cancel: Arc::clone(&current), url: None, code: None };
         assert_eq!(login.finished("openai-codex", &Arc::default(), Err("cancelled".into())), Ok(()));
         assert!(matches!(login, Login::Waiting { .. }));
         assert_eq!(login.finished("openai-codex", &current, Err("denied".into())), Err("denied".into()));

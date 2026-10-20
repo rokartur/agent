@@ -8,10 +8,12 @@ use std::time::{Duration, Instant};
 
 pub mod accounts;
 pub mod codex;
+pub mod copilot;
 pub mod models;
 pub mod oauth;
+pub mod openai_chat;
 
-use crate::settings::Settings;
+use crate::settings::{CustomApi, CustomProvider, Settings};
 use accounts::{Account, Candidate, Pick, Policy, Secret, Usage as Windows};
 use models::Model;
 
@@ -56,6 +58,7 @@ struct State {
     fallback_model: String,
     headroom: bool,
     provider_order: Vec<&'static str>,
+    custom_providers: Vec<CustomProvider>,
 }
 
 #[derive(Default)]
@@ -140,12 +143,18 @@ impl Client {
     /// Builds the model catalog live from every account's model list; returns one error per list that failed.
     pub fn load_catalog(&self) -> Vec<String> {
         let accounts: Vec<Account> = self.state.lock().unwrap().accounts.iter().filter(|a| a.provider != "openrouter").cloned().collect();
+        let custom_providers = self.state.lock().unwrap().custom_providers.clone();
         // One request per account, about 0.3-0.7 s each; in parallel the load waits only for the slowest.
-        let (openrouter, listed) = std::thread::scope(|scope| {
+        let (openrouter, listed, custom_listed) = std::thread::scope(|scope| {
             // Public list, so OpenRouter models show in the picker before /login.
             let openrouter = scope.spawn(|| fetch_models(models_agent().get(format!("{}/v1/models", self.openrouter_base)), models::parse_openrouter));
             let lists: Vec<_> = accounts.iter().map(|account| scope.spawn(|| self.list_models(account))).collect();
-            (openrouter.join().expect("model list thread"), lists.into_iter().map(|l| l.join().expect("model list thread")).collect::<Vec<_>>())
+            let custom_lists: Vec<_> = custom_providers.iter().map(|provider| scope.spawn(|| custom_models(provider))).collect();
+            (
+                openrouter.join().expect("model list thread"),
+                lists.into_iter().map(|l| l.join().expect("model list thread")).collect::<Vec<_>>(),
+                custom_lists.into_iter().map(|l| l.join().expect("model list thread")).collect::<Vec<_>>(),
+            )
         });
         let mut catalog = Vec::new();
         let mut errors = Vec::new();
@@ -157,6 +166,16 @@ impl Client {
             match list {
                 Ok(models) => models::merge(&mut catalog, models, &account.name),
                 Err(error) => errors.push(format!("{}: {error}", key(account))),
+            }
+        }
+        for (provider, list) in custom_providers.iter().zip(custom_listed) {
+            match list {
+                Ok(models) => {
+                    // A provider named like an OpenRouter vendor (deepseek) lists the same ids; the direct one wins.
+                    catalog.retain(|known| !models.iter().any(|model| model.id == known.id));
+                    catalog.extend(models);
+                }
+                Err(error) => errors.push(format!("{}: {error}", provider.name)),
             }
         }
         catalog.extend(models::free_routers(&catalog));
@@ -180,6 +199,13 @@ impl Client {
                 .header("anthropic-version", "2023-06-01")
                 .header("authorization", format!("Bearer {}", tokens.access))
                 .header("anthropic-beta", "oauth-2025-04-20"),
+            (Secret::OAuth(tokens), copilot::PROVIDER) => {
+                let mut request = http.get(format!("{}/models", copilot::base_url(&tokens.access))).header("authorization", format!("Bearer {}", tokens.access));
+                for (name, value) in copilot::HEADERS {
+                    request = request.header(name, value);
+                }
+                return fetch_models(request, copilot::parse_models);
+            }
             (Secret::OAuth(tokens), _) => http
                 // An old client_version gets an empty list, a missing one a 400.
                 .get(format!("{}/codex/models?client_version=0.160.0", self.chatgpt_base))
@@ -202,6 +228,7 @@ impl Client {
         state.pinned = settings.default_accounts.clone();
         state.headroom = settings.headroom && crate::process::installed("headroom");
         state.provider_order = settings.sort_providers(&models::PROVIDERS);
+        state.custom_providers = settings.custom_providers.clone();
     }
 
     fn reload(&self, mut saved: Vec<Account>) {
@@ -268,6 +295,11 @@ impl Client {
             if streamed && shown {
                 return Err(format!("{} The reply broke off partway and was not retried.", error.message));
             }
+            // Which plans and models take a Codex tier changes often, so a rejected one retries once at standard speed.
+            if account.provider == "openai-codex" && error.message.contains("service_tier") && request.as_object_mut().expect("a request is an object").remove("speed").is_some() {
+                on_delta(Delta::Notice(&format!("{} Retrying at standard speed.", error.message)));
+                continue;
+            }
             let key = key(&account);
             // A quota error moves the same request to the next account once; a second one waits like any retry.
             if error.quota && !rate_limited.contains(&key) {
@@ -306,6 +338,10 @@ impl Client {
         }
     }
 
+    fn custom_provider(&self, name: &str) -> Option<CustomProvider> {
+        self.state.lock().unwrap().custom_providers.iter().find(|p| p.name == name).cloned()
+    }
+
     fn model_of(&self, request: &Value) -> Result<&Model, String> {
         let id = request["model"].as_str().unwrap_or_default();
         self.catalog().iter().find(|m| m.id == id).ok_or(format!("Unknown model {id}."))
@@ -314,6 +350,9 @@ impl Client {
     /// Picks the account for this request and reports a change of account as "Switched to <name>: <reason>".
     fn choose(&self, model: &Model, fell_back: bool, on_delta: &mut dyn FnMut(Delta)) -> Result<Choice, String> {
         let provider = model.provider.as_str();
+        if let Some(custom) = self.custom_provider(provider) {
+            return Ok(Choice::Use(Account { provider: custom.name.clone(), name: custom.name, secret: Secret::ApiKey(custom_key(&custom.api_key_env)?) }));
+        }
         let saved: Vec<Account> = self.state.lock().unwrap().accounts.iter().filter(|a| a.provider == provider).cloned().collect();
         if saved.is_empty() {
             let hint = match provider {
@@ -411,6 +450,7 @@ impl Client {
                 let refreshed = match slot.provider.as_str() {
                     "anthropic" => oauth::refresh_claude(&tokens.refresh),
                     "openai-codex" => oauth::refresh_codex(&tokens.refresh),
+                    copilot::PROVIDER => copilot::refresh(&tokens.refresh),
                     other => Err(format!("{other} has no OAuth refresh.")),
                 }
                 .map_err(|e| format!("Cannot refresh {}: {e} Use /login again.", slot.name))?;
@@ -438,13 +478,36 @@ impl Client {
         let headroom = self.state.lock().unwrap().headroom;
         let anthropic_base = if headroom { HEADROOM_URL } else { &self.anthropic_base };
         let chatgpt_base = if headroom { &format!("{HEADROOM_URL}/backend-api") } else { &self.chatgpt_base };
+        let custom = self.custom_provider(&account.provider);
         let (call, body) = match (account.provider.as_str(), &account.secret) {
+            (_, Secret::ApiKey(key)) if let Some(custom) = &custom => {
+                let id = request["model"].as_str().unwrap_or_default();
+                let id = id.split_once('/').map_or(id, |(_, id)| id);
+                if custom.api == CustomApi::Anthropic {
+                    let call = self.http.post(format!("{}/v1/messages", custom.base_url)).header("anthropic-version", "2023-06-01").header("x-api-key", key);
+                    let mut body = request.clone();
+                    body["model"] = json!(id);
+                    // Adaptive thinking, its effort and speed are Anthropic-only fields that other Messages servers reject.
+                    for field in ["thinking", "output_config", "speed"] {
+                        body.as_object_mut().expect("a request is an object").remove(field);
+                    }
+                    (call, body)
+                } else {
+                    let call = self.http.post(format!("{}/chat/completions", custom.base_url)).header("accept", "text/event-stream");
+                    let call = if key.is_empty() { call } else { call.header("authorization", format!("Bearer {key}")) };
+                    (call, openai_chat::request(request, id))
+                }
+            }
             ("anthropic", secret) => {
                 let call = self.http.post(format!("{anthropic_base}/v1/messages")).header("anthropic-version", "2023-06-01");
+                let mut body = request.clone();
+                // Anthropic has one fast tier.
+                if body["speed"] == "ultrafast" {
+                    body["speed"] = json!("fast");
+                }
                 match secret {
-                    Secret::ApiKey(key) => (call.header("x-api-key", key).header("anthropic-beta", THINKING_BETA), request.clone()),
+                    Secret::ApiKey(key) => (call.header("x-api-key", key).header("anthropic-beta", THINKING_BETA), body),
                     Secret::OAuth(tokens) => {
-                        let mut body = request.clone();
                         let mut system = vec![json!({"type": "text", "text": CLAUDE_CODE_IDENTITY})];
                         system.extend(body["system"].as_array().cloned().unwrap_or_default());
                         body["system"] = json!(system);
@@ -472,13 +535,26 @@ impl Client {
                     body["model"] = json!(first.id);
                     body["fallbacks"] = rest.iter().map(|m| json!({"model": m.id})).collect();
                 }
-                // Fast mode is an Anthropic API field, unknown to OpenRouter.
+                // Speed is an Anthropic API field, unknown to OpenRouter.
                 body.as_object_mut().expect("a request is an object").remove("speed");
                 // OpenRouter rejects the whole request when a non-Anthropic model gets block_binding.
                 if !body["model"].as_str().unwrap_or_default().starts_with("anthropic/")
                     && let Some(thinking) = body.get_mut("thinking").and_then(Value::as_object_mut)
                 {
                     thinking.remove("block_binding");
+                }
+                (call, body)
+            }
+            (copilot::PROVIDER, Secret::OAuth(tokens)) => {
+                let id = request["model"].as_str().unwrap_or_default();
+                let body = openai_chat::request(request, id.strip_prefix("github-copilot/").unwrap_or(id));
+                let mut call = self
+                    .http
+                    .post(format!("{}/chat/completions", copilot::base_url(&tokens.access)))
+                    .header("accept", "text/event-stream")
+                    .header("authorization", format!("Bearer {}", tokens.access));
+                for (name, value) in copilot::HEADERS.into_iter().chain(copilot::request_headers(&body)) {
+                    call = call.header(name, value);
                 }
                 (call, body)
             }
@@ -508,7 +584,12 @@ impl Client {
             let retryable = status == 408 || status == 429 || status >= 500;
             return Err(ApiError { message: format!("API error {status}: {}", text.trim()), retryable, quota });
         }
-        if account.provider == "openai-codex" { codex::parse_stream(&mut reader, abort, on_delta) } else { parse_stream(&mut reader, abort, on_delta) }
+        match account.provider.as_str() {
+            _ if custom.as_ref().is_some_and(|custom| custom.api == CustomApi::OpenAi) => openai_chat::parse_stream(&mut reader, abort, on_delta),
+            copilot::PROVIDER => openai_chat::parse_stream(&mut reader, abort, on_delta),
+            "openai-codex" => codex::parse_stream(&mut reader, abort, on_delta),
+            _ => parse_stream(&mut reader, abort, on_delta),
+        }
     }
 
     pub fn accounts(&self) -> Vec<AccountView> {
@@ -637,7 +718,38 @@ pub(crate) fn models_agent() -> ureq::Agent {
     ureq::Agent::config_builder().http_status_as_error(false).timeout_global(Some(Duration::from_secs(10))).build().into()
 }
 
-fn fetch_models(request: ureq::RequestBuilder<ureq::typestate::WithoutBody>, parse: fn(&Value) -> Vec<Model>) -> Result<Vec<Model>, String> {
+/// The key in `api_key_env`; a provider without one (a local server) gets an empty key and no Authorization header.
+fn custom_key(api_key_env: &str) -> Result<String, String> {
+    if api_key_env.is_empty() {
+        return Ok(String::new());
+    }
+    std::env::var(api_key_env).ok().filter(|key| !key.is_empty()).ok_or(format!("Set {api_key_env} to use this provider."))
+}
+
+/// The models `custom_providers` lists, or the server's `GET /models` when it lists none.
+fn custom_models(provider: &CustomProvider) -> Result<Vec<Model>, String> {
+    if provider.models.is_empty() {
+        let key = custom_key(&provider.api_key_env)?;
+        let request = match provider.api {
+            CustomApi::OpenAi if key.is_empty() => models_agent().get(format!("{}/models", provider.base_url)),
+            CustomApi::OpenAi => models_agent().get(format!("{}/models", provider.base_url)).header("authorization", format!("Bearer {key}")),
+            CustomApi::Anthropic => models_agent().get(format!("{}/v1/models", provider.base_url)).header("anthropic-version", "2023-06-01").header("x-api-key", &key),
+        };
+        return fetch_models(request, |body| models::parse_openai(&provider.name, body));
+    }
+    let listed = provider.models.iter().map(|m| Model {
+        provider: provider.name.clone(),
+        id: format!("{}/{}", provider.name, m.id),
+        name: m.id.clone(),
+        context_window: m.context_window,
+        max_tokens: m.max_tokens,
+        accounts: Vec::new(),
+        price: None,
+    });
+    Ok(listed.collect())
+}
+
+fn fetch_models(request: ureq::RequestBuilder<ureq::typestate::WithoutBody>, parse: impl Fn(&Value) -> Vec<Model>) -> Result<Vec<Model>, String> {
     let mut response = request.call().map_err(|e| format!("Model list request failed: {e}."))?;
     let status = response.status().as_u16();
     if status != 200 {
@@ -1079,6 +1191,9 @@ mod tests {
                         200,
                         r#"{"data":[{"id":"claude-haiku-9","max_input_tokens":200000,"max_tokens":8192},{"id":"a/one:free","context_length":1000,"supported_parameters":["tools"]},{"id":"b/two:free","context_length":1000,"supported_parameters":["tools"]}]}"#,
                     )
+                } else if request_line.starts_with("GET") {
+                    // Codex and Claude usage windows; unknown usage does not block a request.
+                    (404, "{}")
                 } else {
                     // A test that only reads the doctor lines has dropped the receiver.
                     let _ = sent.send(serde_json::from_slice(&request).unwrap());
@@ -1129,6 +1244,23 @@ mod tests {
         assert_eq!(ping["fallbacks"], json!([{"model": "b/two:free"}]));
     }
 
+    #[test]
+    fn a_custom_provider_model_replaces_the_openrouter_model_with_the_same_id() {
+        let home = std::env::temp_dir().join(format!("agent-custom-clash-{}", std::process::id()));
+        let mut client = Client::new(&home).unwrap();
+        let (base, _) = mock_provider(200, PONG);
+        client.openrouter_base = base;
+        let model = crate::settings::CustomModel { id: "one:free".into(), context_window: 1, max_tokens: 1 };
+        client.state.lock().unwrap().custom_providers = vec![CustomProvider { name: "a".into(), base_url: "http://x".into(), api_key_env: String::new(), api: CustomApi::OpenAi, models: vec![model] }];
+
+        let errors = client.load_catalog();
+        std::fs::remove_dir_all(&home).ok();
+
+        assert!(errors.is_empty(), "{errors:?}");
+        let same_id: Vec<&str> = client.catalog().iter().filter(|m| m.id == "a/one:free").map(|m| m.provider.as_str()).collect();
+        assert_eq!(same_id, ["a"]);
+    }
+
     /// An Anthropic account answering `status` on every attempt, with an OpenRouter account and `a/one:free` as `fallback_model`.
     fn send_with_failover(status: u16, body: &'static str) -> (Result<Reply, String>, Vec<String>, std::sync::mpsc::Receiver<Value>) {
         let home = std::env::temp_dir().join(format!("agent-failover-{status}-{}", std::process::id()));
@@ -1170,5 +1302,71 @@ mod tests {
         assert!(sent.is_err_and(|error| error.contains("401")));
         assert!(fallback_requests.try_recv().is_err());
         assert!(notices.iter().all(|n| !n.contains("Switched")), "{notices:?}");
+    }
+
+    #[test]
+    fn a_custom_provider_model_goes_to_its_chat_completions_endpoint_without_the_name_prefix() {
+        let home = std::env::temp_dir().join(format!("agent-custom-{}", std::process::id()));
+        let client = Client::new(&home).unwrap();
+        let (base, requests) = mock_provider(200, "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"pong\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n");
+        let local = CustomProvider { name: "ollama".into(), base_url: format!("{base}/v1"), api_key_env: String::new(), api: CustomApi::OpenAi, models: Vec::new() };
+        assert!(client.catalog.set(vec![Model { provider: "ollama".into(), id: "ollama/qwen3:8b".into(), ..Model::default() }]).is_ok());
+        client.state.lock().unwrap().custom_providers = vec![local];
+
+        let reply = client.send(&plain_request("ollama/qwen3:8b", "Be brief.", "ping", 10), &AtomicBool::new(false), &mut |_| {});
+        std::fs::remove_dir_all(&home).ok();
+
+        let reply = reply.unwrap();
+        assert_eq!(reply.message["content"], json!([{"type": "text", "text": "pong"}]));
+        assert_eq!((reply.provider.as_str(), reply.model.as_str()), ("ollama", "ollama/qwen3:8b"));
+        assert_eq!(requests.recv().unwrap()["model"], "qwen3:8b");
+    }
+
+    #[test]
+    fn an_anthropic_compatible_provider_gets_a_messages_request_without_anthropic_only_fields() {
+        let home = std::env::temp_dir().join(format!("agent-custom-anthropic-{}", std::process::id()));
+        let client = Client::new(&home).unwrap();
+        let (base, requests) = mock_provider(200, PONG);
+        let minimax = CustomProvider { name: "minimax".into(), base_url: base, api_key_env: String::new(), api: CustomApi::Anthropic, models: Vec::new() };
+        assert!(client.catalog.set(vec![Model { provider: "minimax".into(), id: "minimax/MiniMax-M2".into(), ..Model::default() }]).is_ok());
+        client.state.lock().unwrap().custom_providers = vec![minimax];
+        let mut request = plain_request("minimax/MiniMax-M2", "Be brief.", "ping", 10);
+        request["thinking"] = json!({"type": "adaptive"});
+        request["speed"] = json!("fast");
+
+        let reply = client.send(&request, &AtomicBool::new(false), &mut |_| {});
+        std::fs::remove_dir_all(&home).ok();
+
+        assert_eq!(reply.unwrap().provider, "minimax");
+        let sent = requests.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(sent["model"], "MiniMax-M2");
+        assert!(sent.get("thinking").is_none() && sent.get("speed").is_none(), "{sent}");
+    }
+
+    #[test]
+    fn a_rejected_codex_tier_retries_once_at_standard_speed() {
+        let home = std::env::temp_dir().join(format!("agent-tier-{}", std::process::id()));
+        let mut client = Client::new(&home).unwrap();
+        let (base, requests) = mock_provider(400, r#"{"error":{"message":"Unsupported service_tier: ultrafast"}}"#);
+        client.chatgpt_base = base;
+        let tokens = oauth::Tokens { access: "a".into(), refresh: "r".into(), expires: u64::MAX, account_id: None };
+        client.reload(vec![Account { provider: "openai-codex".into(), name: "pro".into(), secret: Secret::OAuth(tokens) }]);
+        assert!(client.catalog.set(vec![Model { provider: "openai-codex".into(), id: "gpt".into(), ..Model::default() }]).is_ok());
+        let mut request = plain_request("gpt", "Be brief.", "ping", 10);
+        request["speed"] = json!("ultrafast");
+
+        let mut notices = Vec::new();
+        let sent = client.send(&request, &AtomicBool::new(false), &mut |delta| {
+            if let Delta::Notice(text) = delta {
+                notices.push(text.to_string());
+            }
+        });
+        std::fs::remove_dir_all(&home).ok();
+
+        assert!(sent.is_err_and(|error| error.contains("service_tier")));
+        assert_eq!(requests.recv().unwrap()["service_tier"], "ultrafast");
+        assert_eq!(requests.recv_timeout(std::time::Duration::from_secs(5)).unwrap().get("service_tier"), None);
+        assert!(requests.try_recv().is_err());
+        assert!(notices.iter().any(|n| n.contains("Retrying at standard speed")), "{notices:?}");
     }
 }

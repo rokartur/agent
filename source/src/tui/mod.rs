@@ -40,7 +40,7 @@ use crate::api::oauth::Tokens;
 use crate::api::{AccountView, Client, Delta, Usage};
 use crate::image;
 use crate::settings::THINKING_LEVELS;
-use crate::settings::{self, CACHE_TTLS, CONFLICT_PRIORITIES, PROVIDER_SORTS, PRUNE_SESSIONS, Settings, model_key};
+use crate::settings::{self, CACHE_TTLS, CONFLICT_PRIORITIES, PROVIDER_SORTS, PRUNE_SESSIONS, SPEEDS, Settings, model_key};
 use crate::tools::bg::{Status as TerminalStatus, Terminal, Terminals};
 use crate::tools::goal::{Goal, Status as GoalStatus};
 use crate::tools::rtk::strip_ansi;
@@ -106,6 +106,11 @@ enum Msg {
         /// The exchange's cancel flag, which tells it apart from a newer /login.
         cancel: Arc<AtomicBool>,
         result: Result<Tokens, String>,
+    },
+    /// GitHub answered with a Copilot device code; `cancel` belongs to the /login that asked.
+    CopilotDevice {
+        cancel: Arc<AtomicBool>,
+        device: crate::api::copilot::Device,
     },
     /// Account usage arrived for /account.
     UsageFetched,
@@ -345,7 +350,7 @@ const BUILTIN_COMMANDS: &[(&str, MidTurn, &str)] = &[
     ("settings", MidTurn::Runs, "Open settings menu"),
     ("permissions", MidTurn::Runs, "<mode>: ask, auto or full access"),
     ("thinking", MidTurn::Runs, "<level>: Set thinking level"),
-    ("fast", MidTurn::Runs, "Toggle fast output: quicker, billed higher, Anthropic models with fast mode only"),
+    ("fast", MidTurn::Runs, "Step speed: standard, fast, ultrafast; quicker output, billed higher, on models that offer it"),
     ("ponytail", MidTurn::Runs, "<off | lite | full | ultra>: Set the ponytail level"),
     ("caveman", MidTurn::Runs, "<off | full | ultra | wenyan>: Set the caveman level"),
     ("voice", MidTurn::Runs, "Dictate in any language with whisper.cpp, Enter to stop"),
@@ -409,7 +414,7 @@ const SETTING_NAMES: [&str; 32] = [
     "Auto prune sessions",
     "Provider order",
     "Name conflicts prefer",
-    "Fast mode",
+    "Speed",
     "Prompt cache TTL",
     "Reviewer model",
     "Subagent model",
@@ -1293,6 +1298,11 @@ impl App {
                     self.push(Item::Error(error));
                 }
             }
+            Msg::CopilotDevice { cancel, device } => {
+                let Some(Panel::Login(login)) = self.panel.as_mut() else { return };
+                let action = login.device(&cancel, device);
+                self.login_action(action);
+            }
             Msg::UsageFetched | Msg::McpChanged => {}
             Msg::WorktreeRemoved(path, result) => match result {
                 Ok(()) => {
@@ -1844,8 +1854,8 @@ impl App {
             }
             "thinking" => self.push(Item::Error(format!("Unknown thinking level {args}. Levels: {}", THINKING_LEVELS.join(", ")))),
             "fast" => {
-                self.update_settings(|s| s.fast = !s.fast);
-                self.system("fast", if self.settings.fast { "Fast mode on" } else { "Fast mode off" });
+                self.update_settings(|s| s.speed = step(&SPEEDS, &s.speed.as_str(), true).to_string());
+                self.system("fast", format!("Speed: {}", self.settings.speed));
             }
             "ponytail" | "caveman" if args.is_empty() => {
                 let (level, levels) = if name == "ponytail" { (&self.settings.ponytail, PONYTAIL_LEVELS) } else { (&self.settings.caveman, CAVEMAN_LEVELS) };
@@ -2410,6 +2420,15 @@ impl App {
                     let _ = events.send(Msg::LoginFinished { provider, cancel, result });
                 });
             }
+            login::Action::StartDevice(cancel) => {
+                let events = self.events.clone();
+                std::thread::spawn(move || {
+                    let _ = match crate::api::copilot::start() {
+                        Ok(device) => events.send(Msg::CopilotDevice { cancel, device }),
+                        Err(error) => events.send(Msg::LoginFinished { provider: crate::api::copilot::PROVIDER, cancel, result: Err(error) }),
+                    };
+                });
+            }
             login::Action::Save(account) => {
                 self.panel = None;
                 let name = account.name.clone();
@@ -2719,7 +2738,7 @@ impl App {
             24 => s.prune_sessions = step(&PRUNE_SESSIONS, &s.prune_sessions.as_str(), forward).to_string(),
             25 => s.provider_sort = step(&PROVIDER_SORTS, &s.provider_sort.as_str(), forward).to_string(),
             26 => s.conflict_priority = step(&CONFLICT_PRIORITIES, &s.conflict_priority.as_str(), forward).to_string(),
-            27 => s.fast = !s.fast,
+            27 => s.speed = step(&SPEEDS, &s.speed.as_str(), forward).to_string(),
             28 => s.cache_ttl = step(&CACHE_TTLS, &s.cache_ttl.as_str(), forward).to_string(),
             31 => s.footer_cost = !s.footer_cost,
             _ => unreachable!("rows 0, 8, 12, 13, 29 and 30 open their own panels"),
@@ -2764,7 +2783,7 @@ impl App {
             choices(PRUNE_SESSIONS.map(String::from), &s.prune_sessions),
             [choices(PROVIDER_SORTS.map(String::from), &s.provider_sort), vec![span("   enter reorder", MUTED)]].concat(),
             choices(CONFLICT_PRIORITIES.map(String::from), &s.conflict_priority),
-            on_off_choices(s.fast),
+            choices(SPEEDS.map(String::from), &s.speed),
             choices(CACHE_TTLS.map(String::from), &s.cache_ttl),
             vec![span(reviewer_model, BRIGHT.bold())],
             vec![span(subagent_model, BRIGHT.bold())],
@@ -3700,6 +3719,10 @@ impl App {
         right.push(span(self.model().map_or(LOADING_MODELS.into(), models::short_label), MUTED));
         right.push(span(" ", PLAIN));
         right.push(span(&self.settings.thinking, thinking_style(&self.settings.thinking)));
+        // Fast tiers bill up to 6x, so the footer names the one in use.
+        if self.settings.speed != "standard" {
+            right.push(span(format!(" {}", self.settings.speed), WARN));
+        }
         if self.context_tokens > 0 {
             right.push(span(format!(" {} {percent}%", tokens(self.context_tokens)), MUTED));
         }

@@ -5,15 +5,15 @@ use std::time::Duration;
 
 use crate::agent::permissions::Mode;
 use crate::api::accounts::Policy;
-use crate::api::models::Model;
+use crate::api::models::{self, Model};
 
 /// Everything /settings edits, saved to ~/.agents/settings.json.
 #[derive(Clone, PartialEq, Debug)]
 pub struct Settings {
     pub model: String,
     pub thinking: String,
-    /// Anthropic's `speed: "fast"`: faster output at a higher price, on models that support it.
-    pub fast: bool,
+    /// One of `SPEEDS`: Anthropic's `speed: "fast"`, Codex's `service_tier`; faster output at a higher price.
+    pub speed: String,
     /// One of `CACHE_TTLS`, for every Anthropic cache breakpoint.
     pub cache_ttl: String,
     pub permission_mode: Mode,
@@ -89,6 +89,34 @@ pub struct Settings {
     pub on_start: Vec<String>,
     /// Language name to the server that checks a file after each edit; an empty command turns the language off.
     pub lsp: BTreeMap<String, LspServer>,
+    /// OpenAI- or Anthropic-compatible endpoints; a preset name (`ollama`) fills in `base_url` and `api_key_env`.
+    pub custom_providers: Vec<CustomProvider>,
+}
+
+/// An endpoint whose models show as `<name>/<model id>`.
+#[derive(Clone, PartialEq, Debug)]
+pub struct CustomProvider {
+    pub name: String,
+    pub base_url: String,
+    /// The variable that holds the API key, never the key itself; empty sends no Authorization header.
+    pub api_key_env: String,
+    pub api: CustomApi,
+    /// Empty means `GET {base_url}/models` lists them.
+    pub models: Vec<CustomModel>,
+}
+
+/// The wire format: Chat Completions at `{base_url}/chat/completions`, or Anthropic Messages at `{base_url}/v1/messages`.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum CustomApi {
+    OpenAi,
+    Anthropic,
+}
+
+#[derive(Clone, PartialEq, Debug)]
+pub struct CustomModel {
+    pub id: String,
+    pub context_window: u64,
+    pub max_tokens: u64,
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -101,6 +129,7 @@ pub struct LspServer {
 
 pub const THINKING_LEVELS: [&str; 7] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 pub const CACHE_TTLS: [&str; 2] = ["5m", "1h"];
+pub const SPEEDS: [&str; 3] = ["standard", "fast", "ultrafast"];
 pub const PRUNE_SESSIONS: [&str; 6] = ["never", "24h", "3d", "7d", "14d", "30d"];
 pub const PROVIDER_SORTS: [&str; 3] = ["default", "alphabetical", "manual"];
 pub const CONFLICT_PRIORITIES: [&str; 2] = ["project", "global"];
@@ -217,7 +246,8 @@ fn from_json(own: &Value) -> Settings {
     Settings {
         model: own["model"].as_str().unwrap_or("claude-opus-5-5").to_string(),
         thinking: level(&own["thinking"], &THINKING_LEVELS, "high"),
-        fast: own["fast"].as_bool().unwrap_or(false),
+        // Before `speed`, fast mode was `"fast": true`.
+        speed: if own["speed"].is_null() && own["fast"] == true { "fast".into() } else { level(&own["speed"], &SPEEDS, "standard") },
         cache_ttl: level(&own["cache_ttl"], &CACHE_TTLS, "5m"),
         permission_mode: own["permission_mode"].as_str().and_then(Mode::parse).unwrap_or(Mode::Ask),
         reviewer_model: own["reviewer_model"].as_str().unwrap_or_default().to_string(),
@@ -262,6 +292,7 @@ fn from_json(own: &Value) -> Settings {
         prune_sessions: own["prune_sessions"].as_str().unwrap_or("never").to_string(),
         on_start: string_list(&own["on_start"]),
         lsp: lsp_servers(&own["lsp"]),
+        custom_providers: custom_providers(&own["custom_providers"]),
     }
 }
 
@@ -272,6 +303,26 @@ fn level(value: &Value, levels: &[&str], default: &str) -> String {
 
 fn string_list(value: &Value) -> Vec<String> {
     value.as_array().into_iter().flatten().filter_map(|item| Some(item.as_str()?.to_string())).collect()
+}
+
+/// Entries without a name, with a built-in provider's name or without a base URL are left out.
+fn custom_providers(own: &Value) -> Vec<CustomProvider> {
+    let mut providers = Vec::new();
+    for entry in own.as_array().into_iter().flatten() {
+        let Some(name) = entry["name"].as_str().filter(|name| !name.is_empty() && !name.contains('/') && !models::PROVIDERS.contains(name)) else { continue };
+        let preset = models::PRESETS.iter().find(|preset| preset.name == name);
+        let Some(base_url) = entry["base_url"].as_str().or(preset.map(|p| p.base_url)).filter(|url| !url.is_empty()) else { continue };
+        let api_key_env = entry["api_key_env"].as_str().or(preset.map(|p| p.api_key_env)).unwrap_or_default();
+        let api = if entry["api"] == "anthropic" { CustomApi::Anthropic } else { CustomApi::OpenAi };
+        let mut listed = Vec::new();
+        for model in entry["models"].as_array().into_iter().flatten() {
+            let Some(id) = model["id"].as_str() else { continue };
+            let context_window = model["context_window"].as_u64().unwrap_or(models::DEFAULT_CONTEXT_WINDOW);
+            listed.push(CustomModel { id: id.into(), context_window, max_tokens: model["max_tokens"].as_u64().unwrap_or(models::DEFAULT_MAX_TOKENS) });
+        }
+        providers.push(CustomProvider { name: name.into(), base_url: base_url.trim_end_matches('/').into(), api_key_env: api_key_env.into(), api, models: listed });
+    }
+    providers
 }
 
 /// The built-in servers, each field replaced by the user's value where one is set; unknown names add a language.
@@ -323,7 +374,7 @@ fn to_json(settings: &Settings) -> Value {
         "$schema": SCHEMA_URL,
         "model": settings.model,
         "thinking": settings.thinking,
-        "fast": settings.fast,
+        "speed": settings.speed,
         "cache_ttl": settings.cache_ttl,
         "permission_mode": settings.permission_mode.label(),
         "reviewer_model": settings.reviewer_model,
@@ -356,6 +407,13 @@ fn to_json(settings: &Settings) -> Value {
         "update_channel": settings.update_channel,
         "prune_sessions": settings.prune_sessions,
         "on_start": settings.on_start,
+        "custom_providers": settings.custom_providers.iter().map(|p| json!({
+            "name": p.name,
+            "base_url": p.base_url,
+            "api_key_env": p.api_key_env,
+            "api": if p.api == CustomApi::Anthropic { "anthropic" } else { "openai" },
+            "models": p.models.iter().map(|m| json!({"id": m.id, "context_window": m.context_window, "max_tokens": m.max_tokens})).collect::<Vec<_>>(),
+        })).collect::<Vec<_>>(),
         "lsp": settings.lsp.iter().map(|(language, server)| (language.clone(), json!({"command": server.command, "extensions": server.extensions, "roots": server.roots}))).collect::<serde_json::Map<_, _>>(),
         "condense": {"enabled": settings.condense, "model": settings.condense_model, "min_batch_chars": settings.condense_min_batch_chars},
         "subagents": {"concurrency": settings.subagent_concurrency, "implementation_effort": settings.subagent_effort, "model": settings.subagent_model},
@@ -388,6 +446,22 @@ mod tests {
         let settings = load(&home).unwrap();
         assert_eq!((settings.thinking.as_str(), settings.subagent_effort.as_str(), settings.update_channel.as_str()), ("high", "medium", "latest"));
         std::fs::remove_dir_all(&home).unwrap();
+    }
+
+    #[test]
+    fn old_fast_flag_loads_as_fast_speed_and_a_preset_name_fills_its_endpoint() {
+        let settings = from_json(
+            &json!({"fast": true, "custom_providers": [{"name": "ollama"}, {"name": "anthropic", "base_url": "http://x"}, {"name": "nourl"}, {"name": "proxy", "base_url": "https://proxy.example/anthropic/", "api": "anthropic"}]}),
+        );
+        assert_eq!(settings.speed, "fast");
+        assert_eq!(
+            settings.custom_providers,
+            [
+                CustomProvider { name: "ollama".into(), base_url: "http://127.0.0.1:11434/v1".into(), api_key_env: String::new(), api: CustomApi::OpenAi, models: Vec::new() },
+                CustomProvider { name: "proxy".into(), base_url: "https://proxy.example/anthropic".into(), api_key_env: String::new(), api: CustomApi::Anthropic, models: Vec::new() },
+            ]
+        );
+        assert_eq!(from_json(&json!({"fast": true, "speed": "ultrafast"})).speed, "ultrafast");
     }
 
     #[test]
@@ -447,7 +521,14 @@ mod tests {
         settings.subagent_effort = "low".into();
         settings.subagent_model = "claude-sonnet-5-5".into();
         settings.reviewer_model = "claude-haiku-5-5".into();
-        settings.fast = true;
+        settings.speed = "ultrafast".into();
+        settings.custom_providers = vec![CustomProvider {
+            name: "local".into(),
+            base_url: "http://127.0.0.1:8080/v1".into(),
+            api_key_env: String::new(),
+            api: CustomApi::Anthropic,
+            models: vec![CustomModel { id: "qwen".into(), context_window: 65_536, max_tokens: 8_192 }],
+        }];
         settings.cache_ttl = "1h".into();
         settings.headroom = true;
         settings.headroom_env = BTreeMap::from([("HEADROOM_DISABLE_KOMPRESS".into(), "1".into())]);
@@ -477,6 +558,7 @@ mod tests {
         let properties = &schema["properties"];
         assert_eq!(properties["thinking"]["enum"], json!(THINKING_LEVELS));
         assert_eq!(properties["cache_ttl"]["enum"], json!(CACHE_TTLS));
+        assert_eq!(properties["speed"]["enum"], json!(SPEEDS));
         assert_eq!(properties["subagents"]["properties"]["implementation_effort"]["enum"], json!(THINKING_LEVELS));
         assert_eq!(properties["permission_mode"]["enum"], json!(crate::agent::permissions::MODES.map(|mode| mode.label())));
         assert_eq!(properties["accounts"]["properties"]["when_all_over_limit"]["enum"], json!(Policy::ALL.map(|policy| policy.label())));

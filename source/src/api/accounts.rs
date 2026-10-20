@@ -171,7 +171,8 @@ pub fn fetch_usage(account: &Account, base: &str) -> Result<Usage, String> {
     let agent = super::models_agent();
     let request = match account.provider.as_str() {
         "anthropic" => agent.get(format!("{base}/api/oauth/usage")).header("anthropic-beta", "oauth-2025-04-20,claude-code-20250219").header("user-agent", crate::api::CLAUDE_CODE_USER_AGENT),
-        _ => agent.get(format!("{base}/wham/usage")).header("chatgpt-account-id", tokens.account_id.as_deref().unwrap_or_default()),
+        "openai-codex" => agent.get(format!("{base}/wham/usage")).header("chatgpt-account-id", tokens.account_id.as_deref().unwrap_or_default()),
+        other => return Err(format!("{other} has no usage windows.")),
     };
     let mut response = request.header("authorization", format!("Bearer {}", tokens.access)).header("accept", "application/json").call().map_err(|e| format!("Usage request failed: {e}."))?;
     let status = response.status().as_u16();

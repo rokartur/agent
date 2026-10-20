@@ -64,6 +64,11 @@ pub fn request(anthropic: &Value, cache_key: &str) -> Value {
     if !tools.is_empty() {
         body["tools"] = json!(tools);
     }
+    match anthropic["speed"].as_str() {
+        Some("fast") => body["service_tier"] = json!("priority"),
+        Some("ultrafast") => body["service_tier"] = json!("ultrafast"),
+        _ => {}
+    }
     body
 }
 
@@ -220,6 +225,14 @@ mod tests {
             ])
         );
         assert_eq!(request(&json!({"model": "m", "messages": []}), "k")["reasoning"], json!({"effort": "none"}));
+    }
+
+    #[test]
+    fn speed_becomes_the_service_tier() {
+        let tier = |speed: Value| request(&json!({"model": "m", "messages": [], "speed": speed}), "k")["service_tier"].clone();
+        assert_eq!(tier(json!("fast")), "priority");
+        assert_eq!(tier(json!("ultrafast")), "ultrafast");
+        assert_eq!(tier(Value::Null), Value::Null);
     }
 
     #[test]
