@@ -288,6 +288,8 @@ enum Command {
     Clone,
     Import(PathBuf),
     Export(PathBuf),
+    /// `/workspace` and its arguments: add, remove or list the extra directories.
+    Workspace(String),
     /// A plugin's slash command: name and args.
     Plugin(String, String),
     /// A row picked in a plugin's panel: plugin name and the `panel_select` event, context added by the worker.
@@ -333,6 +335,7 @@ const BUILTIN_COMMANDS: &[(&str, MidTurn, &str)] = &[
     ("clone", MidTurn::Waits, "Duplicate the current session at the current position"),
     ("import", MidTurn::Waits, "<file.jsonl>: Import and resume a session from a JSONL file"),
     ("export", MidTurn::Runs, "[path]: Export session: .jsonl (default) or .md for plain text"),
+    ("workspace", MidTurn::Runs, "[add <path> | remove <path> | list]: Extra directories this session also works in"),
     ("model", MidTurn::Runs, "[search]: Select model"),
     ("settings", MidTurn::Runs, "Open settings menu"),
     ("permissions", MidTurn::Runs, "<mode>: ask, auto or full access"),
@@ -760,6 +763,10 @@ fn spawn_worker(mut agent: Agent, mut settings: Settings, model_lists: JoinHandl
                     let _ = events.send(Msg::Agent(Event::Notice(notice)));
                     continue;
                 }
+                Command::Workspace(args) => {
+                    let _ = events.send(Msg::Agent(Event::Notice(workspace(&mut agent, &args))));
+                    continue;
+                }
                 Command::AccountPicked => {
                     agent.plugins.event(json!({"type": "account_change", "context": agent.plugin_context()}));
                     continue;
@@ -801,6 +808,23 @@ fn spawn_worker(mut agent: Agent, mut settings: Settings, model_lists: JoinHandl
             }
         }
     });
+}
+
+/// The notice /workspace shows: the result of add or remove, then the list.
+fn workspace(agent: &mut Agent, args: &str) -> String {
+    let changed = match args.split_once(' ').map(|(action, path)| (action, path.trim())) {
+        Some(("add", path)) => agent.add_dir(path).map(|notice| notice + "\n"),
+        Some(("remove", path)) => agent.remove_dir(path).map(|notice| notice + "\n"),
+        None if args.is_empty() || args == "list" => Ok(String::new()),
+        _ => return "Usage: /workspace [add <path> | remove <path> | list]".into(),
+    };
+    let changed = match changed {
+        Ok(changed) => changed,
+        Err(error) => return error,
+    };
+    let dirs: Vec<String> = agent.extra_dirs.iter().map(|dir| format!("  {}", dir.display())).collect();
+    let list = if dirs.is_empty() { "No extra directories. Add one with /workspace add <path>.".to_string() } else { format!("Extra directories:\n{}", dirs.join("\n")) };
+    format!("{changed}{list}")
 }
 
 fn settle_model(agent: &mut Agent, settings: &mut Settings, failures: Vec<String>) -> Msg {
@@ -1733,6 +1757,7 @@ impl App {
                 let out = if args.is_empty() { format!("session-{}.jsonl", self.session_id) } else { args.to_string() };
                 let _ = self.commands.send(Command::Export(self.cwd.join(out)));
             }
+            "workspace" => _ = self.commands.send(Command::Workspace(args.to_string())),
             "model" => self.open_models(0, args, ModelsBack::Close),
             "thinking" if args.is_empty() => self.system("thinking", format!("{}. Levels: {}", self.settings.thinking, THINKING_LEVELS.join(", "))),
             "thinking" if THINKING_LEVELS.contains(&args) => {

@@ -39,9 +39,14 @@ pub fn system_prompt(agent_dir: &Path, cwd: &Path, disabled_skills: &[String], p
     sections.join("\n\n")
 }
 
-/// Sent after the cached system prompt, so moving to another directory keeps that cache.
-pub fn cwd_section(cwd: &Path) -> String {
-    tag("cwd", &cwd.display().to_string())
+/// Sent after the cached system prompt, so moving to another directory or adding one keeps that cache.
+pub fn cwd_section(cwd: &Path, extra_dirs: &[PathBuf]) -> String {
+    let mut content = cwd.display().to_string();
+    if !extra_dirs.is_empty() {
+        let dirs: Vec<String> = extra_dirs.iter().map(|dir| dir.display().to_string()).collect();
+        content.push_str(&format!("\nAdditional directories: {}", dirs.join(", ")));
+    }
+    tag("cwd", &content)
 }
 
 fn tag(name: &str, content: &str) -> String {
@@ -77,15 +82,28 @@ fn instructions_block(path: &Path, content: &str) -> String {
     format!("<project_instructions path=\"{}\">\n{content}\n</project_instructions>", path.display())
 }
 
-/// AGENTS.md files in directories below `cwd` on the way to `file`, skipping those in `loaded`.
+/// AGENTS.md files on the way to `file`: below `cwd`, or from an extra dir down, skipping those in `loaded`.
 /// The agents.md convention: the file closest to the code being touched applies to it.
-pub fn nested_context(cwd: &Path, file: &Path, loaded: &mut HashSet<PathBuf>) -> String {
-    let Some(relative) = file.parent().and_then(|dir| dir.strip_prefix(cwd).ok()) else { return String::new() };
+pub fn nested_context(cwd: &Path, extra_dirs: &[PathBuf], file: &Path, loaded: &mut HashSet<PathBuf>) -> String {
+    let Some(parent) = file.parent() else { return String::new() };
+    let below_cwd = parent.strip_prefix(cwd).ok().filter(|relative| relative.components().all(|component| matches!(component, Component::Normal(_))));
+    let mut dirs = Vec::new();
     let mut dir = cwd.to_path_buf();
+    if let Some(relative) = below_cwd {
+        for name in relative.components() {
+            dir.push(name);
+            dirs.push(dir.clone());
+        }
+    } else {
+        // Extra dirs are canonical, so `../api/x.rs` and symlinks must resolve before they match.
+        let Ok(parent) = parent.canonicalize() else { return String::new() };
+        let Some(extra) = extra_dirs.iter().find(|extra| parent.starts_with(extra)) else { return String::new() };
+        // cwd's own AGENTS.md is in the system prompt, an extra dir's is not.
+        dirs.extend(parent.ancestors().take_while(|ancestor| ancestor.starts_with(extra)).map(Path::to_path_buf));
+        dirs.reverse();
+    }
     let mut blocks = Vec::new();
-    for component in relative.components() {
-        let Component::Normal(name) = component else { return String::new() };
-        dir.push(name);
+    for dir in dirs {
         if let Some((path, content)) = context_file(&dir)
             && loaded.insert(path.clone())
         {
@@ -420,7 +438,9 @@ mod tests {
         std::fs::create_dir_all(root.join("a")).unwrap();
         std::fs::create_dir_all(root.join("b")).unwrap();
         assert_eq!(system_prompt(&root, &root.join("a"), &[], false), system_prompt(&root, &root.join("b"), &[], false));
-        assert_eq!(cwd_section(&root.join("a")), format!("<cwd>\n{}\n</cwd>", root.join("a").display()));
+        assert_eq!(cwd_section(&root.join("a"), &[]), format!("<cwd>\n{}\n</cwd>", root.join("a").display()));
+        let extra = [root.join("b"), root.join("c")];
+        assert_eq!(cwd_section(&root.join("a"), &extra), format!("<cwd>\n{}\nAdditional directories: {}, {}\n</cwd>", root.join("a").display(), extra[0].display(), extra[1].display()));
     }
 
     #[test]
@@ -431,12 +451,29 @@ mod tests {
         std::fs::write(cwd.join("sub/AGENTS.md"), "sub rules").unwrap();
         let mut loaded = HashSet::new();
         let file = cwd.join("sub/deep/x.rs");
-        let first = nested_context(&cwd, &file, &mut loaded);
-        let second = nested_context(&cwd, &file, &mut loaded);
+        let first = nested_context(&cwd, &[], &file, &mut loaded);
+        let second = nested_context(&cwd, &[], &file, &mut loaded);
         std::fs::remove_dir_all(&cwd).unwrap();
         assert_eq!(first, format!("<project_instructions path=\"{}\">\nsub rules\n</project_instructions>", cwd.join("sub/AGENTS.md").display()));
         assert_eq!(second, "");
-        assert_eq!(nested_context(&cwd, &cwd.join("x.rs"), &mut loaded), "");
+        assert_eq!(nested_context(&cwd, &[], &cwd.join("x.rs"), &mut loaded), "");
+    }
+
+    #[test]
+    fn extra_dir_agents_md_is_attached_from_the_extra_dir_down() {
+        let root = std::env::temp_dir().canonicalize().unwrap().join(format!("agent-nested-extra-{}", std::process::id()));
+        let extra = root.join("api");
+        std::fs::create_dir_all(extra.join("sub")).unwrap();
+        std::fs::create_dir_all(root.join("repo")).unwrap();
+        std::fs::write(extra.join("AGENTS.md"), "api rules").unwrap();
+        std::fs::write(extra.join("sub/AGENTS.md"), "sub rules").unwrap();
+        let file = extra.join("sub/x.rs");
+        let outside = nested_context(&root.join("repo"), &[], &file, &mut HashSet::new());
+        let attached = nested_context(&root.join("repo"), std::slice::from_ref(&extra), &file, &mut HashSet::new());
+        std::fs::remove_dir_all(&root).unwrap();
+        assert_eq!(outside, "");
+        let block = |path: PathBuf, text: &str| format!("<project_instructions path=\"{}\">\n{text}\n</project_instructions>", path.display());
+        assert_eq!(attached, format!("{}\n\n{}", block(extra.join("AGENTS.md"), "api rules"), block(extra.join("sub/AGENTS.md"), "sub rules")));
     }
 
     #[test]

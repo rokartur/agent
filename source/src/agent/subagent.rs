@@ -121,6 +121,8 @@ pub struct Launch {
     pub explore: bool,
     /// `provider=name` of the account the parent uses for the child's model.
     pub account: Option<String>,
+    /// The parent's --add-dir list, absolute.
+    pub extra_dirs: Vec<PathBuf>,
 }
 
 #[derive(Default)]
@@ -150,6 +152,7 @@ impl Runs {
         }
         let mut child = crate::process::command(exe)
             .args(args)
+            .args(launch.extra_dirs.iter().flat_map(|dir| [std::ffi::OsStr::new("--add-dir"), dir.as_os_str()]))
             .current_dir(&launch.cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -392,6 +395,7 @@ mod tests {
             parent_session: "parent".into(),
             explore: false,
             account: None,
+            extra_dirs: Vec::new(),
         };
         let error = runs.spawn(launch, true, &Arc::default()).err().unwrap();
         assert!(error.starts_with("Cannot start subagent"), "{error}");

@@ -167,6 +167,8 @@ pub struct Agent {
     pub images: Vec<Value>,
     /// Subdirectory AGENTS.md files already attached to a read result in this session.
     pub nested_instructions: HashSet<PathBuf>,
+    /// Directories outside `cwd` that belong to the task: --add-dir and /workspace.
+    pub extra_dirs: Vec<PathBuf>,
     pub messages: Vec<Value>,
     pub session: Session,
     pub sessions_dir: PathBuf,
@@ -274,6 +276,7 @@ pub struct History {
     pub checkpoints: Vec<Checkpoint>,
     /// Provider to the account id that served the session's last reply, so a resume keeps the same account.
     pub accounts: HashMap<String, String>,
+    pub extra_dirs: Vec<PathBuf>,
 }
 
 /// Time and tokens of the user's commands, saved per command so the footer total survives a resume.
@@ -400,7 +403,7 @@ impl Agent {
             self.collect_condensed(emit)?;
             let messages = condense::view(&self.messages, &self.condensed);
             let (system, tools) = self.system_and_tools();
-            let mut request = api::request(&self.model, self.max_tokens, &self.effort, &self.cache_ttl, &system, &prompt::cwd_section(&self.cwd), &tools, &messages);
+            let mut request = api::request(&self.model, self.max_tokens, &self.effort, &self.cache_ttl, &system, &prompt::cwd_section(&self.cwd, &self.extra_dirs), &tools, &messages);
             if self.fast {
                 request["speed"] = json!("fast");
             }
@@ -565,7 +568,7 @@ impl Agent {
         }
         // After the permission check: starting a language server runs the repo's build scripts.
         // Files outside the project get no baseline, so after_edit skips them too: no server starts for /tmp or node_modules elsewhere.
-        for file in targets.iter().filter(|file| file.starts_with(&self.cwd)) {
+        for file in targets.iter().filter(|file| file.starts_with(&self.cwd) || self.extra_dirs.iter().any(|dir| file.starts_with(dir))) {
             if let Err(notice) = self.lsp.before_edit(file, &self.abort) {
                 emit(Event::Notice(notice));
             }
@@ -606,7 +609,7 @@ impl Agent {
             };
             for path in paths {
                 self.record_skill_read(&self.cwd.join(path));
-                let nested = prompt::nested_context(&self.cwd, &self.cwd.join(path), &mut self.nested_instructions);
+                let nested = prompt::nested_context(&self.cwd, &self.extra_dirs, &self.cwd.join(path), &mut self.nested_instructions);
                 if !nested.is_empty() {
                     output = format!("{output}\n\n{nested}");
                 }
@@ -712,8 +715,18 @@ impl Agent {
                 let thinking = task.effort.clone().unwrap_or_else(|| self.effort.clone());
                 let provider = self.client.catalog().iter().find(|c| c.id == model).map(|c| c.provider.clone());
                 let account = provider.and_then(|provider| Some(format!("{provider}={}", self.client.account(&provider)?.0)));
-                let launch =
-                    Launch { label: task.label.clone(), task: task.prompt.clone(), cwd: cwd.clone(), model, thinking, mode, parent_session: self.session.id.clone(), explore: task.explore, account };
+                let launch = Launch {
+                    label: task.label.clone(),
+                    task: task.prompt.clone(),
+                    cwd: cwd.clone(),
+                    model,
+                    thinking,
+                    mode,
+                    parent_session: self.session.id.clone(),
+                    explore: task.explore,
+                    account,
+                    extra_dirs: self.extra_dirs.clone(),
+                };
                 // The tool reports failure, so this chunk's runs must not keep going; earlier chunks have finished.
                 match self.subagents.lock().unwrap().spawn(launch, background, &self.follow_ups) {
                     Ok(run) => started.push(run),
@@ -1056,6 +1069,39 @@ impl Agent {
         Ok((messages, accounts))
     }
 
+    /// --add-dir and /workspace add: `path` is relative to cwd; saved so a resume restores it. Returns the notice to show.
+    pub fn add_dir(&mut self, path: &str) -> Result<String, String> {
+        let dir = self.cwd.join(path).canonicalize().map_err(|e| format!("Cannot open {path}: {e}"))?;
+        if !dir.is_dir() {
+            return Err(format!("{} is not a directory.", dir.display()));
+        }
+        let cwd = self.cwd.canonicalize().map_err(|e| format!("Cannot open {}: {e}", self.cwd.display()))?;
+        // Not an error, so `agent -c --add-dir ../api` on a session that has it still starts.
+        if dir.starts_with(&cwd) {
+            return Ok(format!("{} is inside the working directory, so it is already in the workspace.", dir.display()));
+        }
+        if let Some(known) = self.extra_dirs.iter().find(|known| dir.starts_with(known)) {
+            return Ok(format!("{} is already added as {}.", dir.display(), known.display()));
+        }
+        self.extra_dirs.push(dir.clone());
+        self.save_extra_dirs()?;
+        Ok(format!("Added {}.", dir.display()))
+    }
+
+    /// /workspace remove: takes the path as listed or as typed relative to cwd. Returns the notice to show.
+    pub fn remove_dir(&mut self, path: &str) -> Result<String, String> {
+        let typed = self.cwd.join(path);
+        let dir = typed.canonicalize().unwrap_or(typed);
+        let index = self.extra_dirs.iter().position(|known| *known == dir).ok_or(format!("{} is not an extra directory.", dir.display()))?;
+        let dir = self.extra_dirs.remove(index);
+        self.save_extra_dirs()?;
+        Ok(format!("Removed {}.", dir.display()))
+    }
+
+    fn save_extra_dirs(&self) -> Result<(), String> {
+        self.session.append(&json!({"type": "extra_dirs", "dirs": self.extra_dirs}))
+    }
+
     /// /worktree: pi pins a session to its cwd, so the history moves to a new session started in `cwd`.
     pub fn move_to(&mut self, cwd: PathBuf) -> Result<(), String> {
         // Everything that can fail runs before the agent changes, so an error leaves it in the old checkout.
@@ -1145,14 +1191,14 @@ impl Agent {
     /// The last request's context tokens split across `context::PARTS`.
     pub fn context_split(&self) -> context::PerPart {
         let (system, tools) = self.system_and_tools();
-        let system = format!("{system}{}", prompt::cwd_section(&self.cwd));
+        let system = format!("{system}{}", prompt::cwd_section(&self.cwd, &self.extra_dirs));
         context::split(&system, &tools, &condense::view(&self.messages, &self.condensed), self.last_context_tokens)
     }
 
     /// Set after a resume or rewind, so auto-compact runs before a first request that would not fit.
     fn estimate_context_tokens(&mut self) {
         let (system, tools) = self.system_and_tools();
-        let system = format!("{system}{}", prompt::cwd_section(&self.cwd));
+        let system = format!("{system}{}", prompt::cwd_section(&self.cwd, &self.extra_dirs));
         self.last_context_tokens = context::estimate(&system, &tools, &condense::view(&self.messages, &self.condensed));
     }
 
@@ -1177,6 +1223,7 @@ impl Agent {
         self.estimate_context_tokens();
         self.nested_instructions.clear();
         self.checkpoints = history.checkpoints;
+        self.extra_dirs = history.extra_dirs;
     }
 
     /// Tells plugins the session started; needs the settled model for the context's provider.
@@ -1323,6 +1370,7 @@ impl Session {
                 Some("goal") => history.goal = Goal::from_entry(&entry),
                 Some("todo") => history.todos = Todos::from_entry(&entry),
                 Some("spent") => history.spent.add(Spent::from_entry(&entry)),
+                Some("extra_dirs") => history.extra_dirs = serde_json::from_value(entry["dirs"].clone()).map_err(|_| missing("dirs"))?,
                 Some("usage") => {
                     if let (Some(provider), Some(account)) = (entry["provider"].as_str(), entry["account"].as_str()) {
                         history.accounts.insert(provider.to_string(), account.to_string());
@@ -1793,6 +1841,17 @@ mod tests {
         let error = Session::resume(&dir, &session.id).err().unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
         assert!(error.ends_with(":3: compaction keeps from message 2 of 1"), "{error}");
+    }
+
+    #[test]
+    fn resume_restores_the_last_saved_extra_dirs() {
+        let dir = std::env::temp_dir().join(format!("agent-extra-dirs-{}", std::process::id()));
+        let session = Session::start(&dir, true, Path::new("/w"), "m").unwrap();
+        session.append(&json!({"type": "extra_dirs", "dirs": ["/api", "/web"]})).unwrap();
+        session.append(&json!({"type": "extra_dirs", "dirs": ["/api"]})).unwrap();
+        let history = Session::history(session.path.as_ref().unwrap()).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(history.extra_dirs, [PathBuf::from("/api")]);
     }
 
     #[test]

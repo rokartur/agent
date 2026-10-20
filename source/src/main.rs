@@ -50,6 +50,7 @@ Flags:
   --headless                  Run the message, print JSONL events (tool, session, usage, done, error)
   -c, --continue              Continue the latest session in this directory
   -r, --resume [id]           Open a session by id or id prefix, or pick one from the list
+  --add-dir <path>            Also work in this directory; repeat for more, /workspace changes the list
   --no-session                Do not save the session
   --auto                      Let a reviewer model approve tool calls
   --full-access, --yolo       Run every tool call without asking
@@ -99,6 +100,8 @@ struct Options {
     save: bool,
     resume: Option<Resume>,
     prompt: Option<String>,
+    /// --add-dir, repeatable: directories outside cwd the task also works in.
+    add_dirs: Vec<String>,
 }
 
 enum Resume {
@@ -201,6 +204,7 @@ fn parse_args(args: Vec<String>) -> Result<Options, String> {
             "--json" => options.json = true,
             "--headless" => options.headless = true,
             "--parent" => options.parent = Some(value("--parent")?),
+            "--add-dir" => options.add_dirs.push(value("--add-dir")?),
             "--explore" => options.explore = true,
             "--account" => {
                 let account = value("--account")?;
@@ -353,6 +357,7 @@ fn run(options: Options) -> Result<(), String> {
         anchors: Anchors::new(&session.id),
         rtk: if settings.rtk { rtk::Rtk::ON } else { rtk::Rtk::OFF },
         nested_instructions: HashSet::new(),
+        extra_dirs: Vec::new(),
         shell_context: Vec::new(),
         images: Vec::new(),
         model: settings.model.clone(),
@@ -407,6 +412,9 @@ fn run(options: Options) -> Result<(), String> {
     agent.plugins.sync(&settings.disabled_plugins, &settings.plugin_settings);
     agent.mcp.sync(&settings.disabled_mcp, &settings.approved_mcp);
     agent.load(history);
+    for dir in &options.add_dirs {
+        agent.add_dir(dir)?;
+    }
     let mut prompt = options.prompt;
     // In acp mode stdin carries the protocol.
     if !options.acp && !std::io::stdin().is_terminal() {
