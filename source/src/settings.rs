@@ -60,6 +60,8 @@ pub struct Settings {
     pub disabled_mcp: Vec<String>,
     /// Project MCP servers the user let run, by `mcp::config::Server::approval` key.
     pub approved_mcp: Vec<String>,
+    /// Project roots (`prompt::project_root`) whose `.agents` files load and whose edit hooks run.
+    pub trusted_projects: Vec<String>,
     /// The user's plugin settings, `{ "<plugin>": { "<key>": value } }`; see plugins/README.md.
     pub plugin_settings: serde_json::Value,
     /// One of `modes::PONYTAIL_LEVELS`.
@@ -109,6 +111,10 @@ impl Settings {
     pub fn context_window(&self, model: &Model) -> u64 {
         let overrides = &self.context_windows;
         overrides.get(&model_key(model)).or(overrides.get(&model.provider)).copied().unwrap_or(model.context_window)
+    }
+
+    pub fn trusts(&self, cwd: &Path) -> bool {
+        crate::agent::prompt::is_trusted(&self.trusted_projects, cwd)
     }
 
     pub fn prefer_global(&self) -> bool {
@@ -241,6 +247,7 @@ fn from_json(own: &Value) -> Settings {
         disabled_plugins: string_list(&own["disabled_plugins"]),
         disabled_mcp: string_list(&own["disabled_mcp"]),
         approved_mcp: string_list(&own["approved_mcp"]),
+        trusted_projects: string_list(&own["trusted_projects"]),
         plugin_settings: if own["plugin_settings"].is_object() { own["plugin_settings"].clone() } else { serde_json::json!({}) },
         ponytail: level(&own["ponytail"], &crate::agent::modes::PONYTAIL_LEVELS, "full"),
         caveman: level(&own["caveman"], &crate::agent::modes::CAVEMAN_LEVELS, "off"),
@@ -335,6 +342,7 @@ fn to_json(settings: &Settings) -> Value {
         "disabled_plugins": settings.disabled_plugins,
         "disabled_mcp": settings.disabled_mcp,
         "approved_mcp": settings.approved_mcp,
+        "trusted_projects": settings.trusted_projects,
         "plugin_settings": settings.plugin_settings,
         "ponytail": settings.ponytail,
         "caveman": settings.caveman,

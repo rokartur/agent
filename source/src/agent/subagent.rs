@@ -18,8 +18,8 @@ Nobody answers questions here: finish the task on your own, making the reasonabl
 End with a short report: what you found or changed with `path:line` references, how you checked it, and what you did not do and why.";
 
 /// jcode's swarm prompt lookup: `.agents/swarm-prompt.md` up to the git root, then `~/.agents/swarm-prompt.md`, then the built-in.
-pub fn swarm_prompt(agent_dir: &Path, cwd: &Path, implementation_effort: &str) -> String {
-    prompt::project_agents_dirs(cwd)
+pub fn swarm_prompt(agent_dir: &Path, cwd: &Path, trusted: bool, implementation_effort: &str) -> String {
+    prompt::project_agents_dirs(cwd, trusted)
         .iter()
         .chain([&agent_dir.to_path_buf()])
         .filter_map(|dir| prompt::read_text(&dir.join("swarm-prompt.md")))
@@ -123,6 +123,8 @@ pub struct Launch {
     pub account: Option<String>,
     /// The parent's --add-dir list, absolute.
     pub extra_dirs: Vec<PathBuf>,
+    /// The parent trusts the project, so the child loads its files too.
+    pub trusted: bool,
 }
 
 #[derive(Default)]
@@ -149,6 +151,9 @@ impl Runs {
         }
         if launch.explore {
             args.push("--explore");
+        }
+        if launch.trusted {
+            args.push("--trust");
         }
         let mut child = crate::process::command(exe)
             .args(args)
@@ -324,13 +329,13 @@ mod tests {
         let (home, project) = (root.join("home"), root.join("project"));
         std::fs::create_dir_all(project.join(".agents")).unwrap();
         std::fs::create_dir_all(&home).unwrap();
-        let default = swarm_prompt(&home, &project, "medium");
+        let default = swarm_prompt(&home, &project, true, "medium");
         assert!(default.contains("Implementation tasks: `effort: \"medium\"`.") && default.starts_with("When to spawn:"), "{default}");
         std::fs::write(home.join("swarm-prompt.md"), "global {implementation_effort}\n").unwrap();
         std::fs::write(project.join(".agents/swarm-prompt.md"), "  \n").unwrap();
-        assert_eq!(swarm_prompt(&home, &project, "high"), "global high");
+        assert_eq!(swarm_prompt(&home, &project, true, "high"), "global high");
         std::fs::write(project.join(".agents/swarm-prompt.md"), "project").unwrap();
-        assert_eq!(swarm_prompt(&home, &project, "high"), "project");
+        assert_eq!(swarm_prompt(&home, &project, true, "high"), "project");
         std::fs::remove_dir_all(&root).unwrap();
     }
 
@@ -396,6 +401,7 @@ mod tests {
             explore: false,
             account: None,
             extra_dirs: Vec::new(),
+            trusted: false,
         };
         let error = runs.spawn(launch, true, &Arc::default()).err().unwrap();
         assert!(error.starts_with("Cannot start subagent"), "{error}");

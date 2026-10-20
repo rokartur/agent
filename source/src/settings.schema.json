@@ -32,6 +32,7 @@
     "disabled_plugins": { "type": "array", "items": { "type": "string" }, "default": [] },
     "disabled_mcp": { "type": "array", "items": { "type": "string" }, "default": [] },
     "approved_mcp": { "type": "array", "items": { "type": "string" }, "default": [], "description": "Project .mcp.json servers allowed to run, approved with space in /mcp." },
+    "trusted_projects": { "type": "array", "items": { "type": "string" }, "default": [], "description": "Project roots whose .agents files load and whose edit hooks run, set with /trust." },
     "plugin_settings": { "type": "object", "default": {} },
     "ponytail": { "enum": ["off", "lite", "full", "ultra"], "default": "full" },
     "caveman": { "enum": ["off", "full", "ultra", "wenyan"], "default": "off" },

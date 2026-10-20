@@ -28,7 +28,8 @@ pub fn edited_files(tool: &str, input: &Value, cwd: &Path, anchors: &Anchors) ->
 
 /// The onStop commands of the nearest config above each file; files without a config run nothing.
 /// A broken config becomes an error for its dir only, so the other dirs still run their hooks.
-pub fn hooks(files: &[PathBuf]) -> (Vec<Hook>, Vec<String>) {
+/// Dirs in a project outside `trusted_projects` run none; the count says how many commands they skipped.
+pub fn hooks(files: &[PathBuf], trusted_projects: &[String]) -> (Vec<Hook>, Vec<String>, usize) {
     let mut files_by_dir: BTreeMap<PathBuf, Vec<String>> = BTreeMap::new();
     for file in files {
         let Ok(file) = file.canonicalize() else { continue };
@@ -39,14 +40,15 @@ pub fn hooks(files: &[PathBuf]) -> (Vec<Hook>, Vec<String>) {
             group.push(relative);
         }
     }
-    let (mut hooks, mut errors) = (Vec::new(), Vec::new());
+    let (mut hooks, mut errors, mut skipped) = (Vec::new(), Vec::new(), 0);
     for (dir, files) in files_by_dir {
         match dir_commands(&dir, &files) {
+            Ok(commands) if !crate::agent::prompt::is_trusted(trusted_projects, &dir) => skipped += commands.len(),
             Ok(commands) => hooks.extend(commands.into_iter().map(|command| Hook { dir: dir.clone(), command })),
             Err(e) => errors.push(format!("[edit-hooks] {} is invalid: {e}", dir.join(CONFIG).display())),
         }
     }
-    (hooks, errors)
+    (hooks, errors, skipped)
 }
 
 fn dir_commands(dir: &Path, files: &[String]) -> Result<Vec<String>, String> {
@@ -226,7 +228,7 @@ mod tests {
             write(file, "");
         }
         let files: Vec<PathBuf> = ["a.ts", "it's.ts", "README.md", "pkg/b.rs", "notes.txt", "a.ts", "deleted.ts", "broken/c.rs"].iter().map(|f| root.join(f)).collect();
-        let (hooks, errors) = hooks(&files);
+        let (hooks, errors, _) = hooks(&files, &[root.display().to_string()]);
         assert_eq!(errors.len(), 1);
         assert!(errors[0].contains("broken/.agents/edit-hooks.json is invalid"), "{errors:?}");
         let commands: Vec<(&Path, &str)> = hooks.iter().map(|hook| (hook.dir.as_path(), hook.command.as_str())).collect();
@@ -246,12 +248,32 @@ mod tests {
     }
 
     #[test]
+    fn a_repository_outside_trusted_projects_runs_no_hooks_and_counts_them() {
+        let root = std::env::temp_dir().join(format!("agent-edit-hooks-untrusted-{}", std::process::id()));
+        let vendored = root.join("vendor/lib");
+        for dir in [root.join(".agents"), root.join(".git"), vendored.join(".agents"), vendored.join(".git")] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        let root = root.canonicalize().unwrap();
+        std::fs::write(root.join(CONFIG), r#"{"onStop": {"*": "fmt {file}"}}"#).unwrap();
+        std::fs::write(vendored.join(CONFIG), r#"{"onStop": {"*": ["touch pwned", "fmt {file}"]}}"#).unwrap();
+        let files = [root.join("a.txt"), vendored.join("b.txt")];
+        for file in &files {
+            std::fs::write(file, "").unwrap();
+        }
+        let (hooks, _, skipped) = hooks(&files, &[root.display().to_string()]);
+        std::fs::remove_dir_all(&root).unwrap();
+        let commands: Vec<&str> = hooks.iter().map(|hook| hook.command.as_str()).collect();
+        assert_eq!((commands, skipped), (vec!["fmt 'a.txt'"], 2));
+    }
+
+    #[test]
     fn files_outside_a_repository_run_no_hooks() {
         let root = std::env::temp_dir().join(format!("agent-edit-hooks-norepo-{}", std::process::id()));
         std::fs::create_dir_all(root.join(".agents")).unwrap();
         std::fs::write(root.join(CONFIG), r#"{"onStop": {"*": "touch pwned"}}"#).unwrap();
         std::fs::write(root.join("a.txt"), "").unwrap();
-        let (hooks, _) = hooks(&[root.join("a.txt")]);
+        let (hooks, _, _) = hooks(&[root.join("a.txt")], &[root.display().to_string()]);
         std::fs::remove_dir_all(&root).unwrap();
         assert!(hooks.is_empty());
     }

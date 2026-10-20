@@ -21,9 +21,10 @@ const CONTEXT_FILES: [&str; 3] = ["AGENTS.override.md", "AGENTS.md", "AGENTS.MD"
 
 /// Preamble, addendum, project context, skills, cwd. ponytail and caveman come from `modes`.
 /// The project's `.agents/` SYSTEM.md wins over the agent dir's (`~/.agents`); skills follow `prefer_global`.
-pub fn system_prompt(agent_dir: &Path, cwd: &Path, disabled_skills: &[String], prefer_global: bool) -> String {
-    let mut sections = vec![override_file(agent_dir, cwd, "SYSTEM.md").unwrap_or_else(|| DEFAULT_PREAMBLE.into())];
-    if let Some(addendum) = override_file(agent_dir, cwd, "APPEND_SYSTEM.md") {
+/// An untrusted project gives only its AGENTS.md files.
+pub fn system_prompt(agent_dir: &Path, cwd: &Path, trusted: bool, disabled_skills: &[String], prefer_global: bool) -> String {
+    let mut sections = vec![override_file(agent_dir, cwd, trusted, "SYSTEM.md").unwrap_or_else(|| DEFAULT_PREAMBLE.into())];
+    if let Some(addendum) = override_file(agent_dir, cwd, trusted, "APPEND_SYSTEM.md") {
         sections.push(tag("addendum", &addendum));
     }
     let context = project_context(agent_dir, cwd);
@@ -31,7 +32,7 @@ pub fn system_prompt(agent_dir: &Path, cwd: &Path, disabled_skills: &[String], p
         sections.push(tag("project_context", &context));
     }
     // The host injects ponytail and caveman natively, so their skills would only duplicate the rules.
-    let skills: Vec<Skill> = load_skills(agent_dir, cwd, disabled_skills, prefer_global).into_iter().filter(|s| s.model_invocable && s.name != "ponytail" && s.name != "caveman").collect();
+    let skills: Vec<Skill> = load_skills(agent_dir, cwd, trusted, disabled_skills, prefer_global).into_iter().filter(|s| s.model_invocable && s.name != "ponytail" && s.name != "caveman").collect();
     if !skills.is_empty() {
         sections.push(tag("skills", &format_skills(skills)));
     }
@@ -58,9 +59,12 @@ pub fn read_text(path: &Path) -> Option<String> {
     Some(text.strip_prefix('\u{feff}').map(String::from).unwrap_or(text))
 }
 
-/// `.agents` in cwd and its parents up to the git root, nearest first.
-pub fn project_agents_dirs(cwd: &Path) -> Vec<PathBuf> {
+/// `.agents` in cwd and its parents up to the git root, nearest first; none for an untrusted project.
+pub fn project_agents_dirs(cwd: &Path, trusted: bool) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
+    if !trusted {
+        return dirs;
+    }
     for dir in cwd.ancestors() {
         dirs.push(dir.join(".agents"));
         if dir.join(".git").exists() {
@@ -70,8 +74,25 @@ pub fn project_agents_dirs(cwd: &Path) -> Vec<PathBuf> {
     dirs
 }
 
-fn override_file(agent_dir: &Path, cwd: &Path, name: &str) -> Option<String> {
-    project_agents_dirs(cwd).iter().chain([&agent_dir.to_path_buf()]).find_map(|dir| read_text(&dir.join(name)))
+/// The directory /trust records: the git root above `cwd`, or `cwd` outside a repo.
+pub fn project_root(cwd: &Path) -> PathBuf {
+    let cwd = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
+    cwd.ancestors().find(|dir| dir.join(".git").exists()).unwrap_or(&cwd).to_path_buf()
+}
+
+pub fn is_trusted(trusted_projects: &[String], dir: &Path) -> bool {
+    trusted_projects.contains(&project_root(dir).display().to_string())
+}
+
+/// What an untrusted project would add from its `.agents` dirs, listed in the trust question.
+pub fn untrusted_files(agent_dir: &Path, cwd: &Path) -> Vec<PathBuf> {
+    let names = ["SYSTEM.md", "APPEND_SYSTEM.md", "skills", "prompts", "swarm-prompt.md", "edit-hooks.json"];
+    let dirs = project_agents_dirs(cwd, true).into_iter().filter(|dir| dir != agent_dir);
+    dirs.flat_map(|dir| names.map(|name| dir.join(name))).filter(|path| path.exists()).collect()
+}
+
+fn override_file(agent_dir: &Path, cwd: &Path, trusted: bool, name: &str) -> Option<String> {
+    project_agents_dirs(cwd, trusted).iter().chain([&agent_dir.to_path_buf()]).find_map(|dir| read_text(&dir.join(name)))
 }
 
 fn context_file(dir: &Path) -> Option<(PathBuf, String)> {
@@ -143,18 +164,18 @@ pub struct Skill {
 }
 
 /// `.agents` dirs in the order they win a name conflict, each flagged global: the preferred side first, project ones nearest first.
-fn agents_dirs(agent_dir: &Path, cwd: &Path, prefer_global: bool) -> Vec<(PathBuf, bool)> {
+fn agents_dirs(agent_dir: &Path, cwd: &Path, trusted: bool, prefer_global: bool) -> Vec<(PathBuf, bool)> {
     let global = std::iter::once((agent_dir.to_path_buf(), true));
     // Outside a git repo the walk up reaches ~/.agents itself.
-    let project = project_agents_dirs(cwd).into_iter().filter(|dir| dir != agent_dir).map(|dir| (dir, false));
+    let project = project_agents_dirs(cwd, trusted).into_iter().filter(|dir| dir != agent_dir).map(|dir| (dir, false));
     if prefer_global { global.chain(project).collect() } else { project.chain(global).collect() }
 }
 
 /// Skills from `~/.agents/skills` and `.agents/skills` in cwd and its parents up to the git root.
-pub fn load_skills(agent_dir: &Path, cwd: &Path, disabled: &[String], prefer_global: bool) -> Vec<Skill> {
+pub fn load_skills(agent_dir: &Path, cwd: &Path, trusted: bool, disabled: &[String], prefer_global: bool) -> Vec<Skill> {
     let mut found: Vec<(Skill, bool)> = Vec::new();
     let mut seen = HashSet::new();
-    for (dir, global) in agents_dirs(agent_dir, cwd, prefer_global) {
+    for (dir, global) in agents_dirs(agent_dir, cwd, trusted, prefer_global) {
         let mut files = Vec::new();
         collect_skill_files(&dir.join("skills"), true, &mut files);
         for path in files {
@@ -230,9 +251,9 @@ pub struct Template {
 }
 
 /// `*.md` in `~/.agents/prompts` and the project's `.agents/prompts` up to the git root, sorted by name.
-pub fn load_templates(agent_dir: &Path, cwd: &Path, prefer_global: bool) -> Vec<Template> {
+pub fn load_templates(agent_dir: &Path, cwd: &Path, trusted: bool, prefer_global: bool) -> Vec<Template> {
     let mut found: Vec<(Template, bool)> = Vec::new();
-    for (dir, global) in agents_dirs(agent_dir, cwd, prefer_global) {
+    for (dir, global) in agents_dirs(agent_dir, cwd, trusted, prefer_global) {
         let Ok(entries) = std::fs::read_dir(dir.join("prompts")) else { continue };
         let mut paths: Vec<PathBuf> = entries.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|ext| ext == "md")).collect();
         paths.sort();
@@ -437,7 +458,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("agent-stable-{}", std::process::id()));
         std::fs::create_dir_all(root.join("a")).unwrap();
         std::fs::create_dir_all(root.join("b")).unwrap();
-        assert_eq!(system_prompt(&root, &root.join("a"), &[], false), system_prompt(&root, &root.join("b"), &[], false));
+        assert_eq!(system_prompt(&root, &root.join("a"), true, &[], false), system_prompt(&root, &root.join("b"), true, &[], false));
         assert_eq!(cwd_section(&root.join("a"), &[]), format!("<cwd>\n{}\n</cwd>", root.join("a").display()));
         let extra = [root.join("b"), root.join("c")];
         assert_eq!(cwd_section(&root.join("a"), &extra), format!("<cwd>\n{}\nAdditional directories: {}, {}\n</cwd>", root.join("a").display(), extra[0].display(), extra[1].display()));
@@ -484,7 +505,7 @@ mod tests {
         std::fs::write(root.join("home/prompts/review.md"), "global").unwrap();
         std::fs::write(root.join("home/prompts/commit.md"), "---\ndescription: Commit\n---\nCommit. Context: $ARGUMENTS").unwrap();
         std::fs::write(root.join("repo/.agents/prompts/review.md"), "Review $ARGUMENTS").unwrap();
-        let templates = load_templates(&root.join("home"), &root.join("repo"), false);
+        let templates = load_templates(&root.join("home"), &root.join("repo"), true, false);
         let expanded: Vec<(String, String, String)> = templates.iter().map(|t| (t.name.clone(), t.description.clone(), expand_template(t, "HEAD~2").unwrap())).collect();
         std::fs::remove_dir_all(&root).unwrap();
         assert_eq!(expanded, [("commit".into(), "Commit".into(), "Commit. Context: HEAD~2".into()), ("review".into(), String::new(), "Review HEAD~2".into())]);
@@ -502,8 +523,8 @@ mod tests {
         std::fs::write(root.join("repo/.agents/SYSTEM.md"), "repo system").unwrap();
         std::fs::write(root.join("repo/.agents/prompts/review.md"), "Review").unwrap();
         let cwd = root.join("repo/src");
-        let templates: Vec<String> = load_templates(&root.join("home"), &cwd, false).into_iter().map(|t| t.name).collect();
-        let system = system_prompt(&root.join("home"), &cwd, &[], false);
+        let templates: Vec<String> = load_templates(&root.join("home"), &cwd, true, false).into_iter().map(|t| t.name).collect();
+        let system = system_prompt(&root.join("home"), &cwd, true, &[], false);
         std::fs::remove_dir_all(&root).unwrap();
         assert_eq!(templates, ["review"]);
         assert!(system.starts_with("repo system") && !system.contains("outside the repo"), "{system}");
@@ -522,8 +543,8 @@ mod tests {
             std::fs::write(path, "---\ndescription: x\n---\n").unwrap();
         }
         let resolved = |prefer_global| {
-            let skills = load_skills(&home, &repo, &[], prefer_global);
-            let templates = load_templates(&home, &repo, prefer_global);
+            let skills = load_skills(&home, &repo, true, &[], prefer_global);
+            let templates = load_templates(&home, &repo, true, prefer_global);
             let skill = skills.into_iter().map(|s| (s.path, s.shadows)).collect::<Vec<_>>();
             let template = templates.into_iter().map(|t| (t.path, t.shadows)).collect::<Vec<_>>();
             (skill, template)
@@ -532,6 +553,28 @@ mod tests {
         std::fs::remove_dir_all(&root).unwrap();
         assert_eq!(project_first, (vec![(project_skill.clone(), Some(global_skill.clone()))], vec![(project_prompt.clone(), Some(global_prompt.clone()))]));
         assert_eq!(global_first, (vec![(global_skill, Some(project_skill))], vec![(global_prompt, Some(project_prompt))]));
+    }
+
+    #[test]
+    fn an_untrusted_project_keeps_its_agents_md_and_loses_its_agents_dir() {
+        let root = std::env::temp_dir().join(format!("agent-untrusted-{}", std::process::id()));
+        let (home, repo) = (root.join("home"), root.join("repo"));
+        for dir in [home.join("skills/global"), repo.join(".git"), repo.join(".agents/skills/project"), repo.join(".agents/prompts")] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        for path in [home.join("skills/global/SKILL.md"), repo.join(".agents/skills/project/SKILL.md")] {
+            std::fs::write(path, "---\ndescription: x\n---\n").unwrap();
+        }
+        std::fs::write(repo.join(".agents/prompts/review.md"), "Review").unwrap();
+        std::fs::write(repo.join(".agents/SYSTEM.md"), "repo system").unwrap();
+        std::fs::write(repo.join("AGENTS.md"), "repo rules").unwrap();
+        let skills: Vec<String> = load_skills(&home, &repo, false, &[], false).into_iter().map(|s| s.name).collect();
+        let templates = load_templates(&home, &repo, false, false);
+        let system = system_prompt(&home, &repo, false, &[], false);
+        std::fs::remove_dir_all(&root).unwrap();
+        assert_eq!(skills, ["global"]);
+        assert!(templates.is_empty());
+        assert!(!system.contains("repo system") && system.contains("repo rules"), "{system}");
     }
 
     #[test]

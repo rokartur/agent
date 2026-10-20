@@ -61,6 +61,7 @@ Flags:
   --ask                       Ask before commands, file edits, URL fetches, subagents, MCP and plugin tools
   --parent <id>               Run as a subagent of that session: linked to it, no subagent, terminal, web or ask_user_question tools
   --explore                   With --parent: only read and rg, no modes prompt
+  --trust                     Trust this project for this run: load its .agents files and run its edit hooks
   --tools <a,b,...>           With acp, -p, --json or --headless: offer only these tools
   --account <p>=<name>        Use that saved account first for provider p, like a pin in /account
   -h, --help                  Display this help and exit
@@ -95,6 +96,8 @@ struct Options {
     headless: bool,
     parent: Option<String>,
     explore: bool,
+    /// --trust: load this project's `.agents` files and run its edit hooks for this run only.
+    trust: bool,
     /// Provider and account name the parent uses, pinned for this run only.
     account: Option<(String, String)>,
     /// `agent acp`: serve the Agent Client Protocol instead of one run.
@@ -232,6 +235,7 @@ fn parse_args(args: Vec<String>) -> Result<Options, String> {
             "--parent" => options.parent = Some(value("--parent")?),
             "--add-dir" => options.add_dirs.push(value("--add-dir")?),
             "--explore" => options.explore = true,
+            "--trust" => options.trust = true,
             "--account" => {
                 let account = value("--account")?;
                 let (provider, name) = account.split_once('=').ok_or("--account needs provider=name.")?;
@@ -340,6 +344,9 @@ fn run(options: Options) -> Result<(), String> {
         settings.permission_mode = mode;
     }
     let cwd = std::env::current_dir().map_err(|e| format!("Cannot read the working directory: {e}"))?;
+    if options.trust {
+        settings.trusted_projects.push(prompt::project_root(&cwd).display().to_string());
+    }
     let sessions_dir = home.join(".agents/sessions");
     let (session, history) = match &options.resume {
         Some(Resume::Id(id)) => Session::resume(&sessions_dir, id)?,
@@ -376,7 +383,8 @@ fn run(options: Options) -> Result<(), String> {
     let plugin_updates = plugins::update_bundled(&home);
     let mut agent = Agent {
         client,
-        system: prompt::system_prompt(&agent_dir, &cwd, &settings.disabled_skills, settings.prefer_global()),
+        system: prompt::system_prompt(&agent_dir, &cwd, settings.trusts(&cwd), &settings.disabled_skills, settings.prefer_global()),
+        trusted_projects: settings.trusted_projects.clone(),
         modes: modes::prompt(&home, &settings.ponytail, &settings.caveman),
         // agent.load below fills it, with the session's swarm prompt.
         tools: Value::Null,

@@ -159,6 +159,8 @@ pub struct Agent {
     pub modes: String,
     pub tools: Value,
     pub cwd: PathBuf,
+    /// `settings.trusted_projects`, with --trust's root: their `.agents` files load and their edit hooks run.
+    pub trusted_projects: Vec<String>,
     pub anchors: Anchors,
     pub rtk: Rtk,
     /// Output of `!cmd` shell escapes, sent ahead of the next prompt.
@@ -521,7 +523,10 @@ impl Agent {
         if files.is_empty() {
             return Vec::new();
         }
-        let (hooks, mut failures) = edit_hooks::hooks(&files);
+        let (hooks, mut failures, skipped) = edit_hooks::hooks(&files, &self.trusted_projects);
+        if skipped > 0 {
+            emit(Event::Notice(format!("[edit-hooks] {skipped} skipped: their project is not trusted, /trust in it runs them")));
+        }
         for hook in hooks {
             if self.abort.load(Ordering::Relaxed) {
                 break;
@@ -726,6 +731,7 @@ impl Agent {
                     explore: task.explore,
                     account,
                     extra_dirs: self.extra_dirs.clone(),
+                    trusted: prompt::is_trusted(&self.trusted_projects, &cwd),
                 };
                 // The tool reports failure, so this chunk's runs must not keep going; earlier chunks have finished.
                 match self.subagents.lock().unwrap().spawn(launch, background, &self.follow_ups) {
@@ -1012,6 +1018,7 @@ impl Agent {
 
     /// Applies settings changed in /settings; `model` is the catalog entry for `settings.model`, `cheap_model` its provider's cheapest.
     fn apply(&mut self, settings: &Settings, model: &Model, cheap_model: &str) {
+        self.trusted_projects = settings.trusted_projects.clone();
         self.model = settings.model.clone();
         self.effort = settings.thinking.clone();
         self.fast = settings.fast;
@@ -1031,7 +1038,7 @@ impl Agent {
         *self.permission_mode.lock().unwrap() = settings.permission_mode;
         self.rtk = if settings.rtk { Rtk::ON } else { Rtk::OFF };
         self.modes = modes::prompt(&self.home, &settings.ponytail, &settings.caveman);
-        self.system = prompt::system_prompt(&self.agent_dir, &self.cwd, &settings.disabled_skills, settings.prefer_global());
+        self.system = prompt::system_prompt(&self.agent_dir, &self.cwd, settings.trusts(&self.cwd), &settings.disabled_skills, settings.prefer_global());
     }
 
     /// Applies `settings`, swapping a model no account lists for one an account lists, then for OpenRouter's public list.
@@ -1110,7 +1117,8 @@ impl Agent {
         session.append(&json!({"type": "checkpoints_reset"}))?;
         self.grants = Grants::default();
         self.shell_context.push(format!("Session moved from {} to {}. Paths and git state from earlier messages refer to the old checkout.", self.cwd.display(), cwd.display()));
-        self.system = prompt::system_prompt(&self.agent_dir, &cwd, &settings.disabled_skills, settings.prefer_global());
+        self.trusted_projects = settings.trusted_projects.clone();
+        self.system = prompt::system_prompt(&self.agent_dir, &cwd, settings.trusts(&cwd), &settings.disabled_skills, settings.prefer_global());
         self.anchors = Anchors::new(&session.id);
         self.nested_instructions.clear();
         self.checkpoints.clear();
@@ -1204,7 +1212,7 @@ impl Agent {
     fn tool_schemas(&self) -> Value {
         // Condensed batches of a resumed session keep their originals reachable after condense is turned off.
         let context_tree_query = self.condense.enabled || !self.condensed.is_empty();
-        tools::schemas(&subagent::swarm_prompt(&self.agent_dir, &self.cwd, &self.subagent_effort), context_tree_query)
+        tools::schemas(&subagent::swarm_prompt(&self.agent_dir, &self.cwd, prompt::is_trusted(&self.trusted_projects, &self.cwd), &self.subagent_effort), context_tree_query)
     }
 
     /// Replaces the conversation state with a saved (or empty) session's.

@@ -21,7 +21,7 @@ You already pay for Claude or ChatGPT. Log in. That's the setup. Prefer pay as y
 
 **All your accounts, one agent.** Add several Claude and ChatGPT accounts, Anthropic keys and OpenRouter keys. When one hits its limit, the agent moves to the next. `/usage` shows what is left.
 
-**One folder, nothing else.** Settings, accounts, sessions, skills, plugins, MCP servers and prompts all live in `~/.agents`. A project can add its own `.agents` next to its code. No hidden config anywhere else. Copy the folder and your whole setup moves with it.
+**One folder, nothing else.** Settings, accounts, sessions, skills, plugins, MCP servers and prompts all live in `~/.agents`. A project can add its own `.agents` next to its code. It loads, and its edit hooks run, only after you `/trust` the project. No hidden config anywhere else. Copy the folder and your whole setup moves with it.
 
 **Edits that cannot go stale.** The agent edits by line anchors. If the file changed since it last read it, the edit is refused. No silent overwrites.
 
@@ -72,6 +72,7 @@ agent -p "Why is this test flaky?"     # print the answer and exit
 agent --headless "Fix the lint"        # JSONL events
 agent -p --tools read,rg "Map the API" # offer only these tools
 agent acp                              # Agent Client Protocol for Zed and other editors
+agent -p --trust "Fix the lint"        # load this project's .agents and run its edit hooks
 ```
 
 macOS and Linux. Updates itself. `agent --help` for the rest.

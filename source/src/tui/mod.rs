@@ -223,6 +223,11 @@ enum Panel {
     },
     /// Shows `App::btw`, which outlives the panel so a bare /btw reopens it.
     Btw,
+    /// The start-up question for an untrusted project; `files` are what /trust would load.
+    Trust {
+        root: PathBuf,
+        files: Vec<PathBuf>,
+    },
     /// `confirm`: d was pressed once, and the next d removes the selected worktree.
     Worktrees {
         confirm: bool,
@@ -354,6 +359,8 @@ const BUILTIN_COMMANDS: &[(&str, MidTurn, &str)] = &[
     ("todos", MidTurn::Runs, "Show and edit the todo list"),
     ("plugins", MidTurn::Runs, "Install, enable and disable plugins"),
     ("skills", MidTurn::Runs, "Enable and disable skills"),
+    ("trust", MidTurn::Runs, "Load this project's .agents files and run its edit hooks"),
+    ("untrust", MidTurn::Runs, "Stop loading this project's .agents files and running its edit hooks"),
     ("mcp", MidTurn::Waits, "Show MCP servers: reconnect, log in, enable and disable"),
     ("usage", MidTurn::Runs, "Show token usage, estimated cost and subscription limits"),
     ("history", MidTurn::Runs, "Search previous prompts"),
@@ -625,6 +632,7 @@ pub fn run(agent: Agent, setup: Setup, model_lists: JoinHandle<Vec<String>>) -> 
     if pick_session {
         app.open_resume();
     }
+    app.offer_trust();
     let result = event_loop(&mut app, &inbox, &mut out);
     app.terminals.lock().unwrap().kill_all();
     app.subagents.lock().unwrap().stop_all();
@@ -1640,7 +1648,7 @@ impl App {
         {
             self.push(Item::Error(error));
         }
-        if self.settings.conflict_priority != old.conflict_priority {
+        if self.settings.conflict_priority != old.conflict_priority || self.settings.trusted_projects != old.trusted_projects {
             self.load_skills_and_prompts();
             self.report_conflicts();
         }
@@ -1680,8 +1688,37 @@ impl App {
     /// Every skill, the disabled ones too: /skills lists them, `enabled_skills` filters by `Settings.disabled_skills`.
     fn load_skills_and_prompts(&mut self) {
         let agent_dir = self.home.join(".agents");
-        self.skills = crate::agent::prompt::load_skills(&agent_dir, &self.cwd, &[], self.settings.prefer_global());
-        self.templates = crate::agent::prompt::load_templates(&agent_dir, &self.cwd, self.settings.prefer_global());
+        let trusted = self.settings.trusts(&self.cwd);
+        self.skills = crate::agent::prompt::load_skills(&agent_dir, &self.cwd, trusted, &[], self.settings.prefer_global());
+        self.templates = crate::agent::prompt::load_templates(&agent_dir, &self.cwd, trusted, self.settings.prefer_global());
+    }
+
+    /// Asks whether to trust a project with `.agents` files to load; another open panel gets a notice instead.
+    fn offer_trust(&mut self) {
+        let files = crate::agent::prompt::untrusted_files(&self.home.join(".agents"), &self.cwd);
+        if self.settings.trusts(&self.cwd) || files.is_empty() {
+            return;
+        }
+        let root = crate::agent::prompt::project_root(&self.cwd);
+        if self.panel.is_some() {
+            self.system("trust", format!("{} is not trusted, so its .agents files stay unloaded and its edit hooks do not run. /trust loads them.", root.display()));
+            return;
+        }
+        self.panel = Some(Panel::Trust { root, files });
+    }
+
+    /// /trust and /untrust; the agent rebuilds its system prompt once, before the next turn.
+    fn set_trust(&mut self, trusted: bool) {
+        let root = crate::agent::prompt::project_root(&self.cwd).display().to_string();
+        if trusted {
+            // A --trust root is already in the list; dropping it first makes the save see /trust as a change.
+            self.settings.trusted_projects.retain(|project| *project != root);
+            self.update_settings(|s| s.trusted_projects.push(root.clone()));
+        } else {
+            self.update_settings(|s| s.trusted_projects.retain(|project| *project != root));
+        }
+        let text = if trusted { "trusted: its .agents files load and its edit hooks run" } else { "not trusted: its .agents files stay unloaded and its edit hooks do not run" };
+        self.system("trust", format!("{root} {text}"));
     }
 
     /// Names each skill and prompt defined both in the project and in `~/.agents`; `conflict_priority` says which copy loads.
@@ -1839,6 +1876,8 @@ impl App {
             "todos" => self.panel = Some(Panel::Todos { index: 0 }),
             "plugins" => self.panel = Some(Panel::Plugins { index: 0, confirm: false }),
             "skills" => self.panel = Some(Panel::Skills { index: 0 }),
+            "trust" => self.set_trust(true),
+            "untrust" => self.set_trust(false),
             "mcp" => self.panel = Some(Panel::Mcp { index: 0, confirm: false }),
             "changes" => _ = self.commands.send(Command::Changes),
             "context" => _ = self.commands.send(Command::Context),
@@ -2004,6 +2043,14 @@ impl App {
             }
             let action = login.key(key);
             self.login_action(action);
+            return;
+        }
+        if let Some(Panel::Trust { .. }) = self.panel {
+            self.panel = None;
+            match code {
+                KeyCode::Char('y') | KeyCode::Enter => self.set_trust(true),
+                _ => self.system("trust", "Project files stay unloaded for now. /trust loads them."),
+            }
             return;
         }
         match self.panel {
@@ -2341,6 +2388,7 @@ impl App {
                 | Panel::Diff { .. }
                 | Panel::PluginSettings { .. }
                 | Panel::Plugin { .. }
+                | Panel::Trust { .. }
                 | Panel::Usage { .. },
             )
             | None => {}
@@ -3016,6 +3064,20 @@ impl App {
             }
             Panel::Btw => self.btw.as_ref().expect("the btw panel opens with a thread").render(width),
             Panel::Subagent { .. } | Panel::Terminal { .. } | Panel::Diff { .. } => unreachable!("frame draws the full-screen view instead of a panel"),
+            Panel::Trust { root, files } => {
+                let rows: Vec<panel::Row> = files.iter().map(|file| panel::Row { left: file.strip_prefix(root).unwrap_or(file).display().to_string(), right: Vec::new() }).collect();
+                let view = panel::Panel {
+                    title: "Trust this project? Its files can instruct the model and run commands.".into(),
+                    tabs: &[],
+                    tab: 0,
+                    search: None,
+                    rows: &rows,
+                    selected: 0,
+                    empty: "",
+                    hint: "y or enter trust     any other key not now",
+                };
+                view.render(width, PANEL_ROWS)
+            }
             Panel::Worktrees { confirm, index, worktrees, current } => {
                 let home = std::env::var("HOME").unwrap_or_default();
                 let rows: Vec<panel::Row> = worktrees
