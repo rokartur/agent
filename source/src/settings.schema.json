@@ -86,7 +86,7 @@
       "properties": {
         "switch_at_percent": { "type": "integer", "minimum": 0, "maximum": 100, "default": 90, "description": "Switch accounts when the fuller usage window reaches this percent. 0 never switches." },
         "when_all_over_limit": { "enum": ["least-used", "block", "other-provider"], "default": "least-used" },
-        "fallback_model": { "type": "string", "default": "", "description": "Empty means the other provider's default model." },
+        "fallback_model": { "type": "string", "default": "", "description": "Model on another provider for other-provider. When set, a request that still fails with 5xx, 529 or a network error after its retries also moves to it. Empty means the other provider's default model and no failover." },
         "default": { "type": "object", "additionalProperties": { "type": "string" }, "default": {}, "description": "Provider to account name, used first while under the limit." }
       }
     }

@@ -15,7 +15,10 @@ use crate::settings::Settings;
 use accounts::{Account, Candidate, Pick, Policy, Secret, Usage as Windows};
 use models::Model;
 
+#[cfg(not(test))]
 const RETRY_DELAYS_SECS: [u64; 4] = [2, 5, 15, 30];
+#[cfg(test)]
+const RETRY_DELAYS_SECS: [u64; 4] = [0; 4];
 const THINKING_BETA: &str = "thinking-binding-controls-2026-08-01";
 /// pi-ai sends OAuth requests as Claude Code: this user agent, its beta flags and its identity as the first system block.
 pub const CLAUDE_CODE_USER_AGENT: &str = "claude-cli/2.1.280";
@@ -241,7 +244,10 @@ impl Client {
                     Err(error) => return Err(error),
                 },
                 Choice::Fallback => {
-                    request = self.fallback(request, &model.provider, on_delta)?;
+                    let provider = &model.provider;
+                    let fallback = self.fallback_model(provider).ok_or(format!("Every {provider} account is over its limit and accounts.fallback_model names no other provider's model."))?;
+                    on_delta(Delta::Notice(&format!("Switched to {}: every {provider} account is over its limit", fallback.id)));
+                    moved_to(&mut request, fallback);
                     fell_back = true;
                     continue;
                 }
@@ -269,7 +275,23 @@ impl Client {
                 rate_limited.push(key);
                 continue;
             }
-            if !error.retryable || attempt == RETRY_DELAYS_SECS.len() || abort.load(Ordering::Relaxed) {
+            let out_of_retries = attempt == RETRY_DELAYS_SECS.len();
+            // Only a fallback_model the user set: switching providers unasked could cost more.
+            let failover_set = !self.state.lock().unwrap().fallback_model.is_empty();
+            if error.retryable
+                && out_of_retries
+                && !fell_back
+                && failover_set
+                && !abort.load(Ordering::Relaxed)
+                && let Some(fallback) = self.fallback_model(&model.provider)
+            {
+                on_delta(Delta::Notice(&format!("{} Switched to {} for this request.", error.message, fallback.id)));
+                moved_to(&mut request, fallback);
+                fell_back = true;
+                attempt = 0;
+                continue;
+            }
+            if !error.retryable || out_of_retries || abort.load(Ordering::Relaxed) {
                 return Err(error.message);
             }
             on_delta(Delta::Notice(&format!("{} Retrying in {}s.", error.message, RETRY_DELAYS_SECS[attempt])));
@@ -401,19 +423,15 @@ impl Client {
         Ok(fresh.expect("update ran the closure"))
     }
 
-    /// `other-provider`: the same request on `accounts.fallback_model`, or the other provider's default.
-    fn fallback(&self, mut request: Value, provider: &str, on_delta: &mut dyn FnMut(Delta)) -> Result<Value, String> {
+    /// The model `other-provider` and failover move a request to: `accounts.fallback_model`, or the other provider's default.
+    fn fallback_model(&self, provider: &str) -> Option<&Model> {
         let configured = self.state.lock().unwrap().fallback_model.clone();
         let model = match configured.as_str() {
             "" if provider == "anthropic" => self.catalog().iter().find(|m| m.provider == "openai-codex"),
             "" => self.catalog().iter().find(|m| m.id == "claude-opus-5-5"),
             id => self.catalog().iter().find(|m| m.id == id),
         };
-        let model = model.filter(|m| m.provider != provider).ok_or(format!("Every {provider} account is over its limit and accounts.fallback_model names no other provider's model."))?;
-        on_delta(Delta::Notice(&format!("Switched to {}: every {provider} account is over its limit", model.id)));
-        request["model"] = json!(model.id);
-        request["max_tokens"] = json!(request["max_tokens"].as_u64().unwrap_or(model.max_tokens).min(model.max_tokens));
-        Ok(request)
+        model.filter(|m| m.provider != provider)
     }
 
     fn try_send(&self, account: &Account, request: &Value, abort: &AtomicBool, on_delta: &mut dyn FnMut(Delta)) -> Result<Reply, ApiError> {
@@ -604,6 +622,11 @@ impl Client {
         };
         Ok(format!("{pinged}, {usage}"))
     }
+}
+
+fn moved_to(request: &mut Value, model: &Model) {
+    request["model"] = json!(model.id);
+    request["max_tokens"] = json!(request["max_tokens"].as_u64().unwrap_or(model.max_tokens).min(model.max_tokens));
 }
 
 fn key(account: &Account) -> String {
@@ -1104,5 +1127,48 @@ mod tests {
         assert_eq!(ping["model"], "a/one:free");
         // A free model hits its rate limit often, so OpenRouter moves the ping to the next one.
         assert_eq!(ping["fallbacks"], json!([{"model": "b/two:free"}]));
+    }
+
+    /// An Anthropic account answering `status` on every attempt, with an OpenRouter account and `a/one:free` as `fallback_model`.
+    fn send_with_failover(status: u16, body: &'static str) -> (Result<Reply, String>, Vec<String>, std::sync::mpsc::Receiver<Value>) {
+        let home = std::env::temp_dir().join(format!("agent-failover-{status}-{}", std::process::id()));
+        let mut client = Client::new(&home).unwrap();
+        client.anthropic_base = mock_provider(status, body).0;
+        let (openrouter_base, fallback_requests) = mock_provider(200, PONG);
+        client.openrouter_base = openrouter_base;
+        client.reload(vec![
+            Account { provider: "anthropic".into(), name: "work".into(), secret: Secret::ApiKey("sk".into()) },
+            Account { provider: "openrouter".into(), name: "key".into(), secret: Secret::ApiKey("sk".into()) },
+        ]);
+        let models = vec![Model { provider: "anthropic".into(), id: "claude".into(), ..Model::default() }, Model { provider: "openrouter".into(), id: "a/one:free".into(), ..Model::default() }];
+        assert!(client.catalog.set(models).is_ok());
+        client.state.lock().unwrap().fallback_model = "a/one:free".into();
+
+        let mut notices = Vec::new();
+        let sent = client.send(&json!({"model": "claude", "max_tokens": 10}), &AtomicBool::new(false), &mut |delta| {
+            if let Delta::Notice(text) = delta {
+                notices.push(text.to_string());
+            }
+        });
+        std::fs::remove_dir_all(&home).ok();
+        (sent, notices, fallback_requests)
+    }
+
+    #[test]
+    fn an_overloaded_provider_fails_over_to_the_fallback_model_after_its_retries() {
+        let (sent, notices, fallback_requests) = send_with_failover(529, r#"{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#);
+
+        assert_eq!(sent.unwrap().model, "a/one:free");
+        assert_eq!(fallback_requests.recv().unwrap()["model"], "a/one:free");
+        assert!(notices.last().is_some_and(|n| n.contains("Switched to a/one:free for this request")), "{notices:?}");
+    }
+
+    #[test]
+    fn a_rejected_request_does_not_fail_over() {
+        let (sent, notices, fallback_requests) = send_with_failover(401, r#"{"error":{"message":"invalid x-api-key"}}"#);
+
+        assert!(sent.is_err_and(|error| error.contains("401")));
+        assert!(fallback_requests.try_recv().is_err());
+        assert!(notices.iter().all(|n| !n.contains("Switched")), "{notices:?}");
     }
 }
