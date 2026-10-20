@@ -428,7 +428,8 @@ const HOTKEYS: [(&str, &[(&str, &str)]); 4] = [
         "Send",
         &[
             ("Enter", "send; while working, steers the turn (commands and images wait for it to end)"),
-            ("Shift+Enter", "new line (also Alt+Enter, Ctrl+J)"),
+            ("Shift+Enter", "new line (also Ctrl+J, and Alt+Enter while idle)"),
+            (if cfg!(target_os = "macos") { "Option+Enter" } else { "Alt+Enter" }, "while working, queue a follow-up that runs after the turn"),
             ("Tab", "complete a slash command or an @path"),
             ("Up, Down", "history, menu selection"),
             ("Ctrl+R", "search previous prompts"),
@@ -1412,7 +1413,7 @@ impl App {
 
     fn edit_key(&mut self, key: KeyEvent, ctrl: bool, alt: bool, shift: bool, screen: &mut Screen) {
         match key.code {
-            KeyCode::Enter if shift || alt => self.editor.newline(),
+            KeyCode::Enter if shift || (alt && self.working.is_none()) => self.editor.newline(),
             KeyCode::Char('j') if ctrl => self.editor.newline(),
             KeyCode::Enter => {
                 if self.editor.text().trim().is_empty() {
@@ -1422,7 +1423,12 @@ impl App {
                 if let Err(error) = history::append(&self.home.join(".agents"), history::Entry { prompt: text.clone(), cwd: self.cwd.clone(), session: self.session_id.clone() }) {
                     self.push(Item::Error(error));
                 }
-                self.submit(text);
+                // pi's follow-up: Alt+Enter while working waits for the turn to end instead of steering it.
+                if alt {
+                    self.queued_commands.push_back((text, std::mem::take(&mut self.images)));
+                } else {
+                    self.submit(text);
+                }
             }
             KeyCode::Esc if self.working.is_some() => {
                 if !self.abort.swap(true, Ordering::Relaxed) {
