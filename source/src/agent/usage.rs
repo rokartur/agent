@@ -154,11 +154,20 @@ mod tests {
         let [session, day, week, all] = totals(&dir, "cur", now);
         std::fs::remove_dir_all(&dir).unwrap();
 
-        let total = |model: &str, inputs: &[u64]| ModelTotal { model: model.into(), requests: inputs.iter().map(|input| used(*input)).collect() };
-        assert_eq!(session, [total("opus", &[10, 20])]);
-        assert_eq!(day, [total("haiku", &[5]), total("opus", &[10])]);
-        assert_eq!(week, [total("haiku", &[5]), total("opus", &[10, 20])]);
-        assert_eq!(all, [total("haiku", &[5]), total("opus", &[10, 20, 40])]);
+        // read_dir order differs between file systems, so requests compare as sorted inputs.
+        let inputs = |totals: &[ModelTotal]| -> Vec<(String, Vec<u64>)> {
+            let sorted = |t: &ModelTotal| {
+                let mut inputs: Vec<u64> = t.requests.iter().map(|u| u.input).collect();
+                inputs.sort();
+                inputs
+            };
+            totals.iter().map(|t| (t.model.clone(), sorted(t))).collect()
+        };
+        let expect = |rows: &[(&str, &[u64])]| -> Vec<(String, Vec<u64>)> { rows.iter().map(|(m, i)| (m.to_string(), i.to_vec())).collect() };
+        assert_eq!(inputs(&session), expect(&[("opus", &[10, 20])]));
+        assert_eq!(inputs(&day), expect(&[("haiku", &[5]), ("opus", &[10])]));
+        assert_eq!(inputs(&week), expect(&[("haiku", &[5]), ("opus", &[10, 20])]));
+        assert_eq!(inputs(&all), expect(&[("haiku", &[5]), ("opus", &[10, 20, 40])]));
         assert_eq!(all[1].usage(), Usage { input: 70, output: 3, cache_read: 6, cache_write: 9 });
     }
 
