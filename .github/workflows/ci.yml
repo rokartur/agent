@@ -18,7 +18,7 @@ jobs:
       run:
         working-directory: source
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # Tests run rg and fd; Ubuntu ships fd as fdfind.
       - if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y ripgrep fd-find && sudo ln -s "$(command -v fdfind)" /usr/local/bin/fd
