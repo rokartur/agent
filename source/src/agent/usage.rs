@@ -55,9 +55,9 @@ pub fn total_cost(totals: &[ModelTotal], catalog: &[Model]) -> Option<f64> {
     (!costs.is_empty()).then(|| costs.iter().sum())
 }
 
-/// "~$0.42": an estimate at list prices, which subscriptions do not bill.
+/// "~$0.420": an estimate at list prices, which subscriptions do not bill.
 pub fn dollars(cost: f64) -> String {
-    format!("~${cost:.2}")
+    format!("~${cost:.3}")
 }
 
 /// pi's token counts: 950, 14k, 1.2M.

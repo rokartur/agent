@@ -374,7 +374,7 @@ const MENU_ROWS: [usize; 5] = [4, 6, 8, 10, 12];
 const PANEL_ROWS: usize = 8;
 const EDITOR_ROWS: usize = 10;
 const SCROLL_LINES: [usize; 5] = [1, 2, 3, 5, 10];
-const SETTING_NAMES: [&str; 31] = [
+const SETTING_NAMES: [&str; 32] = [
     "Model",
     "Thinking level",
     "Permission mode",
@@ -406,9 +406,10 @@ const SETTING_NAMES: [&str; 31] = [
     "Prompt cache TTL",
     "Reviewer model",
     "Subagent model",
+    "Cost in footer",
 ];
 /// Rows of `SETTING_NAMES` in the order the settings panel lists them.
-const SETTING_ORDER: [usize; 31] = [0, 1, 27, 18, 30, 13, 2, 29, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 25, 28, 14, 15, 16, 17, 26, 19, 20, 23, 21, 22, 24];
+const SETTING_ORDER: [usize; 32] = [0, 1, 27, 18, 30, 13, 2, 29, 3, 4, 5, 6, 31, 7, 8, 9, 10, 11, 12, 25, 28, 14, 15, 16, 17, 26, 19, 20, 23, 21, 22, 24];
 const MODEL_ROWS: [usize; 5] = [0, 8, 12, 29, 30];
 const CONTEXT_WINDOW_ROW: usize = 13;
 const PROVIDER_ORDER_ROW: usize = 25;
@@ -2666,11 +2667,12 @@ impl App {
             26 => s.conflict_priority = step(&CONFLICT_PRIORITIES, &s.conflict_priority.as_str(), forward).to_string(),
             27 => s.fast = !s.fast,
             28 => s.cache_ttl = step(&CACHE_TTLS, &s.cache_ttl.as_str(), forward).to_string(),
+            31 => s.footer_cost = !s.footer_cost,
             _ => unreachable!("rows 0, 8, 12, 13, 29 and 30 open their own panels"),
         });
     }
 
-    fn setting_values(&self) -> [Line; 31] {
+    fn setting_values(&self) -> [Line; 32] {
         let s = &self.settings;
         let condense_model = if s.condense_model.is_empty() { "auto" } else { &s.condense_model };
         let fallback_model = if s.fallback_model.is_empty() { "auto" } else { &s.fallback_model };
@@ -2712,6 +2714,7 @@ impl App {
             choices(CACHE_TTLS.map(String::from), &s.cache_ttl),
             vec![span(reviewer_model, BRIGHT.bold())],
             vec![span(subagent_model, BRIGHT.bold())],
+            on_off_choices(s.footer_cost),
         ]
     }
 
@@ -3632,7 +3635,9 @@ impl App {
         if self.context_tokens > 0 {
             right.push(span(format!(" {} {percent}%", tokens(self.context_tokens)), MUTED));
         }
-        if let Some(cost) = usage::total_cost(&self.session_usage, self.client.catalog()) {
+        if self.settings.footer_cost
+            && let Some(cost) = usage::total_cost(&self.session_usage, self.client.catalog())
+        {
             right.push(span(format!(" {}", usage::dollars(cost)), MUTED));
         }
         footer_rows(left, right, width)

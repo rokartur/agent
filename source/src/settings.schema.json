@@ -16,6 +16,7 @@
     "reserve_tokens": { "type": "integer", "minimum": 4096, "default": 16384, "description": "Context tokens kept free for the answer; compaction starts before they run out." },
     "keep_recent_tokens": { "type": "integer", "minimum": 0, "default": 20000, "description": "Recent tokens compaction keeps verbatim." },
     "expand_tools": { "type": "boolean", "default": false },
+    "footer_cost": { "type": "boolean", "default": true, "description": "Show the session's estimated cost (~$, at OpenRouter list prices) in the footer." },
     "context_windows": {
       "type": "object",
       "additionalProperties": { "type": "integer", "minimum": 1 },
