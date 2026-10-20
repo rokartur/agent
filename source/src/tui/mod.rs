@@ -355,7 +355,7 @@ const BUILTIN_COMMANDS: &[(&str, MidTurn, &str)] = &[
     ("plugins", MidTurn::Runs, "Install, enable and disable plugins"),
     ("skills", MidTurn::Runs, "Enable and disable skills"),
     ("mcp", MidTurn::Waits, "Show MCP servers: reconnect, log in, enable and disable"),
-    ("usage", MidTurn::Runs, "Show token usage and subscription limits"),
+    ("usage", MidTurn::Runs, "Show token usage, estimated cost and subscription limits"),
     ("history", MidTurn::Runs, "Search previous prompts"),
     ("changes", MidTurn::Waits, "List files changed in this session and show their diffs"),
     ("skill-usage", MidTurn::Runs, "Show how often each skill was used, least used first"),
@@ -512,6 +512,8 @@ struct App {
     context_tokens: u64,
     /// The last request's usage, for /context's cache line.
     last_usage: Usage,
+    /// This session's usage per model, priced at render so the footer cost appears once the catalog loads.
+    session_usage: Vec<ModelTotal>,
     cwd: PathBuf,
     /// The `@` menu's last listing and the cwd-joined query it answers.
     path_matches: std::cell::RefCell<(PathBuf, Vec<(String, String)>)>,
@@ -968,6 +970,7 @@ impl App {
             settings,
             context_tokens: 0,
             last_usage: Usage::default(),
+            session_usage: agent.session.path.as_deref().map(usage::session_totals).unwrap_or_default(),
             git: git_info(&agent.cwd),
             plugins: agent.plugins.clone(),
             mcp: agent.mcp.clone(),
@@ -1238,6 +1241,7 @@ impl App {
                 self.session_id = id;
                 self.session_path = path;
                 self.context_tokens = 0;
+                self.read_session_usage();
                 let names = self.client.account_names(&accounts);
                 if !names.is_empty() {
                     // For this run only, like --account: /settings saves only the keys it changes.
@@ -1642,6 +1646,11 @@ impl App {
     /// None until the model lists load.
     fn model(&self) -> Option<&Model> {
         self.client.catalog().iter().find(|m| m.id == self.settings.model)
+    }
+
+    /// Rereads the session file; an unsaved session has none, so its footer shows no cost.
+    fn read_session_usage(&mut self) {
+        self.session_usage = usage::session_totals(&self.sessions_dir.join(format!("{}.jsonl", self.session_id)));
     }
 
     /// The settings key of the current model; says so when the model lists are still loading.
@@ -2831,7 +2840,7 @@ impl App {
             Panel::Usage { tab, totals } => {
                 let (rows, selected) = match totals.get(*tab) {
                     Some(totals) => {
-                        let rows = usage_rows(totals);
+                        let rows = usage_rows(totals, self.client.catalog());
                         let total_row = rows.len().saturating_sub(1);
                         (rows, total_row)
                     }
@@ -2849,7 +2858,7 @@ impl App {
                     rows: &rows,
                     selected,
                     empty: if *tab < usage::SCOPES.len() { "No usage recorded yet." } else { "No subscription accounts." },
-                    hint: "tab scope     esc close",
+                    hint: "tab scope     ~$ at OpenRouter list prices, not billed on subscriptions     esc close",
                 };
                 view.render(width, PANEL_ROWS)
             }
@@ -3219,12 +3228,14 @@ impl App {
                 self.context_tokens = context_tokens;
                 self.last_usage = usage;
                 self.prompt_usage.add(usage);
+                self.read_session_usage();
             }
             Event::Titled(title) => set_terminal_title(&title),
             Event::SessionStarted { id, path } => {
                 self.session_id = id;
                 self.session_path = path;
                 self.spent = Spent::default();
+                self.session_usage = Vec::new();
                 self.system("session", "Started a fresh conversation");
             }
             Event::Permission { request, reply } => {
@@ -3621,6 +3632,9 @@ impl App {
         if self.context_tokens > 0 {
             right.push(span(format!(" {} {percent}%", tokens(self.context_tokens)), MUTED));
         }
+        if let Some(cost) = usage::total_cost(&self.session_usage, self.client.catalog()) {
+            right.push(span(format!(" {}", usage::dollars(cost)), MUTED));
+        }
         footer_rows(left, right, width)
     }
 }
@@ -3680,23 +3694,26 @@ fn diff_lines(file: &FileChange) -> Vec<Line> {
 const USAGE_TABS: [&str; 5] = ["Session", "24 hours", "7 days", "All", "Limits"];
 
 /// A column header row, one row per model, and a total row.
-fn usage_rows(totals: &[ModelTotal]) -> Vec<panel::Row> {
+fn usage_rows(totals: &[ModelTotal], catalog: &[Model]) -> Vec<panel::Row> {
     if totals.is_empty() {
         return Vec::new();
     }
-    let row = |left: &str, cells: [String; 5], style| panel::Row {
+    let row = |left: &str, cells: [String; 6], style| panel::Row {
         left: left.to_string(),
-        right: vec![span(format!("{:>8}  {:>8}  {:>8}  {:>10}  {:>11}", cells[0], cells[1], cells[2], cells[3], cells[4]), style)],
+        right: vec![span(format!("{:>8}  {:>8}  {:>8}  {:>10}  {:>11}  {:>9}", cells[0], cells[1], cells[2], cells[3], cells[4], cells[5]), style)],
     };
-    let counts = |requests: u64, u: &Usage| [requests.to_string(), tokens(u.input), tokens(u.output), tokens(u.cache_read), tokens(u.cache_write)];
-    let mut rows = vec![row("Model", ["Requests", "Input", "Output", "Cache read", "Cache write"].map(String::from), MUTED)];
+    let counts = |requests: usize, u: &Usage, cost: Option<f64>| {
+        [requests.to_string(), tokens(u.input), tokens(u.output), tokens(u.cache_read), tokens(u.cache_write), cost.map(usage::dollars).unwrap_or_default()]
+    };
+    let mut rows = vec![row("Model", ["Requests", "Input", "Output", "Cache read", "Cache write", "Cost"].map(String::from), MUTED)];
     let (mut requests, mut sum) = (0, Usage::default());
     for total in totals {
-        rows.push(row(&total.model, counts(total.requests, &total.usage), PLAIN));
-        requests += total.requests;
-        sum.add(total.usage);
+        let used = total.usage();
+        rows.push(row(&total.model, counts(total.requests.len(), &used, usage::model_cost(total, catalog)), PLAIN));
+        requests += total.requests.len();
+        sum.add(used);
     }
-    rows.push(row("Total", counts(requests, &sum), BRIGHT));
+    rows.push(row("Total", counts(requests, &sum, usage::total_cost(totals, catalog)), BRIGHT));
     rows
 }
 

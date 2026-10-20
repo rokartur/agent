@@ -17,6 +17,24 @@ pub struct Model {
     pub max_tokens: u64,
     /// Names of the accounts whose live model list has this model; empty for OpenRouter's public list.
     pub accounts: Vec<String>,
+    /// OpenRouter's list price; None elsewhere, since Anthropic and OpenAI list none (see `price`).
+    pub price: Option<Price>,
+}
+
+#[derive(Clone, PartialEq, Debug)]
+pub struct Price {
+    pub base: Rates,
+    /// OpenRouter's `overrides` as (min prompt tokens, rates): Haiku 5.5 costs 5x from 100k, GPT models 2x from 272k.
+    pub long_prompt: Vec<(u64, Rates)>,
+}
+
+/// Dollars per token.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Rates {
+    pub input: f64,
+    pub output: f64,
+    pub cache_read: f64,
+    pub cache_write: f64,
 }
 
 /// Adds one account's live list to the catalog, so each model knows every account that can use it.
@@ -42,7 +60,7 @@ pub fn parse_anthropic(body: &Value) -> Vec<Model> {
     for m in body["data"].as_array().into_iter().flatten() {
         let (Some(id), Some(context_window), Some(max_tokens)) = (m["id"].as_str(), m["max_input_tokens"].as_u64(), m["max_tokens"].as_u64()) else { continue };
         let name = m["display_name"].as_str().unwrap_or(id);
-        models.push(Model { provider: "anthropic".into(), id: id.into(), name: name.into(), context_window, max_tokens, accounts: Vec::new() });
+        models.push(Model { provider: "anthropic".into(), id: id.into(), name: name.into(), context_window, max_tokens, accounts: Vec::new(), price: None });
     }
     models
 }
@@ -56,7 +74,7 @@ pub fn parse_codex(body: &Value) -> Vec<Model> {
             continue;
         }
         let name = m["display_name"].as_str().unwrap_or(id);
-        models.push(Model { provider: "openai-codex".into(), id: id.into(), name: name.into(), context_window, max_tokens: CODEX_MAX_TOKENS, accounts: Vec::new() });
+        models.push(Model { provider: "openai-codex".into(), id: id.into(), name: name.into(), context_window, max_tokens: CODEX_MAX_TOKENS, accounts: Vec::new(), price: None });
     }
     models
 }
@@ -71,9 +89,36 @@ pub fn parse_openrouter(body: &Value) -> Vec<Model> {
         }
         let name = m["name"].as_str().unwrap_or(id);
         let max_tokens = m["top_provider"]["max_completion_tokens"].as_u64().unwrap_or(OPENROUTER_MAX_TOKENS);
-        models.push(Model { provider: "openrouter".into(), id: id.into(), name: name.into(), context_window, max_tokens, accounts: Vec::new() });
+        models.push(Model { provider: "openrouter".into(), id: id.into(), name: name.into(), context_window, max_tokens, accounts: Vec::new(), price: openrouter_price(&m["pricing"]) });
     }
     models
+}
+
+/// None for routers like `openrouter/auto`, which list -1 since the routed model decides.
+fn openrouter_price(pricing: &Value) -> Option<Price> {
+    let mut long_prompt = Vec::new();
+    for tier in pricing["overrides"].as_array().into_iter().flatten() {
+        long_prompt.push((tier["min_prompt_tokens"].as_u64()?, openrouter_rates(tier)?));
+    }
+    Some(Price { base: openrouter_rates(pricing)?, long_prompt })
+}
+
+fn openrouter_rates(pricing: &Value) -> Option<Rates> {
+    let rate = |key: &str| pricing[key].as_str()?.parse::<f64>().ok().filter(|rate| rate.is_finite());
+    let (input, output) = (rate("prompt")?, rate("completion")?);
+    if input < 0.0 || output < 0.0 {
+        return None;
+    }
+    // Models without cache rates report no cache tokens, so the fallback only matters if that changes.
+    Some(Rates { input, output, cache_read: rate("input_cache_read").unwrap_or(input), cache_write: rate("input_cache_write").unwrap_or(input) })
+}
+
+/// The price of a model id from usage records. Native Anthropic and Codex models take their OpenRouter twin's,
+/// `claude-opus-5-5` from `anthropic/claude-opus-5.5`, since their own model lists have no prices.
+pub fn price<'a>(catalog: &'a [Model], id: &str) -> Option<&'a Price> {
+    let dashed = id.replace('.', "-");
+    let twin = |listed: &str| ["anthropic/", "openai/"].iter().any(|vendor| listed.strip_prefix(vendor).is_some_and(|name| name.replace('.', "-") == dashed));
+    catalog.iter().find(|m| m.provider == "openrouter" && (m.id == id || twin(&m.id)))?.price.as_ref()
 }
 
 /// Our OpenRouter routers as (id, name): each sends a request to the `:free` models of `free_route`.
@@ -87,7 +132,7 @@ pub fn free_routers(catalog: &[Model]) -> Vec<Model> {
     for (id, name) in FREE_ROUTERS {
         let route = free_route(catalog, id);
         let (Some(context_window), Some(max_tokens)) = (route.iter().map(|m| m.context_window).min(), route.iter().map(|m| m.max_tokens).min()) else { continue };
-        routers.push(Model { provider: "openrouter".into(), id: id.into(), name: name.into(), context_window, max_tokens, accounts: Vec::new() });
+        routers.push(Model { provider: "openrouter".into(), id: id.into(), name: name.into(), context_window, max_tokens, accounts: Vec::new(), price: None });
     }
     routers
 }
@@ -133,7 +178,7 @@ mod tests {
     use serde_json::json;
 
     fn model(provider: &str, id: &str) -> Model {
-        Model { provider: provider.into(), id: id.into(), name: id.into(), context_window: 1, max_tokens: 1, accounts: Vec::new() }
+        Model { provider: provider.into(), id: id.into(), name: id.into(), context_window: 1, max_tokens: 1, accounts: Vec::new(), price: None }
     }
 
     #[test]
@@ -163,14 +208,23 @@ mod tests {
     #[test]
     fn openrouter_list_keeps_tool_models_and_defaults_a_missing_output_limit() {
         let body = json!({"data": [
-            {"id": "anthropic/claude-haiku-5.5", "name": "Anthropic: Claude Haiku 5.5", "context_length": 1000000, "top_provider": {"max_completion_tokens": 128000}, "supported_parameters": ["tools"]},
-            {"id": "openrouter/auto", "name": "Auto Router", "context_length": 2000000, "top_provider": {"max_completion_tokens": null}, "supported_parameters": ["tools"]},
+            {"id": "anthropic/claude-haiku-5.5", "name": "Anthropic: Claude Haiku 5.5", "context_length": 1000000, "top_provider": {"max_completion_tokens": 128000}, "supported_parameters": ["tools"], "pricing": {"prompt": "0.0000001", "completion": "0.0000005", "input_cache_read": "0.00000001", "input_cache_write": "0.000000125", "overrides": [{"min_prompt_tokens": 100000, "prompt": "0.0000005", "completion": "0.0000025", "input_cache_read": "0.00000005", "input_cache_write": "0.000000625"}]}},
+            {"id": "openrouter/auto", "name": "Auto Router", "context_length": 2000000, "top_provider": {"max_completion_tokens": null}, "supported_parameters": ["tools"], "pricing": {"prompt": "-1", "completion": "-1"}},
             {"id": "moondream/moondream3-preview", "context_length": 32000, "top_provider": {}, "supported_parameters": ["temperature"]}
         ]});
         let models = parse_openrouter(&body);
         let ids: Vec<(&str, u64)> = models.iter().map(|m| (m.id.as_str(), m.max_tokens)).collect();
         assert_eq!(ids, [("anthropic/claude-haiku-5.5", 128000), ("openrouter/auto", OPENROUTER_MAX_TOKENS)]);
         assert!(models.iter().all(|m| m.provider == "openrouter"));
+
+        let haiku = Price {
+            base: Rates { input: 1e-7, output: 5e-7, cache_read: 1e-8, cache_write: 1.25e-7 },
+            long_prompt: vec![(100_000, Rates { input: 5e-7, output: 2.5e-6, cache_read: 5e-8, cache_write: 6.25e-7 })],
+        };
+        assert_eq!(price(&models, "claude-haiku-5-5"), Some(&haiku));
+        assert_eq!(price(&models, "anthropic/claude-haiku-5.5"), Some(&haiku));
+        assert_eq!(price(&models, "openrouter/auto"), None);
+        assert_eq!(price(&models, "claude-haiku-5"), None);
     }
 
     #[test]
