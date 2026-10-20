@@ -458,7 +458,7 @@ impl Client {
                 body.as_object_mut().expect("a request is an object").remove("speed");
                 // OpenRouter rejects the whole request when a non-Anthropic model gets block_binding.
                 if !body["model"].as_str().unwrap_or_default().starts_with("anthropic/")
-                    && let Some(thinking) = body["thinking"].as_object_mut()
+                    && let Some(thinking) = body.get_mut("thinking").and_then(Value::as_object_mut)
                 {
                     thinking.remove("block_binding");
                 }
