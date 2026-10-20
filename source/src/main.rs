@@ -40,6 +40,7 @@ Commands:
   plugin install <name|path>  Copy a bundled plugin or a plugin directory into ~/.agents/plugins
   plugin remove <name>        Remove an installed plugin
   plugin list                 List bundled and installed plugins
+  doctor [--provider <p>]     Ping every saved account and show its limits; exits 1 if one fails
   acp                         Serve the Agent Client Protocol on stdin and stdout, for editors like Zed
 
 Flags:
@@ -115,6 +116,23 @@ fn home() -> Result<PathBuf, String> {
     std::env::var_os("HOME").map(PathBuf::from).ok_or_else(|| "HOME is not set.".into())
 }
 
+fn doctor_command(args: &[String]) -> Result<(), String> {
+    let provider = match args {
+        [] => None,
+        [flag, provider] if flag == "--provider" && api::models::PROVIDERS.contains(&provider.as_str()) => Some(provider.as_str()),
+        _ => return Err(format!("Usage: agent doctor [--provider {}].", api::models::PROVIDERS.join("|"))),
+    };
+    let lines = Client::new(&home()?)?.doctor(provider);
+    if lines.is_empty() {
+        return Err("No saved account. Use /login.".into());
+    }
+    for line in &lines {
+        println!("{}", line.as_ref().unwrap_or_else(|failed| failed));
+    }
+    let failed = lines.iter().filter(|line| line.is_err()).count();
+    if failed > 0 { Err(format!("{failed} of {} accounts failed.", lines.len())) } else { Ok(()) }
+}
+
 fn plugin_command(args: &[String]) -> Result<(), String> {
     let home = home()?;
     match args {
@@ -144,8 +162,13 @@ fn main() {
     // An earlier agent with this pid that crashed left files that the spill and bg log `create_new` would refuse.
     tools::remove_spills();
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.first().is_some_and(|command| command == "plugin") {
-        if let Err(message) = plugin_command(&args[1..]) {
+    let command = match args.first().map(String::as_str) {
+        Some("plugin") => Some(plugin_command(&args[1..])),
+        Some("doctor") => Some(doctor_command(&args[1..])),
+        _ => None,
+    };
+    if let Some(result) = command {
+        if let Err(message) = result {
             eprintln!("error: {message}");
             std::process::exit(1);
         }

@@ -565,6 +565,45 @@ impl Client {
         }
         names
     }
+
+    /// `agent doctor`: one line per account, `OK` with the ping time and usage or `FAIL` with the provider's error unchanged.
+    pub fn doctor(&self, provider: Option<&str>) -> Vec<Result<String, String>> {
+        let accounts: Vec<Account> = self.state.lock().unwrap().accounts.iter().filter(|a| provider.is_none_or(|p| a.provider == p)).cloned().collect();
+        accounts.iter().map(|a| self.check(a).map(|line| format!("OK   {} {line}", key(a))).map_err(|error| format!("FAIL {} {error}", key(a)))).collect()
+    }
+
+    /// Refreshes an expired token, lists models and sends a one-token ping on the cheapest one.
+    fn check(&self, account: &Account) -> Result<String, String> {
+        let account = self.fresh(account.clone())?;
+        let request = match account.provider.as_str() {
+            "openrouter" => {
+                // Every key may use the public list's free models, so the ping costs nothing; a rate-limited one moves on to the next.
+                let listed = fetch_models(models_agent().get(format!("{}/v1/models", self.openrouter_base)), models::parse_openrouter)?;
+                let free: Vec<Model> = listed.into_iter().filter(|m| m.id.ends_with(":free")).take(4).collect();
+                let (first, rest) = free.split_first().ok_or("The model list has no free model.")?;
+                let mut request = plain_request(&first.id, "Reply with one word.", "ping", 1);
+                request["fallbacks"] = rest.iter().map(|m| json!({"model": m.id})).collect();
+                request
+            }
+            _ => {
+                let listed = self.list_models(&account)?;
+                let newest = listed.first().ok_or("The model list is empty.")?;
+                plain_request(&models::small_model(&listed, newest).id, "Reply with one word.", "ping", 1)
+            }
+        };
+        let started = Instant::now();
+        self.try_send(&account, &request, &AtomicBool::new(false), &mut |_| {}).map_err(|e| e.message)?;
+        let pinged = format!("{} in {:.1}s", request["model"].as_str().unwrap_or_default(), started.elapsed().as_secs_f64());
+        if !account.is_oauth() {
+            return Ok(pinged);
+        }
+        let base = if account.provider == "anthropic" { &self.anthropic_base } else { &self.chatgpt_base };
+        let usage = match accounts::fetch_usage(&account, base) {
+            Ok(usage) => format!("5h {:.0}%, 7d {:.0}%", usage.five_hour, usage.seven_day),
+            Err(error) => error,
+        };
+        Ok(format!("{pinged}, {usage}"))
+    }
 }
 
 fn key(account: &Account) -> String {
@@ -986,5 +1025,84 @@ mod tests {
         assert_eq!(reply.stop_reason, "aborted");
         assert!(started.elapsed() < Duration::from_secs(5));
         drop(server);
+    }
+
+    /// Serves a models list that both Anthropic and OpenRouter parse; messages get `messages_status` and `messages_body`
+    /// and their request bodies go to the returned receiver.
+    fn mock_provider(messages_status: u16, messages_body: &'static str) -> (String, std::sync::mpsc::Receiver<Value>) {
+        use std::io::{BufRead, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let (sent, received) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let mut stream = stream.unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut request_line = String::new();
+                reader.read_line(&mut request_line).unwrap();
+                // Read the whole request, so closing the socket does not reset it under the client.
+                let mut length = 0;
+                let mut header = String::new();
+                while reader.read_line(&mut header).unwrap() > 2 {
+                    if let Some(value) = header.to_lowercase().strip_prefix("content-length:") {
+                        length = value.trim().parse().unwrap();
+                    }
+                    header.clear();
+                }
+                let mut request = vec![0; length];
+                std::io::Read::read_exact(&mut reader, &mut request).unwrap();
+                let (status, body) = if request_line.contains("/v1/models") {
+                    (
+                        200,
+                        r#"{"data":[{"id":"claude-haiku-9","max_input_tokens":200000,"max_tokens":8192},{"id":"a/one:free","context_length":1000,"supported_parameters":["tools"]},{"id":"b/two:free","context_length":1000,"supported_parameters":["tools"]}]}"#,
+                    )
+                } else {
+                    // A test that only reads the doctor lines has dropped the receiver.
+                    let _ = sent.send(serde_json::from_slice(&request).unwrap());
+                    (messages_status, messages_body)
+                };
+                write!(stream, "HTTP/1.1 {status} X\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len()).unwrap();
+            }
+        });
+        (base, received)
+    }
+
+    const PONG: &str = concat!("data: {\"type\":\"message_start\",\"message\":{\"id\":\"m\",\"usage\":{}}}\n\n", "data: {\"type\":\"message_stop\"}\n\n");
+
+    #[test]
+    fn doctor_reports_ok_for_a_working_account_and_the_provider_error_for_a_rejected_one() {
+        let home = std::env::temp_dir().join(format!("agent-doctor-{}", std::process::id()));
+        let check = |messages_status, messages_body| {
+            let mut client = Client::new(&home).unwrap();
+            client.anthropic_base = mock_provider(messages_status, messages_body).0;
+            client.reload(vec![Account { provider: "anthropic".into(), name: "work".into(), secret: Secret::ApiKey("sk".into()) }]);
+            client.doctor(Some("anthropic"))
+        };
+
+        let ok = check(200, PONG);
+        let rejected = check(401, r#"{"error":{"message":"invalid x-api-key"}}"#);
+        std::fs::remove_dir_all(&home).ok();
+
+        assert!(matches!(&ok[..], [Ok(line)] if line.contains("anthropic/work")), "{ok:?}");
+        assert!(matches!(&rejected[..], [Err(line)] if line.contains("anthropic/work") && line.contains("401") && line.contains("invalid x-api-key")), "{rejected:?}");
+    }
+
+    #[test]
+    fn doctor_pings_openrouter_on_free_models_without_a_thinking_field() {
+        let home = std::env::temp_dir().join(format!("agent-doctor-or-{}", std::process::id()));
+        let mut client = Client::new(&home).unwrap();
+        let (base, requests) = mock_provider(200, PONG);
+        client.openrouter_base = base;
+        client.reload(vec![Account { provider: "openrouter".into(), name: "key".into(), secret: Secret::ApiKey("sk".into()) }]);
+
+        let lines = client.doctor(Some("openrouter"));
+        std::fs::remove_dir_all(&home).ok();
+
+        assert!(matches!(&lines[..], [Ok(_)]), "{lines:?}");
+        let ping = requests.recv().unwrap();
+        assert!(ping.get("thinking").is_none(), "{ping}");
+        assert_eq!(ping["model"], "a/one:free");
+        // A free model hits its rate limit often, so OpenRouter moves the ping to the next one.
+        assert_eq!(ping["fallbacks"], json!([{"model": "b/two:free"}]));
     }
 }
