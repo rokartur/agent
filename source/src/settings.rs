@@ -46,6 +46,8 @@ pub struct Settings {
     pub provider_order: Vec<String>,
     /// `model_key`s the model picker lists first.
     pub pinned_models: Vec<String>,
+    /// Model ids Ctrl+P steps through.
+    pub cycle_models: Vec<String>,
     /// Skill names left out of the prompt and /skill: completion.
     pub disabled_skills: Vec<String>,
     /// One of `CONFLICT_PRIORITIES`: the side whose skill or prompt wins when the project and `~/.agents` share a name.
@@ -230,6 +232,7 @@ fn from_json(own: &Value) -> Settings {
         provider_sort: level(&own["provider_sort"], &PROVIDER_SORTS, "default"),
         provider_order: string_list(&own["provider_order"]),
         pinned_models: string_list(&own["pinned_models"]),
+        cycle_models: string_list(&own["cycle_models"]),
         disabled_skills: string_list(&own["disabled_skills"]),
         conflict_priority: level(&own["conflict_priority"], &CONFLICT_PRIORITIES, "project"),
         disabled_plugins: string_list(&own["disabled_plugins"]),
@@ -322,6 +325,7 @@ fn to_json(settings: &Settings) -> Value {
         "provider_sort": settings.provider_sort,
         "provider_order": settings.provider_order,
         "pinned_models": settings.pinned_models,
+        "cycle_models": settings.cycle_models,
         "disabled_skills": settings.disabled_skills,
         "conflict_priority": settings.conflict_priority,
         "disabled_plugins": settings.disabled_plugins,

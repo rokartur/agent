@@ -440,6 +440,7 @@ const HOTKEYS: [(&str, &[(&str, &str)]); 4] = [
         &[
             ("Ctrl+O", "expand tool output and thinking"),
             ("Shift+Tab", "cycle thinking level"),
+            ("Ctrl+P", "cycle models listed in cycle_models"),
             ("PageUp, PageDown", "scroll the transcript"),
             (if cfg!(target_os = "macos") { "Option+Down" } else { "Alt+Down" }, "jump to the latest message"),
             ("Down", "open running subagents (empty editor)"),
@@ -1436,6 +1437,7 @@ impl App {
             KeyCode::Char('l') if ctrl => screen.invalidate(),
             KeyCode::Char('r') if ctrl => self.open_history(),
             KeyCode::BackTab => self.cycle_thinking(),
+            KeyCode::Char('p') if ctrl => self.cycle_model(),
             KeyCode::Up if alt => {
                 let mut queued = std::mem::take(&mut *self.steering.lock().unwrap());
                 for (mut text, images) in std::mem::take(&mut self.queued_commands) {
@@ -1529,6 +1531,29 @@ impl App {
     fn cycle_thinking(&mut self) {
         self.update_settings(|s| s.thinking = step(&THINKING_LEVELS, &s.thinking.as_str(), true).to_string());
         self.hint = Some((format!("Thinking level: {}", self.settings.thinking), Instant::now()));
+    }
+
+    /// Switches to the next `cycle_models` entry, skipping ids missing from the catalog.
+    fn cycle_model(&mut self) {
+        if self.settings.cycle_models.is_empty() {
+            self.hint = Some(("Set cycle_models in settings.json to switch models with Ctrl+P".into(), Instant::now()));
+            return;
+        }
+        let catalog = self.client.catalog();
+        if catalog.is_empty() {
+            self.hint = Some((MODELS_STILL_LOADING.into(), Instant::now()));
+            return;
+        }
+        let (available, missing): (Vec<String>, Vec<String>) = self.settings.cycle_models.iter().cloned().partition(|id| catalog.iter().any(|m| m.id == *id));
+        if !missing.is_empty() {
+            self.system("models", format!("Not available, skipped: {}", missing.join(", ")));
+        }
+        if available.is_empty() {
+            return;
+        }
+        let model = step(&available, &self.settings.model, true);
+        self.update_settings(|s| s.model = model);
+        self.hint = Some((format!("Model: {}", self.settings.model), Instant::now()));
     }
 
     fn plugin_settings_key(&mut self, key: KeyEvent) {
@@ -4640,6 +4665,13 @@ mod tests {
     fn duration_rolls_minutes_into_hours() {
         assert_eq!(duration(Duration::from_secs(59)), "59s");
         assert_eq!(duration(Duration::from_secs(27811)), "7h 43m 31s");
+    }
+
+    #[test]
+    fn step_wraps_and_starts_over_from_an_unlisted_value() {
+        let models = ["a", "b", "c"];
+        assert_eq!(step(&models, &"c", true), "a");
+        assert_eq!(step(&models, &"x", true), "a");
     }
 
     #[test]

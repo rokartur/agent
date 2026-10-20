@@ -1,3 +1,6 @@
+// settings::to_json's json! literal outgrows the default limit of 128.
+#![recursion_limit = "256"]
+
 mod acp;
 mod agent;
 mod api;
