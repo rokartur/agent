@@ -277,7 +277,7 @@ enum Command {
         command: String,
         keep: bool,
     },
-    Compact,
+    Compact(Option<String>),
     /// New settings; the worker settles their model and answers with Msg::ModelSettled.
     Apply(Box<Settings>),
     Clear,
@@ -350,7 +350,7 @@ const BUILTIN_COMMANDS: &[(&str, MidTurn, &str)] = &[
     ("copy-session-path", MidTurn::Runs, "Copy this session's file path to clipboard for another session to read"),
     ("session", MidTurn::Runs, "Show the session id, file and context use"),
     ("hotkeys", MidTurn::Runs, "Show all keyboard shortcuts"),
-    ("compact", MidTurn::Waits, "Manually compact the session context"),
+    ("compact", MidTurn::Waits, "[focus]: Summarize older messages"),
     ("todos", MidTurn::Runs, "Show and edit the todo list"),
     ("plugins", MidTurn::Runs, "Install, enable and disable plugins"),
     ("skills", MidTurn::Runs, "Enable and disable skills"),
@@ -673,7 +673,7 @@ fn spawn_worker(mut agent: Agent, mut settings: Settings, model_lists: JoinHandl
                     });
                     Ok(String::new())
                 }
-                Command::Compact => match agent.compact() {
+                Command::Compact(focus) => match agent.compact(focus.as_deref()) {
                     Ok(Some(summary)) => {
                         let _ = events.send(Msg::Agent(Event::Compacted { summary }));
                         Ok(String::new())
@@ -1761,7 +1761,7 @@ impl App {
             "quit" | "exit" => self.quit = true,
             "compact" => {
                 self.system("compact", "Compacting context...");
-                self.start(Command::Compact);
+                self.start(Command::Compact(Some(args.to_string()).filter(|focus| !focus.is_empty())));
             }
             "clear" => {
                 self.entries.truncate(self.header_len);

@@ -396,7 +396,7 @@ impl Agent {
         loop {
             if self.auto_compact && self.last_context_tokens > self.context_window.saturating_sub(self.reserve_tokens) {
                 emit(Event::Notice("Compacting context...".into()));
-                if let Some(summary) = self.compact()? {
+                if let Some(summary) = self.compact(None)? {
                     emit(Event::Compacted { summary });
                 }
             }
@@ -983,12 +983,11 @@ impl Agent {
 
     /// Summarizes everything before a recent assistant message and keeps the rest verbatim, like pi.
     /// Returns None when there is nothing old enough to summarize.
-    pub fn compact(&mut self) -> Result<Option<String>, String> {
+    pub fn compact(&mut self, focus: Option<&str>) -> Result<Option<String>, String> {
         let Some(first_kept) = cut_point(&self.messages, self.keep_recent_tokens) else {
             return Ok(None);
         };
-        let conversation = serialize(&self.messages[..first_kept]);
-        let prompt = format!("<conversation>\n{conversation}\n</conversation>\n\n{SUMMARY_PROMPT}");
+        let prompt = compaction_prompt(&serialize(&self.messages[..first_kept]), focus);
         // The cheap model summarizes only when the conversation fits its window, so a 1M-context session keeps the main model.
         let cheap = self.client.catalog().iter().find(|model| model.id == self.cheap_model && model.context_window >= self.context_window);
         let (model, output_limit) = cheap.map_or((self.model.clone(), u64::MAX), |model| (model.id.clone(), model.max_tokens));
@@ -1622,6 +1621,14 @@ fn shift_checkpoints(checkpoints: &mut Vec<Checkpoint>, first_kept: usize) {
     }
 }
 
+fn compaction_prompt(conversation: &str, focus: Option<&str>) -> String {
+    let prompt = format!("<conversation>\n{conversation}\n</conversation>\n\n{SUMMARY_PROMPT}");
+    match focus {
+        Some(focus) => format!("{prompt}\n\n<focus>\n{focus}\n</focus>\nGive extra detail to what the focus names."),
+        None => prompt,
+    }
+}
+
 /// `transcript` is the session file, which keeps every message the summary replaces.
 fn compacted(messages: &[Value], summary: &str, first_kept: usize, transcript: Option<&Path>) -> Vec<Value> {
     let mut text = format!("{SUMMARY_PREFIX}{summary}{SUMMARY_SUFFIX}");
@@ -1758,6 +1765,12 @@ mod tests {
             text_of(&json!({"content": kept[0]["content"]}))
                 .ends_with("</summary>\n\nThe full conversation before this summary is in /s/abc.jsonl, one JSON entry per line. Search it with rg when the summary lacks a detail you need.")
         );
+    }
+
+    #[test]
+    fn compaction_prompt_appends_the_focus() {
+        assert!(compaction_prompt("c", None).ends_with(SUMMARY_PROMPT));
+        assert!(compaction_prompt("c", Some("API decisions")).ends_with("<focus>\nAPI decisions\n</focus>\nGive extra detail to what the focus names."));
     }
 
     #[test]
