@@ -7,8 +7,8 @@
 <meta name="description" content="Code with Claude or ChatGPT from your terminal. agent is a fast native coding agent for macOS and Linux that installs with one command and updates itself.">
 <link rel="canonical" href="https://agent.rokartur.com/">
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
-<meta name="theme-color" content="#000000">
-<meta name="color-scheme" content="dark">
+<meta name="theme-color" content="#ffffff">
+<meta name="color-scheme" content="light">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="agent">
 <meta property="og:url" content="https://agent.rokartur.com/">
@@ -30,44 +30,165 @@
 }
 </script>
 <style>
-  body { margin: 0; padding: 40px 20px; background: #000; color: #fff; font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
-  h1 { font: inherit; color: #888; margin: 0; }
-  p { margin: 14px 0 0; }
-  .muted { color: #888; }
-  a { color: inherit; text-decoration: none; }
-  a:hover, a:focus-visible { color: #fff; }
-  button { all: unset; cursor: pointer; display: inline-flex; align-items: center; gap: 8px; white-space: nowrap; }
-  button:focus-visible { outline: 1px solid #fff; outline-offset: 4px; }
-  code { font: inherit; font-weight: 600; }
-  .icon { display: inline-flex; color: #888; transition: opacity 120ms; }
-  @media (hover: hover) {
-    .icon { opacity: 0; }
-    button:hover .icon, button:focus-visible .icon { opacity: 1; }
+  :root { --ink: #0a0a0a; --text: #333; --muted: #6b6b6b; --tone: #f4f4f4; --line: #ececec; --ease: cubic-bezier(.2, 0, 0, 1); }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body { margin: 0; background: #fff; color: var(--ink); font: 16px/1.55 Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; -webkit-font-smoothing: antialiased; }
+  a { color: inherit; }
+  :focus-visible { outline: 2px solid var(--ink); outline-offset: 3px; border-radius: 4px; }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .wrap { max-width: 1280px; margin: 0 auto; padding: 0 56px; }
+
+  nav { display: flex; align-items: center; justify-content: space-between; padding-top: 24px; padding-bottom: 24px; }
+  .brand { display: flex; align-items: center; gap: 10px; font-weight: 600; font-size: 17px; text-decoration: none; }
+  .links { display: flex; align-items: center; gap: 28px; font-size: 14px; }
+  .links a { text-decoration: none; color: #444; transition: color 150ms var(--ease); }
+  .links a:hover { color: var(--ink); }
+  .links .btn { color: #fff; }
+  .btn { display: inline-flex; padding: 10px 16px; border-radius: 8px; background: var(--ink); color: #fff; font-weight: 500; transition: transform 150ms var(--ease), opacity 150ms var(--ease); }
+  .links .btn:hover { color: #fff; opacity: .85; }
+  .btn:active, .cmd:active { transform: scale(.97); }
+
+  .cmd { all: unset; box-sizing: border-box; cursor: pointer; display: inline-flex; align-items: center; gap: 14px; max-width: 100%; padding: 14px 18px; border-radius: 10px; background: var(--tone); font-size: clamp(11px, 3vw, 15px); white-space: nowrap; transition: transform 150ms var(--ease), background-color 150ms var(--ease); }
+  .cmd:hover { background: #ebebeb; }
+  .cmd:focus-visible { outline: 2px solid var(--ink); outline-offset: 3px; }
+  .cmd code { min-width: 0; overflow-x: auto; scrollbar-width: none; }
+  .cmd .prompt { color: #9a9a9a; }
+  .cmd .status { min-width: 44px; color: var(--muted); font-size: 13px; }
+
+  .hero > *, .features > * { min-width: 0; }
+  .hero { display: grid; grid-template-columns: 1fr 1fr; gap: 72px; align-items: end; padding-top: 96px; padding-bottom: 120px; }
+  h1 { font-size: 112px; line-height: .95; letter-spacing: -.05em; margin: 0; font-weight: 650; }
+  .sub { font-size: 21px; margin: 32px 0 36px; max-width: 28ch; color: var(--text); }
+
+  .bars { display: grid; gap: 22px; margin: 0; }
+  .bars figcaption { color: var(--muted); }
+  .bar { display: grid; grid-template-columns: 64px 1fr 72px; gap: 16px; align-items: center; font-size: 15px; font-variant-numeric: tabular-nums; }
+  .bar i { display: block; height: 44px; background: var(--ink); border-radius: 3px; transform-origin: left; animation: grow 900ms var(--ease) both; }
+  .bar.other { color: var(--muted); }
+  .bar.other i { opacity: .22; }
+  .bar:nth-of-type(2) i { animation-delay: 120ms; }
+  .bar:nth-of-type(3) i { animation-delay: 240ms; }
+  @keyframes grow { from { transform: scaleX(0); } }
+
+  .figs { display: grid; grid-template-columns: repeat(4, 1fr); background: var(--tone); border-radius: 16px; margin-bottom: 140px; }
+  .fig { padding: 36px 28px; }
+  .fig strong { display: block; font-size: 48px; letter-spacing: -.04em; font-weight: 600; line-height: 1; font-variant-numeric: tabular-nums; }
+  .fig span { display: block; margin-top: 12px; font-size: 15px; color: #444; }
+  .fig em { font-style: normal; color: #8a8a8a; }
+
+  .features { display: grid; grid-template-columns: 1fr 2fr; gap: 64px; padding-bottom: 140px; }
+  h2 { font-size: 40px; letter-spacing: -.03em; margin: 0; font-weight: 600; line-height: 1.05; }
+  .features p.note { color: var(--muted); margin: 16px 0 0; font-size: 15px; }
+  .row { display: grid; grid-template-columns: 1fr 1.5fr; gap: 32px; padding: 20px 0; }
+  .row + .row { border-top: 1px solid var(--line); }
+  .row h3 { margin: 0; font-size: 18px; font-weight: 600; }
+  .row p { margin: 0; color: #444; font-size: 15px; }
+
+  .band { display: flex; justify-content: space-between; align-items: center; gap: 40px; flex-wrap: wrap; padding: 72px 56px; background: var(--ink); color: #fff; border-radius: 20px; margin-bottom: 56px; }
+  .band .cmd { background: #1d1d1d; color: #fff; }
+  .band .cmd:hover { background: #2a2a2a; }
+  .band .cmd:focus-visible { outline-color: #fff; }
+  .band .cmd .status { color: #9a9a9a; }
+
+  footer { display: flex; justify-content: space-between; align-items: center; gap: 16px; flex-wrap: wrap; padding-top: 32px; padding-bottom: 48px; font-size: 14px; color: var(--muted); }
+  footer a { text-decoration: none; }
+  footer a:hover { color: var(--ink); }
+
+  .reveal { animation: rise 700ms var(--ease) both; }
+  .reveal:nth-child(2) { animation-delay: 80ms; }
+  .reveal:nth-child(3) { animation-delay: 160ms; }
+  @keyframes rise { from { opacity: 0; transform: translateY(20px); } }
+
+  @media (max-width: 860px) {
+    .wrap { padding: 0 20px; }
+    .links a:not(.btn) { display: none; }
+    .hero, .features, .row { grid-template-columns: 1fr; gap: 36px; }
+    .row { gap: 6px; }
+    .hero { padding-top: 40px; padding-bottom: 80px; }
+    h1 { font-size: 64px; }
+    .sub { font-size: 19px; }
+    .figs { grid-template-columns: 1fr 1fr; margin-bottom: 96px; }
+    .fig { padding: 28px 20px; }
+    .fig strong { font-size: 36px; }
+    .features { padding-bottom: 96px; }
+    h2 { font-size: 32px; }
+    .band { padding: 40px 24px; gap: 28px; margin-bottom: 20px; }
   }
-  .meta { font-size: 13px; }
-  #install { font-size: clamp(9px, 2.5vw, 14px); }
-  @media (min-width: 640px) { body { padding: 56px 32px; } }
+  @media (prefers-reduced-motion: reduce) {
+    html { scroll-behavior: auto; }
+    .reveal, .bar i { animation: none; }
+  }
 </style>
 </head>
 <body>
-<main>
-  <h1>simple af possible</h1>
-  <p><button id="install" type="button" aria-label="Copy install command"><span class="muted">$ </span><code>curl -fsSL https://agent.rokartur.com/install.sh | sh</code><span class="icon" aria-hidden="true"><svg width="14" height="14" viewBox="0 0 16 16" fill="none"><rect x="5.5" y="5.5" width="8" height="8" rx="1.5" stroke="currentColor" stroke-width="1.5"/><path d="M10.5 3.5v-1a1 1 0 0 0-1-1h-6a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h1" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg></span><span class="muted" role="status"></span></button></p>
-  <p class="meta muted">macOS, Linux · <a href="https://github.com/rokartur/agent">github</a></p>
-  <a href="https://aiagentslisting.com/agent">
-    <img src="https://aiagentslisting.com/agent/badge.svg?theme=dark" alt="agent badge" width="200" height="50" loading="lazy" />
-  </a>
-</main>
+<div class="wrap">
+  <nav>
+    <a class="brand" href="/"><svg width="28" height="15" viewBox="3 9 26 14" aria-hidden="true"><g fill="currentColor"><rect x="3" y="9" width="4" height="14" opacity=".25"/><rect x="7" y="9" width="4" height="14" opacity=".5"/><rect x="11" y="9" width="4" height="14" opacity=".75"/><rect x="15" y="9" width="5" height="14"/><path d="M21 9l8 7-8 7z"/></g></svg>agent</a>
+    <div class="links"><a href="#benchmark">Benchmark</a><a href="#features">Features</a><a href="https://github.com/rokartur/agent">GitHub</a><a class="btn" href="#install">Install</a></div>
+  </nav>
+
+  <main>
+    <section class="hero">
+      <div>
+        <h1 class="reveal">27 MB idle.</h1>
+        <p class="sub reveal">A coding agent in one Rust binary. Bring your Claude or ChatGPT login and start.</p>
+        <button class="cmd reveal" type="button" aria-label="Copy install command"><code><span class="prompt">$ </span>curl -fsSL https://agent.rokartur.com/install.sh | sh</code><span class="status" role="status">Copy</span></button>
+      </div>
+      <figure class="bars" id="benchmark">
+        <figcaption>Memory when idle</figcaption>
+        <div class="bar"><b>agent</b><i style="width: 8.7%"></i><span>27 MB</span></div>
+        <div class="bar other"><span>jcode</span><i style="width: 15.5%"></i><span>48 MB</span></div>
+        <div class="bar other"><span>pi</span><i style="width: 100%"></i><span>310 MB</span></div>
+      </figure>
+    </section>
+
+    <section class="figs" aria-label="Benchmark">
+      <div class="fig"><strong>2.30 s</strong><span>to answer "OK" <em>pi takes 4.20 s</em></span></div>
+      <div class="fig"><strong>17.8k</strong><span>tokens of base context <em>jcode sends 24.2k</em></span></div>
+      <div class="fig"><strong>$0.61</strong><span>for the semver port <em>jcode costs $0.84</em></span></div>
+      <div class="fig"><strong>9.5</strong><span>tool calls per task <em>jcode needs 14.7</em></span></div>
+    </section>
+
+    <section class="features" id="features">
+      <div>
+        <h2>Small binary, full agent</h2>
+        <p class="note">Benchmark: same model, same prompt, 6 runs each, every run passed all hidden tests. <a href="https://github.com/rokartur/agent#compared-with-jcode-and-pi">Full table</a></p>
+      </div>
+      <div>
+        <div class="row"><h3>Every account you have</h3><p>Claude, ChatGPT, Anthropic and OpenRouter keys. When one hits its limit, it moves to the next. /usage shows what is left.</p></div>
+        <div class="row"><h3>Edits by line anchor</h3><p>If the file changed since it last read it, the edit is refused. No silent overwrites.</p></div>
+        <div class="row"><h3>Checks its own work</h3><p>Language server errors and your edit hooks after every change. It fixes what they find.</p></div>
+        <div class="row"><h3>Rewind</h3><p>Esc twice goes back to an earlier prompt, and your files go back with it.</p></div>
+        <div class="row"><h3>Subagents</h3><p>Big work splits into parallel child agents, tuned in a plain Markdown prompt.</p></div>
+        <div class="row"><h3>Plugins, MCP, skills</h3><p>Plugins in any language over JSON-RPC. MCP servers with OAuth. Skills, with /skill-usage to find the dead ones.</p></div>
+        <div class="row"><h3>Scripts and CI</h3><p><code>agent -p</code> prints and exits, <code>--headless</code> streams JSONL, <code>agent acp</code> talks to Zed.</p></div>
+      </div>
+    </section>
+
+    <section class="band" id="install">
+      <h2>One line to install.</h2>
+      <button class="cmd" type="button" aria-label="Copy install command"><code><span class="prompt">$ </span>curl -fsSL https://agent.rokartur.com/install.sh | sh</code><span class="status" role="status">Copy</span></button>
+    </section>
+  </main>
+
+  <footer>
+    <span>macOS and Linux. Updates itself. GPL-3.0.</span>
+    <a href="https://github.com/rokartur/agent">github.com/rokartur/agent</a>
+    <a href="https://aiagentslisting.com/agent">Listed on AI Agents Listing</a>
+  </footer>
+</div>
 <script>
-  const install = document.getElementById("install");
-  const copied = install.querySelector("[role=status]");
-  let hideCopied;
-  install.addEventListener("click", async () => {
-    await navigator.clipboard.writeText(install.querySelector("code").textContent);
-    copied.textContent = "copied";
-    clearTimeout(hideCopied);
-    hideCopied = setTimeout(() => { copied.textContent = ""; }, 1500);
-  });
+  for (const button of document.querySelectorAll(".cmd")) {
+    const status = button.querySelector("[role=status]");
+    let resetStatus;
+    button.addEventListener("click", async () => {
+      await navigator.clipboard.writeText(button.querySelector("code").textContent.slice(2));
+      status.textContent = "Copied";
+      clearTimeout(resetStatus);
+      resetStatus = setTimeout(() => { status.textContent = "Copy"; }, 1500);
+    });
+  }
 </script>
 </body>
 </html>
