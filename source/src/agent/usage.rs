@@ -29,7 +29,7 @@ pub fn from_entry(entry: &Value) -> Usage {
     Usage { input: number("input"), output: number("output"), cache_read: number("cache_read"), cache_write: number("cache_write") }
 }
 
-/// The token line /subagents shows: "↑1k ↓300 cache 40k".
+/// The token line /tasks shows: "↑1k ↓300 cache 40k".
 pub fn brief(usage: Usage) -> String {
     format!("↑{} ↓{} cache {}", tokens(usage.input), tokens(usage.output), tokens(usage.cache_read))
 }

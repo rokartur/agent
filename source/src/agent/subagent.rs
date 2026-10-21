@@ -38,11 +38,13 @@ fn without_leading_comment(text: &str) -> &str {
     }
 }
 
-/// One child process, shared with /subagents.
+/// One child process, shared with /tasks.
 pub struct Run {
     pub id: String,
     pub label: String,
     pub task: String,
+    pub model: String,
+    pub thinking: String,
     pub background: bool,
     started: Instant,
     child: Mutex<Option<Child>>,
@@ -89,7 +91,7 @@ impl Run {
         }
     }
 
-    /// The row /subagents and the transcript show: label, last tool, call count, time, tokens.
+    /// The row /tasks and the transcript show: label, last tool, call count, time, tokens.
     pub fn summary(&self) -> String {
         let (status, elapsed) = (self.status(), self.elapsed().as_secs());
         let state = self.state.lock().unwrap();
@@ -178,6 +180,8 @@ impl Runs {
             id: format!("sa-{}", self.list.len() + 1),
             label: launch.label,
             task: launch.task,
+            model: launch.model,
+            thinking: launch.thinking,
             background,
             started: Instant::now(),
             child: Mutex::new(Some(child)),
@@ -208,9 +212,9 @@ impl Runs {
         self.list.iter().filter(|run| run.is_running()).count()
     }
 
-    /// Moves running runs to the top, each group kept in start order.
+    /// Running runs first, each group newest first.
     pub fn running_first(&mut self) {
-        self.list.sort_by_key(|run| !run.is_running());
+        self.list.sort_by_key(|run| (!run.is_running(), std::cmp::Reverse(run.started)));
     }
 }
 
@@ -315,7 +319,7 @@ pub fn tasks(input: &Value) -> Result<Vec<Task>, String> {
 
 #[cfg(test)]
 pub(crate) fn scan_run() -> Run {
-    Run { id: "sa-1".into(), label: "scan".into(), task: "scan".into(), background: true, started: Instant::now(), child: Mutex::new(None), state: Mutex::default() }
+    Run { id: "sa-1".into(), label: "scan".into(), task: "scan".into(), model: "opus".into(), thinking: "high".into(), background: true, started: Instant::now(), child: Mutex::new(None), state: Mutex::default() }
 }
 
 #[cfg(test)]
@@ -408,10 +412,11 @@ mod tests {
     }
 
     #[test]
-    fn running_runs_move_to_the_top_in_start_order() {
+    fn running_runs_move_to_the_top_newest_first() {
         let mut runs = Runs::default();
-        for (id, done) in [("sa-1", true), ("sa-2", false), ("sa-3", true), ("sa-4", false)] {
-            let run = Run { id: id.into(), ..scan_run() };
+        let start = Instant::now();
+        for (seconds, (id, done)) in [("sa-1", true), ("sa-2", false), ("sa-3", true), ("sa-4", false)].into_iter().enumerate() {
+            let run = Run { id: id.into(), started: start + Duration::from_secs(seconds as u64), ..scan_run() };
             if done {
                 run.state.lock().unwrap().result = Some(Ok("done".into()));
             }
@@ -419,6 +424,6 @@ mod tests {
         }
         runs.running_first();
         let ids: Vec<&str> = runs.list.iter().map(|run| run.id.as_str()).collect();
-        assert_eq!(ids, ["sa-2", "sa-4", "sa-1", "sa-3"]);
+        assert_eq!(ids, ["sa-4", "sa-2", "sa-3", "sa-1"]);
     }
 }

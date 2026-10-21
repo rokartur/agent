@@ -24,7 +24,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime};
 
 use crate::agent::FollowUp;
 use crate::agent::modes::{self, CAVEMAN_LEVELS, PONYTAIL_LEVELS};
@@ -207,20 +207,22 @@ enum Panel {
         data: Value,
         index: usize,
     },
-    Terminals {
+    /// The agent rows under the footer: `row` 0 is main, then each running subagent in list order.
+    Agents {
+        row: usize,
+    },
+    /// /tasks: `index` counts the shells, then the subagent runs.
+    Tasks {
         index: usize,
     },
-    /// One terminal from /ps, full screen and read-only. `loaded` is the (log size, width) `lines` were built for.
+    /// One shell from /tasks, full screen and read-only. `loaded` is the (log size, width) `lines` were built for.
     Terminal {
         index: usize,
         scroll: usize,
         loaded: Option<(u64, usize)>,
         lines: Vec<Line>,
     },
-    Subagents {
-        index: usize,
-    },
-    /// One run from /subagents, full screen and read-only. `loaded` is the (file size, width) `lines` were built for.
+    /// One subagent run from /tasks, full screen and read-only. `loaded` is the (file size, width) `lines` were built for.
     Subagent {
         index: usize,
         scroll: usize,
@@ -387,8 +389,7 @@ const BUILTIN_COMMANDS: &[(&str, MidTurn, &str)] = &[
     ("changes", MidTurn::Waits, "List files changed in this session and show their diffs"),
     ("skill-usage", MidTurn::Runs, "Show how often each skill was used, least used first"),
     ("rtk", MidTurn::Runs, "Show rtk token savings"),
-    ("ps", MidTurn::Runs, "Show background terminals"),
-    ("subagents", MidTurn::Runs, "Show subagent runs"),
+    ("tasks", MidTurn::Runs, "Show background shells and subagent runs"),
     ("goal", MidTurn::Runs, "[objective | pause | resume | stop | done]: Set a goal the agent keeps working toward, or manage it"),
     ("btw", MidTurn::Runs, "<question>: Ask a side question without touching the session"),
     ("worktree", MidTurn::Runs, "[name]: Move this session to a git worktree or remove one: pick one, or name a branch to open or create"),
@@ -475,7 +476,7 @@ const HOTKEYS: [(&str, &[(&str, &str)]); 4] = [
             ("Ctrl+P", "cycle models listed in cycle_models"),
             ("PageUp, PageDown", "scroll the transcript"),
             (if cfg!(target_os = "macos") { "Option+Down" } else { "Alt+Down" }, "jump to the latest message"),
-            ("Down", "open running subagents (empty editor)"),
+            ("Down", "walk the running subagents, Enter opens one (empty editor)"),
         ],
     ),
     ("Stop", &[("Esc", "abort the running turn"), ("Esc Esc", "rewind to an earlier prompt and its files (idle)"), ("Ctrl+C Ctrl+C", "quit"), ("Ctrl+D", "quit on an empty editor")]),
@@ -943,8 +944,7 @@ fn event_loop(app: &mut App, inbox: &Receiver<Msg>, out: &mut Stdout) -> Result<
         } else if app.working.is_some()
             || app.hint.is_some()
             || app.transcribing.is_some()
-            || (matches!(app.panel, Some(Panel::Subagents { .. })) && app.subagents.lock().unwrap().running() > 0)
-            || (matches!(app.panel, Some(Panel::Terminals { .. })) && app.terminals.lock().unwrap().running() > 0)
+            || (matches!(app.panel, Some(Panel::Tasks { .. })) && (app.subagents.lock().unwrap().running() > 0 || app.terminals.lock().unwrap().running() > 0))
         {
             ANIMATION_TICK
         } else if app.recording.is_some() {
@@ -1520,7 +1520,7 @@ impl App {
             KeyCode::PageDown => self.scroll = self.scroll.saturating_sub(self.transcript_view.0.max(1)),
             KeyCode::Up => self.editor.up(self.editor_width),
             KeyCode::Down if self.editor.is_empty() && self.subagents.lock().unwrap().running() > 0 => {
-                self.open_subagents();
+                self.panel = Some(Panel::Agents { row: 1 });
             }
             KeyCode::Down => self.editor.down(self.editor_width),
             KeyCode::Char('v') if ctrl => self.attach(image::from_clipboard()),
@@ -1938,10 +1938,10 @@ impl App {
             }
             "skill-usage" => self.skill_usage(),
             "rtk" => self.rtk_gain(),
-            "ps" if self.terminals.lock().unwrap().list.is_empty() => self.system("ps", "No background terminals yet. The agent starts them with Bash run_in_background."),
-            "ps" => self.panel = Some(Panel::Terminals { index: 0 }),
-            "subagents" if self.subagents.lock().unwrap().list.is_empty() => self.system("subagents", "No subagent runs yet."),
-            "subagents" => self.open_subagents(),
+            "tasks" if self.terminals.lock().unwrap().list.is_empty() && self.subagents.lock().unwrap().list.is_empty() => {
+                self.system("tasks", "No background tasks yet. The agent starts them with Bash run_in_background or Agent.");
+            }
+            "tasks" => self.open_tasks(),
             "login" => self.panel = Some(Panel::Login(login::Login::Kind { index: 0 })),
             "voice" => match voice::start(&self.home) {
                 Ok(recording) => self.recording = Some(recording),
@@ -2340,34 +2340,31 @@ impl App {
                     _ => {}
                 }
             }
-            Some(Panel::Subagents { index }) => {
-                let runs = self.subagents.lock().unwrap();
-                let run = runs.list[*index].clone();
-                let last = runs.list.len() - 1;
-                drop(runs);
+            Some(Panel::Agents { row }) => {
+                let list = self.subagents.lock().unwrap().list.clone();
+                let running: Vec<usize> = (0..list.len()).filter(|&index| list[index].is_running()).collect();
+                let selected = (*row).min(running.len());
                 match code {
-                    KeyCode::Up => *index = index.saturating_sub(1),
-                    KeyCode::Down => *index = (*index + 1).min(last),
-                    KeyCode::Char('k') => run.stop(),
-                    KeyCode::Enter => self.panel = Some(Panel::Subagent { index: *index, scroll: 0, loaded: None, lines: Vec::new() }),
+                    KeyCode::Up if selected > 0 => *row = selected - 1,
+                    KeyCode::Down => *row = (selected + 1).min(running.len()),
+                    KeyCode::Char('x') if selected > 0 => list[running[selected - 1]].stop(),
+                    KeyCode::Enter if selected > 0 => self.panel = Some(Panel::Subagent { index: running[selected - 1], scroll: 0, loaded: None, lines: Vec::new() }),
+                    KeyCode::Up | KeyCode::Enter | KeyCode::Esc => self.panel = None,
                     _ => {}
                 }
             }
-            Some(Panel::Terminals { index }) => {
-                let terminals = self.terminals.lock().unwrap();
-                if terminals.list.is_empty() {
-                    return;
-                }
-                let last = terminals.list.len() - 1;
+            Some(Panel::Tasks { index }) => {
+                let terminals = self.terminals.lock().unwrap().list.clone();
+                let runs = self.subagents.lock().unwrap().list.clone();
+                let last = terminals.len() + runs.len() - 1;
+                let shell = *index < terminals.len();
                 match code {
                     KeyCode::Up => *index = index.saturating_sub(1),
                     KeyCode::Down => *index = (*index + 1).min(last),
-                    KeyCode::Char('k') => _ = terminals.list[*index].stop(),
-                    KeyCode::Enter => {
-                        let index = *index;
-                        drop(terminals);
-                        self.panel = Some(Panel::Terminal { index, scroll: 0, loaded: None, lines: Vec::new() });
-                    }
+                    KeyCode::Char('x') if shell => _ = terminals[*index].stop(),
+                    KeyCode::Char('x') => runs[*index - terminals.len()].stop(),
+                    KeyCode::Enter if shell => self.panel = Some(Panel::Terminal { index: *index, scroll: 0, loaded: None, lines: Vec::new() }),
+                    KeyCode::Enter => self.panel = Some(Panel::Subagent { index: *index - terminals.len(), scroll: 0, loaded: None, lines: Vec::new() }),
                     _ => {}
                 }
             }
@@ -3073,8 +3070,8 @@ impl App {
                 view.render(width, PANEL_ROWS)
             }
             Panel::Ask(ask) => ask.render(width),
-            Panel::Subagents { index } => subagents_panel(&self.subagents.lock().unwrap().list, *index, width),
-            Panel::Terminals { index } => terminals_panel(&self.terminals.lock().unwrap().list, *index, width),
+            Panel::Agents { .. } => Vec::new(),
+            Panel::Tasks { index } => tasks_panel(&self.terminals.lock().unwrap().list, &self.subagents.lock().unwrap().list, self.client.catalog(), *index, width),
             Panel::Todos { index } => {
                 let todos = self.todos.lock().unwrap();
                 let rows: Vec<panel::Row> = todos.visible().map(|t| panel::Row { left: format!("#{} {}", t.id, t.subject), right: vec![span(t.status.as_str(), todo_style(t.status))] }).collect();
@@ -3352,10 +3349,11 @@ impl App {
         }
     }
 
-    /// Sorts only on open, so a run that finishes does not move under the cursor while the panel is up.
-    fn open_subagents(&mut self) {
+    /// Sorts only on open, so a task that finishes does not move under the cursor while the panel is up.
+    fn open_tasks(&mut self) {
+        self.terminals.lock().unwrap().running_first();
         self.subagents.lock().unwrap().running_first();
-        self.panel = Some(Panel::Subagents { index: 0 });
+        self.panel = Some(Panel::Tasks { index: 0 });
     }
 
     fn session_title(&self, id: &str) -> String {
@@ -3489,7 +3487,7 @@ impl App {
                 }
             }
             Event::Steered(text) => self.push(Item::User(text)),
-            // The output tail went to the model; /ps shows it in full.
+            // The output tail went to the model; /tasks shows it in full.
             Event::FollowUp { source, text } => self.system(&source, text.split_once('\n').map_or(text.as_str(), |(head, _)| head)),
             Event::TurnEnd { usage, context_tokens } => {
                 self.context_tokens = context_tokens;
@@ -3625,12 +3623,11 @@ impl App {
         let running = self.terminals.lock().unwrap().running();
         if running > 0 {
             let noun = if running == 1 { "terminal" } else { "terminals" };
-            bottom.push(vec![span(format!(" {running} background {noun} running • /ps to view"), DIM)]);
+            bottom.push(vec![span(format!(" {running} background {noun} running • /tasks to view"), DIM)]);
         }
-        let running = self.subagents.lock().unwrap().running();
-        if running > 0 {
-            let noun = if running == 1 { "subagent" } else { "subagents" };
-            bottom.push(vec![span(format!(" {running} {noun} running • ↓ to view"), DIM)]);
+        let runs: Vec<Arc<Run>> = self.subagents.lock().unwrap().list.iter().filter(|run| run.is_running()).cloned().collect();
+        if runs.is_empty() && matches!(self.panel, Some(Panel::Agents { .. })) {
+            self.panel = None;
         }
         let mut panel_cursor = None;
         match &self.panel {
@@ -3663,6 +3660,13 @@ impl App {
         let cursor = panel_cursor.unwrap_or((cursor_x, editor_top + cursor_row - self.input_top));
         bottom.push(Vec::new());
         bottom.extend(self.footer(width));
+        if !runs.is_empty() {
+            let selected = match self.panel {
+                Some(Panel::Agents { row }) => Some(row.min(runs.len())),
+                _ => None,
+            };
+            bottom.extend(agent_rows(&runs, self.client.catalog(), selected));
+        }
 
         let room = height.saturating_sub(bottom.len());
         // The last column is kept for the scrollbar so text does not rewrap when it appears.
@@ -3776,8 +3780,8 @@ impl App {
                 }
             }
             KeyCode::Esc => {
-                let index = *index;
-                self.panel = Some(Panel::Subagents { index });
+                let index = self.terminals.lock().unwrap().list.len() + *index;
+                self.panel = Some(Panel::Tasks { index });
             }
             _ => {}
         }
@@ -3793,7 +3797,7 @@ impl App {
             *lines = log_lines(&terminal.log(), width);
         }
         let header = vec![span(format!(" {} {}", terminal.id, terminal.title), SYSTEM), span(format!("  {} {}", terminal.status().as_str(), terminal.elapsed()), DIM)];
-        full_screen(header, lines, scroll, width, height, " ↑↓ scroll     ←→ previous/next terminal     k kill     esc back")
+        full_screen(header, lines, scroll, width, height, " ↑↓ scroll     ←→ previous/next shell     x stop     esc back")
     }
 
     fn terminal_key(&mut self, code: KeyCode) {
@@ -3805,7 +3809,7 @@ impl App {
             KeyCode::Down => *scroll = scroll.saturating_sub(1),
             KeyCode::PageUp => *scroll += 10,
             KeyCode::PageDown => *scroll = scroll.saturating_sub(10),
-            KeyCode::Char('k') => _ = terminals.list[*index].stop(),
+            KeyCode::Char('x') => _ = terminals.list[*index].stop(),
             KeyCode::Left | KeyCode::Right => {
                 let next = if code == KeyCode::Left { index.saturating_sub(1) } else { (*index + 1).min(last) };
                 if next != *index {
@@ -3815,7 +3819,7 @@ impl App {
             KeyCode::Esc => {
                 let index = *index;
                 drop(terminals);
-                self.panel = Some(Panel::Terminals { index });
+                self.panel = Some(Panel::Tasks { index });
             }
             _ => {}
         }
@@ -4696,87 +4700,119 @@ fn thinking_style(level: &str) -> Style {
     Style::rgb(gray * 0x010101)
 }
 
-/// /subagents: per-status counts in the title, then one row per run with a status icon, a dim id and the label as the main text.
-fn subagents_panel(runs: &[Arc<Run>], selected: usize, columns: usize) -> Vec<Line> {
-    let mut total = Usage::default();
-    let (mut running, mut done, mut failed) = (0, 0, 0);
-    for run in runs {
-        let state = run.state.lock().unwrap();
-        total.add(state.usage);
-        match state.result {
-            None => running += 1,
-            Some(Ok(_)) => done += 1,
-            Some(Err(_)) => failed += 1,
-        }
-    }
-    let tick = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() / 80;
-    // Same ✦ pulse as the Working line: lit 5 of every 12 ticks of 80 ms.
-    let spinner = star(((tick % 12) as usize).abs_diff(2));
-    let mut title = vec![span(format!("Subagents {}", runs.len()), BRIGHT.bold())];
-    if running > 0 {
-        title.extend([span("  ", PLAIN), spinner.clone(), span(format!(" {running} running"), SYSTEM)]);
-    }
-    if done > 0 {
-        title.push(span(format!("  ✓ {done}"), OK));
-    }
-    if failed > 0 {
-        title.push(span(format!("  ✗ {failed}"), ERROR));
-    }
-    if total != Usage::default() {
-        title.push(span(format!("   {}", usage::brief(total)), DIM));
-    }
-    let id_width = runs.iter().map(|run| width(&run.id)).max().unwrap_or(0);
-    let label_width = runs.iter().map(|run| width(&run.label)).max().unwrap_or(0);
-    let pad = |text: &str, to: usize| format!("{text}{}", " ".repeat(to - width(text)));
-    panel::frame(vec![title], runs.len(), selected, "↑↓ navigate     enter view     k stop     esc close", columns, PANEL_ROWS, |index| {
-        let run = &runs[index];
+/// /tasks: a "Shells" and a "Local agents" section; each agent row adds model, effort, time and output tokens in dim columns.
+/// Main, then the running subagents, as in Claude Code; `selected` is the row walked to with ↓, None while typing.
+fn agent_rows(runs: &[Arc<Run>], catalog: &[Model], selected: Option<usize>) -> Vec<Line> {
+    let name_width = runs.iter().map(|run| width(&run.label)).max().unwrap_or(0);
+    let model_names: Vec<String> = runs.iter().map(|run| model_name(catalog, &run.model)).collect();
+    let model_width = model_names.iter().map(|name| width(name)).max().unwrap_or(0);
+    let thinking_width = runs.iter().map(|run| width(&run.thinking)).max().unwrap_or(0);
+    let marker = |row: usize| if selected.unwrap_or(0) == row { ("● ", BRIGHT.bold()) } else { ("○ ", PLAIN) };
+    let hint = if selected.is_some() { "   ↑↓ select · enter view · x stop · esc back" } else { "   ↓ to manage agents" };
+    let (glyph, style) = marker(0);
+    let mut rows = vec![Vec::new(), vec![span(glyph, style), span("main", style), span(hint, DIM)]];
+    for (offset, run) in runs.iter().enumerate() {
         let elapsed = duration(run.elapsed());
         let state = run.state.lock().unwrap();
-        let (icon, label_style, time_style) = match state.result {
-            None => (spinner.clone(), BRIGHT, SYSTEM),
-            Some(Ok(_)) => (span("✓", OK), MUTED, MUTED),
-            Some(Err(_)) => (span("✗", ERROR), MUTED, MUTED),
-        };
-        let label_style = if index == selected { BRIGHT.bold() } else { label_style };
-        let tokens = if state.usage == Usage::default() { String::new() } else { usage::brief(state.usage) };
-        vec![icon, span(format!(" {} ", pad(&run.id, id_width)), DIM), span(pad(&run.label, label_width), label_style), span(format!("  {elapsed:<8}"), time_style), span(tokens, DIM)]
-    })
+        let activity = if state.last_tool.is_empty() { "starting" } else { &state.last_tool };
+        let tokens = if state.usage.output == 0 { String::new() } else { format!(" · ↓ {} tokens", usage::tokens(state.usage.output)) };
+        let (glyph, style) = marker(offset + 1);
+        rows.push(vec![
+            span(glyph, style),
+            span(format!("{}{}", run.label, " ".repeat(name_width - width(&run.label))), style),
+            span(format!("  {}{} ", model_names[offset], " ".repeat(model_width - width(&model_names[offset]))), DIM),
+            span(format!("{}{}", run.thinking, " ".repeat(thinking_width - width(&run.thinking))), thinking_style(&run.thinking)),
+            span(format!("  {activity}  "), MUTED),
+            span(format!("{elapsed} · {} tools{tokens}", state.tool_calls), DIM),
+        ]);
+    }
+    rows
 }
 
-/// /ps: the /subagents layout, with the title as the main text.
-fn terminals_panel(terminals: &[Arc<Terminal>], selected: usize, columns: usize) -> Vec<Line> {
-    let statuses: Vec<TerminalStatus> = terminals.iter().map(|t| t.status()).collect();
-    let count = |status| statuses.iter().filter(|s| **s == status).count();
-    let (running, done, failed, killed) = (count(TerminalStatus::Running), count(TerminalStatus::Done), count(TerminalStatus::Failed), count(TerminalStatus::Killed));
-    let tick = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() / 80;
-    let spinner = star(((tick % 12) as usize).abs_diff(2));
-    let mut title = vec![span(format!("Background terminals {}", terminals.len()), BRIGHT.bold())];
-    if running > 0 {
-        title.extend([span("  ", PLAIN), spinner.clone(), span(format!(" {running} running"), SYSTEM)]);
+/// The id until the model lists load, then the catalog name with its version: "opus 5.5".
+fn model_name(catalog: &[Model], id: &str) -> String {
+    catalog.iter().find(|model| model.id == id).map_or(id.to_string(), models::short_name)
+}
+
+fn tasks_panel(terminals: &[Arc<Terminal>], runs: &[Arc<Run>], catalog: &[Model], selected: usize, columns: usize) -> Vec<Line> {
+    let mut total = Usage::default();
+    for run in runs {
+        total.add(run.state.lock().unwrap().usage);
     }
-    if done > 0 {
-        title.push(span(format!("  ✓ {done}"), OK));
+    let mut title = vec![span("Background tasks", BRIGHT.bold())];
+    if total != Usage::default() {
+        title.push(span(format!("  {}", usage::brief(total)), DIM));
     }
-    if failed > 0 {
-        title.push(span(format!("  ✗ {failed}"), ERROR));
-    }
-    if killed > 0 {
-        title.push(span(format!("  ■ {killed}"), MUTED));
-    }
-    let id_width = terminals.iter().map(|t| width(&t.id)).max().unwrap_or(0);
-    let title_width = terminals.iter().map(|t| width(&t.title)).max().unwrap_or(0);
+    let name_width = terminals.iter().map(|t| width(&t.title)).chain(runs.iter().map(|run| width(&run.label))).max().unwrap_or(0);
+    let model_names: Vec<String> = runs.iter().map(|run| model_name(catalog, &run.model)).collect();
+    let model_width = model_names.iter().map(|name| width(name)).max().unwrap_or(0);
+    let thinking_width = runs.iter().map(|run| width(&run.thinking)).max().unwrap_or(0);
+    // Shell times line up under the agent times.
+    let meta_width = if runs.is_empty() { 0 } else { model_width + thinking_width + 3 };
     let pad = |text: &str, to: usize| format!("{text}{}", " ".repeat(to - width(text)));
-    panel::frame(vec![title], terminals.len(), selected, "↑↓ navigate     enter view     k kill     esc close", columns, PANEL_ROWS, |index| {
-        let terminal = &terminals[index];
-        let (icon, title_style, time_style) = match statuses[index] {
-            TerminalStatus::Running => (spinner.clone(), BRIGHT, SYSTEM),
-            TerminalStatus::Done => (span("✓", OK), MUTED, MUTED),
-            TerminalStatus::Failed => (span("✗", ERROR), MUTED, MUTED),
-            TerminalStatus::Killed => (span("■", MUTED), MUTED, MUTED),
+    let name_style = |index: usize, running: bool| if index == selected { BRIGHT.bold() } else if running { BRIGHT } else { MUTED };
+    let mut rows: Vec<(Option<usize>, Line)> = Vec::new();
+    if !terminals.is_empty() {
+        rows.push((None, vec![span("Shells", BRIGHT.bold()), span(format!(" ({})", terminals.len()), DIM)]));
+    }
+    for (index, terminal) in terminals.iter().enumerate() {
+        let status = terminal.status();
+        let dot = match status {
+            TerminalStatus::Running => SYSTEM,
+            TerminalStatus::Done => OK,
+            TerminalStatus::Failed => ERROR,
+            TerminalStatus::Killed => MUTED,
         };
-        let title_style = if index == selected { BRIGHT.bold() } else { title_style };
-        vec![icon, span(format!(" {} ", pad(&terminal.id, id_width)), DIM), span(pad(&terminal.title, title_width), title_style), span(format!("  {}", terminal.elapsed()), time_style)]
-    })
+        let running = status == TerminalStatus::Running;
+        rows.push((Some(index), vec![span("● ", dot), span(pad(&terminal.title, name_width), name_style(index, running)), span(format!("  {}{}", " ".repeat(meta_width), terminal.elapsed()), DIM)]));
+    }
+    if !runs.is_empty() {
+        if !rows.is_empty() {
+            rows.push((None, Vec::new()));
+        }
+        rows.push((None, vec![span("Local agents", BRIGHT.bold()), span(format!(" ({})", runs.len()), DIM)]));
+    }
+    for (offset, run) in runs.iter().enumerate() {
+        let index = terminals.len() + offset;
+        let elapsed = duration(run.elapsed());
+        let state = run.state.lock().unwrap();
+        let dot = match state.result {
+            None => SYSTEM,
+            Some(Ok(_)) => OK,
+            Some(Err(_)) => ERROR,
+        };
+        let tokens = if state.usage.output == 0 { String::new() } else { format!("↓{}", usage::tokens(state.usage.output)) };
+        rows.push((
+            Some(index),
+            vec![
+                span("● ", dot),
+                span(pad(&run.label, name_width), name_style(index, state.result.is_none())),
+                span(format!("  {} ", pad(&model_names[offset], model_width)), DIM),
+                span(pad(&run.thinking, thinking_width), thinking_style(&run.thinking)),
+                span(format!("  {elapsed:<8} {tokens}"), DIM),
+            ],
+        ));
+    }
+    let shown = PANEL_ROWS + 3;
+    let selected_row = rows.iter().position(|(index, _)| *index == Some(selected)).unwrap_or(0);
+    let first = (selected_row + 1).saturating_sub(shown);
+    let mut lines = vec![Vec::new(), title, Vec::new()];
+    for (index, row) in rows.iter().skip(first).take(shown) {
+        let marker = match index {
+            Some(index) if *index == selected => span("❯ ", OK),
+            Some(_) => span("  ", PLAIN),
+            None => span("", PLAIN),
+        };
+        let mut line = vec![marker];
+        line.extend(row.iter().cloned());
+        lines.push(truncate(&line, columns));
+    }
+    let len = terminals.len() + runs.len();
+    if rows.len() > shown {
+        lines.extend([Vec::new(), vec![span(format!("  {}/{len}", selected + 1), DIM)]]);
+    }
+    lines.extend([Vec::new(), vec![span("↑/↓ select · enter view · x stop · esc close", MUTED)]]);
+    lines
 }
 
 fn duration(d: Duration) -> String {
@@ -5024,6 +5060,38 @@ mod tests {
         *run.state.lock().unwrap() = crate::agent::subagent::RunState { tool_calls: 31, elapsed: Some(Duration::from_secs(8)), result: Some(Err("Operation aborted".into())), ..Default::default() };
         let rows: Vec<String> = subagent_done_lines(&run, 30).iter().map(text).collect();
         assert_eq!(rows, ["✗ sa-1 scan · 31 tools · 8s ", "  · Operation aborted"]);
+    }
+
+    #[test]
+    fn tasks_list_agents_under_a_section_with_dim_model_effort_time_and_tokens() {
+        use crate::agent::subagent::{RunState, scan_run};
+        let done = scan_run();
+        *done.state.lock().unwrap() = RunState { elapsed: Some(Duration::from_secs(165)), result: Some(Ok("found".into())), usage: Usage { output: 11_000, ..Usage::default() }, ..Default::default() };
+        let mut running = scan_run();
+        (running.label, running.model, running.thinking) = ("recon 1a".into(), "claude-sonnet-5".into(), "medium".into());
+        let sonnet = Model { provider: "anthropic".into(), id: "claude-sonnet-5".into(), name: "Claude Sonnet 5".into(), context_window: 1, max_tokens: 1, accounts: Vec::new(), price: None };
+        let rows: Vec<String> = tasks_panel(&[], &[Arc::new(done), Arc::new(running)], &[sonnet], 1, 80).iter().map(text).collect();
+        assert_eq!(rows[1], "Background tasks  ↑0 ↓11k cache 0");
+        assert_eq!(rows[3], "Local agents (2)");
+        assert_eq!(rows[4], "  ● scan      opus     high    2m 45s   ↓11k");
+        assert_eq!(rows[5], "❯ ● recon 1a  sonnet 5 medium  0s       ");
+    }
+
+    #[test]
+    fn agent_rows_mark_main_until_down_walks_to_a_running_subagent() {
+        use crate::agent::subagent::scan_run;
+        let run = scan_run();
+        {
+            let mut state = run.state.lock().unwrap();
+            (state.tool_calls, state.last_tool) = (3, "Read".into());
+        }
+        let runs = [Arc::new(run)];
+        let typing: Vec<String> = agent_rows(&runs, &[], None).iter().map(text).collect();
+        assert_eq!(typing[1], "● main   ↓ to manage agents");
+        assert_eq!(typing[2], "○ scan  opus high  Read  0s · 3 tools");
+        let walked: Vec<String> = agent_rows(&runs, &[], Some(1)).iter().map(text).collect();
+        assert_eq!(walked[1], "○ main   ↑↓ select · enter view · x stop · esc back");
+        assert!(walked[2].starts_with("● scan"));
     }
 
     #[test]

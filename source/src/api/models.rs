@@ -232,9 +232,16 @@ fn is_small(model: &Model) -> bool {
 /// Footer label: "Claude Opus 5.5" becomes "anthropic · opus 5.5", since one model can come from several providers.
 /// OpenRouter shows the id, since names like "Auto Router" hide whose model it is.
 pub fn short_label(model: &Model) -> String {
+    format!("{} · {}", model.provider, short_name(model))
+}
+
+/// "Claude Opus 5.5" becomes "opus 5.5"; OpenRouter keeps the id, as in `short_label`.
+pub fn short_name(model: &Model) -> String {
+    if model.provider == "openrouter" {
+        return model.id.clone();
+    }
     let lower = model.name.to_lowercase();
-    let name = if model.provider == "openrouter" { &model.id } else { lower.strip_prefix("claude ").unwrap_or(&lower) };
-    format!("{} · {name}", model.provider)
+    lower.strip_prefix("claude ").unwrap_or(&lower).to_string()
 }
 
 #[cfg(test)]

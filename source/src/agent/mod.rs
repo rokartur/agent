@@ -212,9 +212,9 @@ pub struct Agent {
     /// Shared with the UI, which opens the plan menu after the turn that completed the plan.
     pub plan: Arc<Mutex<Plan>>,
     pub follow_ups: Arc<Mutex<Vec<FollowUp>>>,
-    /// Shared with the UI for /ps and the running count above the editor.
+    /// Shared with the UI for /tasks and the running count above the editor.
     pub terminals: Arc<Mutex<Terminals>>,
-    /// Shared with the UI for /subagents.
+    /// Shared with the UI for /tasks.
     pub subagents: Arc<Mutex<Runs>>,
     pub subagent_concurrency: usize,
     pub subagent_effort: String,
@@ -771,7 +771,7 @@ impl Agent {
         }
         if background {
             let names: Vec<String> = runs.iter().map(|r| format!("{} ({})", r.id, r.label)).collect();
-            return Ok(format!("Started {} in the background. Each answer arrives as a message when it finishes, or TaskWait waits for them; /subagents shows progress.", names.join(", ")));
+            return Ok(format!("Started {} in the background. Each answer arrives as a message when it finishes, or TaskWait waits for them; /tasks shows progress.", names.join(", ")));
         }
         if let [run] = runs.as_slice() {
             return Ok(run.result_text());
@@ -1456,7 +1456,7 @@ impl Session {
                 match entry["type"].as_str() {
                     Some("session") => info.cwd = entry["cwd"].as_str().unwrap_or_default().to_string(),
                     Some("session_info") => info.name = entry["name"].as_str().map(String::from),
-                    // Subagent sessions stay out of /resume and --continue; /subagents opens them.
+                    // Subagent sessions stay out of /resume and --continue; /tasks opens them.
                     Some("parent") => subagent = true,
                     Some("message") if entry["message"]["role"] == "user" && entry["message"]["content"][0]["type"] == "text" => {
                         info.turns += 1;

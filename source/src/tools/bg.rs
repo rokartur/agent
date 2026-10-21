@@ -22,7 +22,7 @@ const VIEW_TAIL: (u64, usize) = (1024 * 1024, 20_000);
 const FORCE_KILL_AFTER: Duration = Duration::from_secs(2);
 const STOP_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// The background terminals of one agent; shared with the UI for /ps and the widget.
+/// The background terminals of one agent; shared with the UI for /tasks and the widget.
 #[derive(Default)]
 pub struct Terminals {
     pub list: Vec<Arc<Terminal>>,
@@ -170,6 +170,11 @@ impl Terminals {
     pub fn running(&self) -> usize {
         self.list.iter().filter(|t| t.status() == Status::Running).count()
     }
+
+    /// Running shells first, each group newest first.
+    pub fn running_first(&mut self) {
+        self.list.sort_by_key(|t| (t.status() != Status::Running, std::cmp::Reverse(t.started)));
+    }
 }
 
 /// TaskStop: SIGTERM to each group, SIGKILL after `FORCE_KILL_AFTER`, then the final states.
@@ -257,12 +262,12 @@ impl Terminal {
         }
     }
 
-    /// Combined size of both logs; the /ps viewer rereads `log` when it changes.
+    /// Combined size of both logs; the /tasks viewer rereads `log` when it changes.
     pub fn log_size(&self) -> u64 {
         [&self.stdout, &self.stderr].iter().map(|path| std::fs::metadata(path).map_or(0, |m| m.len())).sum()
     }
 
-    /// Both streams for the /ps viewer, stderr only when it has something.
+    /// Both streams for the /tasks viewer, stderr only when it has something.
     pub fn log(&self) -> String {
         let mut text = section("stdout", &self.stdout, VIEW_TAIL);
         if std::fs::metadata(&self.stderr).is_ok_and(|m| m.len() > 0) {
