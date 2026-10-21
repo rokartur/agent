@@ -4362,7 +4362,11 @@ fn matching_args(name: &str, arg: &str) -> Vec<(String, String)> {
         "caveman" => CAVEMAN_LEVELS.iter().map(|level| (*level, "")).collect(),
         "permissions" => MODES.iter().map(|mode| (mode.label(), mode.description())).collect(),
         "goal" => vec![("pause", "Pause the goal"), ("resume", "Resume the goal"), ("stop", "Stop the goal"), ("done", "Mark the goal done")],
-        "plan" => vec![("export", "Write the ready plan to <TITLE>_PLAN.md or the file named after it"), ("implement", "Pick model and effort, then implement the ready plan in a new session"), ("exit", "Leave plan mode, dropping a ready plan")],
+        "plan" => vec![
+            ("export", "Write the ready plan to <TITLE>_PLAN.md or the file named after it"),
+            ("implement", "Pick model and effort, then implement the ready plan in a new session"),
+            ("exit", "Leave plan mode, dropping a ready plan"),
+        ],
         "context-window" => vec![("auto", "Drop this model's override")],
         _ => return Vec::new(),
     };
