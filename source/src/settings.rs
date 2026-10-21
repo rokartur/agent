@@ -12,6 +12,10 @@ use crate::api::models::{self, Model};
 pub struct Settings {
     pub model: String,
     pub thinking: String,
+    /// When set, each start and /clear begin on it, and /model picks stay out of the file.
+    pub default_model: String,
+    /// When set, each start and /clear begin on it, and thinking changes stay out of the file.
+    pub default_thinking: String,
     /// One of `SPEEDS`: Anthropic's `speed: "fast"`, Codex's `service_tier`; faster output at a higher price.
     pub speed: String,
     /// One of `CACHE_TTLS`, for every Anthropic cache breakpoint.
@@ -148,6 +152,16 @@ impl Settings {
         crate::agent::prompt::is_trusted(&self.trusted_projects, cwd)
     }
 
+    /// Puts `model` and `thinking` back on `default_model` and `default_thinking` where those are set.
+    pub fn reset_to_defaults(&mut self) {
+        if !self.default_model.is_empty() {
+            self.model = self.default_model.clone();
+        }
+        if !self.default_thinking.is_empty() {
+            self.thinking = self.default_thinking.clone();
+        }
+    }
+
     pub fn prefer_global(&self) -> bool {
         self.conflict_priority == "global"
     }
@@ -203,8 +217,15 @@ pub fn save_change(home: &Path, before: &Settings, after: &Settings) -> Result<(
 /// `saved` with only the keys a /settings edit changed from `before` to `after`, objects merged key by key. So the
 /// keys the command line sets (`--model`, `--thinking`, the permission flags, `--account`) keep their saved value too.
 fn saved_after(before: &Settings, after: &Settings, saved: &Settings) -> Settings {
+    let mut after = after.clone();
+    if !after.default_model.is_empty() {
+        after.model = before.model.clone();
+    }
+    if !after.default_thinking.is_empty() {
+        after.thinking = before.thinking.clone();
+    }
     let mut next = to_json(saved);
-    apply_changes(&mut next, &to_json(before), &to_json(after));
+    apply_changes(&mut next, &to_json(before), &to_json(&after));
     from_json(&next)
 }
 
@@ -248,6 +269,8 @@ fn from_json(own: &Value) -> Settings {
     Settings {
         model: own["model"].as_str().unwrap_or("claude-opus-5-5").to_string(),
         thinking: level(&own["thinking"], &THINKING_LEVELS, "high"),
+        default_model: own["default_model"].as_str().unwrap_or_default().to_string(),
+        default_thinking: level(&own["default_thinking"], &THINKING_LEVELS, ""),
         // Before `speed`, fast mode was `"fast": true`.
         speed: if own["speed"].is_null() && own["fast"] == true { "fast".into() } else { level(&own["speed"], &SPEEDS, "standard") },
         cache_ttl: level(&own["cache_ttl"], &CACHE_TTLS, "5m"),
@@ -377,6 +400,8 @@ fn to_json(settings: &Settings) -> Value {
         "$schema": SCHEMA_URL,
         "model": settings.model,
         "thinking": settings.thinking,
+        "default_model": settings.default_model,
+        "default_thinking": settings.default_thinking,
         "speed": settings.speed,
         "cache_ttl": settings.cache_ttl,
         "permission_mode": settings.permission_mode.label(),
@@ -484,6 +509,18 @@ mod tests {
         assert_eq!(next.ponytail, "ultra", "another agent's edit to a key this one did not change survives");
         assert_eq!((next.model.as_str(), next.permission_mode, next.thinking.as_str(), next.rtk), (saved.model.as_str(), saved.permission_mode, "low", false));
         assert_eq!(next.default_accounts, HashMap::from([("openai".to_string(), "home".to_string())]));
+    }
+
+    #[test]
+    fn with_defaults_set_model_and_thinking_changes_stay_out_of_the_file() {
+        let mut before = load(Path::new("/nonexistent")).unwrap();
+        before.default_model = "gpt-5.5".into();
+        before.default_thinking = "low".into();
+        let mut edited = before.clone();
+        edited.model = "claude-haiku".into();
+        edited.thinking = "max".into();
+        let next = saved_after(&before, &edited, &before);
+        assert_eq!((next.model.as_str(), next.thinking.as_str()), (before.model.as_str(), before.thinking.as_str()));
     }
 
     #[test]

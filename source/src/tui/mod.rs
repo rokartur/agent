@@ -1868,6 +1868,7 @@ impl App {
             "clear" => {
                 self.entries.truncate(self.header_len);
                 self.context_tokens = 0;
+                self.update_settings(Settings::reset_to_defaults);
                 self.start(Command::Clear);
             }
             "rename-title" if args.is_empty() => self.push(Item::Error("Usage: /rename-title <name>".into())),

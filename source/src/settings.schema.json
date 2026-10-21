@@ -8,6 +8,8 @@
     "$schema": { "type": "string" },
     "model": { "type": "string", "default": "claude-opus-5-5" },
     "thinking": { "enum": ["off", "minimal", "low", "medium", "high", "xhigh", "max"], "default": "high" },
+    "default_model": { "type": "string", "default": "", "description": "Model each start and /clear begin on; when set, /model picks last until /clear and are not saved." },
+    "default_thinking": { "enum": ["", "off", "minimal", "low", "medium", "high", "xhigh", "max"], "default": "", "description": "Thinking level each start and /clear begin on; when set, thinking changes last until /clear and are not saved." },
     "speed": { "enum": ["standard", "fast", "ultrafast"], "default": "standard", "description": "Faster output at a higher price: Anthropic speed fast (ultrafast counts as fast), OpenAI Codex service_tier priority or ultrafast." },
     "cache_ttl": { "enum": ["5m", "1h"], "default": "5m", "description": "Anthropic prompt cache lifetime; 1h writes cost more." },
     "permission_mode": { "enum": ["ask", "auto", "full access"], "default": "ask" },

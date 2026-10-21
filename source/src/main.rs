@@ -351,6 +351,7 @@ fn run(options: Options) -> Result<(), String> {
     let agent_dir = home.join(".agents");
     // The flags below apply to this run only; /settings saves only the keys it changes.
     let mut settings = settings::load(&home)?;
+    settings.reset_to_defaults();
     if let Some(model) = options.model {
         settings.model = model;
     }
