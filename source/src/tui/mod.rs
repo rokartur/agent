@@ -4750,7 +4750,15 @@ fn tasks_panel(terminals: &[Arc<Terminal>], runs: &[Arc<Run>], catalog: &[Model]
     // Shell times line up under the agent times.
     let meta_width = if runs.is_empty() { 0 } else { model_width + thinking_width + 3 };
     let pad = |text: &str, to: usize| format!("{text}{}", " ".repeat(to - width(text)));
-    let name_style = |index: usize, running: bool| if index == selected { BRIGHT.bold() } else if running { BRIGHT } else { MUTED };
+    let name_style = |index: usize, running: bool| {
+        if index == selected {
+            BRIGHT.bold()
+        } else if running {
+            BRIGHT
+        } else {
+            MUTED
+        }
+    };
     let mut rows: Vec<(Option<usize>, Line)> = Vec::new();
     if !terminals.is_empty() {
         rows.push((None, vec![span("Shells", BRIGHT.bold()), span(format!(" ({})", terminals.len()), DIM)]));

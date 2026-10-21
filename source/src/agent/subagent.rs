@@ -319,7 +319,17 @@ pub fn tasks(input: &Value) -> Result<Vec<Task>, String> {
 
 #[cfg(test)]
 pub(crate) fn scan_run() -> Run {
-    Run { id: "sa-1".into(), label: "scan".into(), task: "scan".into(), model: "opus".into(), thinking: "high".into(), background: true, started: Instant::now(), child: Mutex::new(None), state: Mutex::default() }
+    Run {
+        id: "sa-1".into(),
+        label: "scan".into(),
+        task: "scan".into(),
+        model: "opus".into(),
+        thinking: "high".into(),
+        background: true,
+        started: Instant::now(),
+        child: Mutex::new(None),
+        state: Mutex::default(),
+    }
 }
 
 #[cfg(test)]
