@@ -7,7 +7,7 @@ const HEAD_DEFAULT_LINES: u64 = 10;
 
 /// Why bash should not run `command` (a blind sleep), or None when it may run.
 pub fn bash(command: &str) -> Option<String> {
-    blind_sleep(command).then(|| "No blind sleep. Server: curl -sf --retry 30 --retry-all-errors --retry-delay 1 URL. CI: gh run watch --exit-status, gh pr checks --watch. Long job: bg_start.".into())
+    blind_sleep(command).then(|| "No blind sleep. Server: curl -sf --retry 30 --retry-all-errors --retry-delay 1 URL. CI: gh run watch --exit-status, gh pr checks --watch. Long job: Bash run_in_background.".into())
 }
 
 /// The `read` input for a command that only prints files: `cat FILE`, `head [-N] FILE` or `sed -n 'N,Mp' FILE`
@@ -52,7 +52,7 @@ fn printed_range(words: &[&str], dir: Option<&str>) -> Option<Value> {
     if file.starts_with('-') || path.contains(['|', '<', '>', ';', '&', '$', '`', '*', '?', '[', '{', '(']) {
         return None;
     }
-    let mut range = json!({"path": path});
+    let mut range = json!({"file_path": path});
     if let Some(offset) = offset {
         range["offset"] = offset.into();
     }
@@ -109,21 +109,21 @@ mod tests {
     #[test]
     fn plain_file_reads_become_read_ranges() {
         let reads = [
-            ("cat package.json", json!([{"path": "package.json"}])),
-            ("cd /repo && sed -n '10,40p' src/a.ts", json!([{"path": "/repo/src/a.ts", "offset": 10, "limit": 31}])),
-            ("sed -n 5p notes.md", json!([{"path": "notes.md", "offset": 5, "limit": 1}])),
-            ("head -50 README.md", json!([{"path": "README.md", "limit": 50}])),
-            ("head -n 20 Cargo.toml", json!([{"path": "Cargo.toml", "limit": 20}])),
-            ("head src/main.rs", json!([{"path": "src/main.rs", "limit": 10}])),
-            ("cat -n src/a.rs", json!([{"path": "src/a.rs"}])),
-            ("cat \"notes.md\"", json!([{"path": "notes.md"}])),
-            ("head -n20 a.md", json!([{"path": "a.md", "limit": 20}])),
-            ("sed -n '1,40p' a.rs; echo ---; sed -n 5,9p b.rs", json!([{"path": "a.rs", "offset": 1, "limit": 40}, {"path": "b.rs", "offset": 5, "limit": 5}])),
+            ("cat package.json", json!([{"file_path": "package.json"}])),
+            ("cd /repo && sed -n '10,40p' src/a.ts", json!([{"file_path": "/repo/src/a.ts", "offset": 10, "limit": 31}])),
+            ("sed -n 5p notes.md", json!([{"file_path": "notes.md", "offset": 5, "limit": 1}])),
+            ("head -50 README.md", json!([{"file_path": "README.md", "limit": 50}])),
+            ("head -n 20 Cargo.toml", json!([{"file_path": "Cargo.toml", "limit": 20}])),
+            ("head src/main.rs", json!([{"file_path": "src/main.rs", "limit": 10}])),
+            ("cat -n src/a.rs", json!([{"file_path": "src/a.rs"}])),
+            ("cat \"notes.md\"", json!([{"file_path": "notes.md"}])),
+            ("head -n20 a.md", json!([{"file_path": "a.md", "limit": 20}])),
+            ("sed -n '1,40p' a.rs; echo ---; sed -n 5,9p b.rs", json!([{"file_path": "a.rs", "offset": 1, "limit": 40}, {"file_path": "b.rs", "offset": 5, "limit": 5}])),
             (
                 "cd /r && sed -n 1,5p a.rs && sed -n 9p a.rs\nhead b.rs",
-                json!([{"path": "/r/a.rs", "offset": 1, "limit": 5}, {"path": "/r/a.rs", "offset": 9, "limit": 1}, {"path": "/r/b.rs", "limit": 10}]),
+                json!([{"file_path": "/r/a.rs", "offset": 1, "limit": 5}, {"file_path": "/r/a.rs", "offset": 9, "limit": 1}, {"file_path": "/r/b.rs", "limit": 10}]),
             ),
-            ("cat a.rs; cat a.rs", json!([{"path": "a.rs"}])),
+            ("cat a.rs; cat a.rs", json!([{"file_path": "a.rs"}])),
         ];
         for (command, paths) in reads {
             assert_eq!(file_read(command), Some(json!({"paths": paths})), "{command}");

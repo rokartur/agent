@@ -1,12 +1,12 @@
 [
   {
-    "name": "read",
-    "description": "Read a text file, or several files or line ranges with `paths`, as `anchor│content` rows; an anchor is 4 case-sensitive letters. Edit by anchor, never by content or line number. One file pages at 400 lines unless `limit` says otherwise; continue with `offset` (line number or anchor) from the hint. A stale anchor is refused: read again. A PNG, JPEG, GIF or WebP `path` comes back as the image itself, for checking screenshots. Other binary, UTF-16/32 and >64MB files are rejected.",
+    "name": "Read",
+    "description": "Read a text file, or several files or line ranges with `paths`, as `anchor│content` rows; an anchor is 4 case-sensitive letters. Edit by anchor, never by content or line number. One file pages at 400 lines unless `limit` says otherwise; continue with `offset` (line number or anchor) from the hint. A stale anchor is refused: read again. A PNG, JPEG, GIF or WebP `file_path` comes back as the image itself, for checking screenshots. Other binary, UTF-16/32 and >64MB files are rejected.",
     "eager_input_streaming": true,
     "input_schema": {
       "type": "object",
       "properties": {
-        "path": {
+        "file_path": {
           "type": "string",
           "description": "Path to the file to read (relative or absolute)"
         },
@@ -20,7 +20,7 @@
               {
                 "type": "object",
                 "properties": {
-                  "path": {
+                  "file_path": {
                     "type": "string"
                   },
                   "offset": {
@@ -39,11 +39,11 @@
                     "minimum": 1
                   }
                 },
-                "required": ["path"]
+                "required": ["file_path"]
               }
             ]
           },
-          "description": "Several files, each under a `== path` header: a path reads the whole file, {path, offset, limit} one range. Use instead of `cat` or a chain of `sed -n`."
+          "description": "Several files, each under a `== path` header: a path reads the whole file, {file_path, offset, limit} one range. Use instead of `cat` or a chain of `sed -n`."
         },
         "offset": {
           "anyOf": [
@@ -66,15 +66,13 @@
     }
   },
   {
-    "name": "bash",
-    "description": "Run a bash command in the cwd, stderr merged into stdout, no stdin. Output keeps the last 2000 lines or 24KB (50KB with rtk off); a truncated run names its full log.",
+    "name": "Bash",
+    "description": "Run a bash command in the cwd, stderr merged into stdout, no stdin. Output keeps the last 2000 lines or 24KB (50KB with rtk off); a truncated run names its full log. With `run_in_background: true` it returns a task id at once and its final output arrives as a message when it exits; max 8 at once, killed when the agent exits.",
     "eager_input_streaming": true,
-    "strict": true,
     "input_schema": {
       "type": "object",
       "required": [
-        "command",
-        "timeout"
+        "command"
       ],
       "properties": {
         "command": {
@@ -82,33 +80,34 @@
           "description": "Shell command to execute"
         },
         "timeout": {
-          "anyOf": [
-            {
-              "type": "number",
-              "description": "Seconds; null for none"
-            },
-            {
-              "type": "null"
-            }
-          ]
+          "type": "number",
+          "description": "Milliseconds; omit for none. Ignored in the background."
+        },
+        "description": {
+          "type": "string",
+          "description": "Short name for listings, 5-10 words"
+        },
+        "run_in_background": {
+          "type": "boolean",
+          "description": "For servers, watchers and jobs longer than a minute"
         }
       },
       "additionalProperties": false
     }
   },
   {
-    "name": "write",
+    "name": "Write",
     "description": "Create or overwrite a file; creates parent directories.",
     "eager_input_streaming": true,
     "strict": true,
     "input_schema": {
       "type": "object",
       "required": [
-        "path",
+        "file_path",
         "content"
       ],
       "properties": {
-        "path": {
+        "file_path": {
           "type": "string",
           "description": "Path to the file to write (relative or absolute)"
         },
@@ -121,8 +120,8 @@
     }
   },
   {
-    "name": "replace",
-    "description": "Replace the lines from anchor `remove_from` to anchor `remove_to` (the same anchor for one line) with `text`. Emptying a file returns its empty-line anchor for a follow-up replace. To change part of a line, use `replace_match`.",
+    "name": "ReplaceLines",
+    "description": "Replace the lines from anchor `remove_from` to anchor `remove_to` (the same anchor for one line) with `text`. Emptying a file returns its empty-line anchor for a follow-up ReplaceLines. To change part of a line, use Edit.",
     "eager_input_streaming": true,
     "input_schema": {
       "type": "object",
@@ -148,13 +147,13 @@
     }
   },
   {
-    "name": "replace_match",
-    "description": "Replace `old_string`, which must occur once, inside the lines from anchor `replace_from` to anchor `replace_to` (the same anchor for one line), or anywhere in the file at `path` when no anchors are given; no read needed. With `path`, `edits` changes several fragments in one call. The rest stays byte-for-byte. Send only the smallest changing fragment; for a whole-line rewrite use `replace`.",
+    "name": "Edit",
+    "description": "Replace `old_string`, which must occur once, inside the lines from anchor `replace_from` to anchor `replace_to` (the same anchor for one line), or anywhere in the file at `file_path` when no anchors are given; no read needed. With `file_path`, `edits` changes several fragments in one call. The rest stays byte-for-byte. Send only the smallest changing fragment; for a whole-line rewrite use ReplaceLines.",
     "eager_input_streaming": true,
     "input_schema": {
       "type": "object",
       "properties": {
-        "path": {
+        "file_path": {
           "type": "string",
           "description": "File to search whole, in place of the anchors."
         },
@@ -176,7 +175,7 @@
         },
         "edits": {
           "type": "array",
-          "description": "Several fragments of the file at `path`, in place of old_string/new_string; applied in order, all or none.",
+          "description": "Several fragments of the file at `file_path`, in place of old_string/new_string; applied in order, all or none.",
           "items": {
             "type": "object",
             "properties": {
@@ -190,7 +189,7 @@
     }
   },
   {
-    "name": "insert",
+    "name": "InsertLines",
     "description": "Insert `text` after or before the line at `anchor`.",
     "eager_input_streaming": true,
     "input_schema": {
@@ -225,7 +224,7 @@
     }
   },
   {
-    "name": "context_tree_query",
+    "name": "ContextTreeQuery",
     "description": "Get back the original outputs of tool calls a pruner summary replaced, by the short refs it lists (e.g. [\"t12\", \"t3\"]).",
     "eager_input_streaming": true,
     "input_schema": {
@@ -245,7 +244,7 @@
     }
   },
   {
-    "name": "todo",
+    "name": "Todo",
     "description": "Task list for multi-step work. Status: pending, in_progress, completed; delete leaves a tombstone.",
     "eager_input_streaming": true,
     "input_schema": {
@@ -284,7 +283,7 @@
           ],
           "description": "New status (update) or filter (list)"
         },
-        "id": {
+        "taskId": {
           "type": "number",
           "description": "Required for update, get, delete"
         }
@@ -295,7 +294,7 @@
     }
   },
   {
-    "name": "goal",
+    "name": "Goal",
     "description": "A goal the agent keeps working toward across turns. create only on explicit user request; get reads objective, status, tokens used and budget; complete marks it done once its done criteria are met, with the evidence that shows it.",
     "input_schema": {
       "type": "object",
@@ -309,24 +308,24 @@
     }
   },
   {
-    "name": "subagent",
-    "description": "Spawn child agents as separate processes with their own context and no subagent, terminal, web or ask_user_question tools; an `explore: true` child only gets read and rg. Pass {label, prompt} for one child or {tasks: [...]} for several in parallel. Returns each child's final answer; with background: true, run ids now and answers later as messages.",
+    "name": "Agent",
+    "description": "Spawn child agents as separate processes with their own context and no Agent, background, web or AskUserQuestion tools; an `explore: true` child only gets Read and Grep. Pass {description, prompt} for one child or {tasks: [...]} for several in parallel. Returns each child's final answer; with run_in_background: true, task ids now and answers later as messages.",
     "input_schema": {
       "type": "object",
       "properties": {
-        "label": { "type": "string", "minLength": 1, "description": "Chip label, e.g. 'api reviewer'" },
+        "description": { "type": "string", "minLength": 1, "description": "Chip label, e.g. 'api reviewer'" },
         "prompt": { "type": "string", "description": "Self-contained task; the child does not see this conversation" },
         "model": { "type": "string", "description": "Omit or 'inherit' for yours" },
         "effort": { "type": "string", "enum": ["off", "minimal", "low", "medium", "high", "xhigh", "max"], "description": "Omit for yours" },
-        "explore": { "type": "boolean", "description": "Context gathering: only read and rg, cheaper" },
+        "explore": { "type": "boolean", "description": "Context gathering: only Read and Grep, cheaper" },
         "tasks": {
           "type": "array",
           "description": "Parallel children",
           "items": {
             "type": "object",
-            "required": ["label", "prompt"],
+            "required": ["description", "prompt"],
             "properties": {
-              "label": { "type": "string", "minLength": 1 },
+              "description": { "type": "string", "minLength": 1 },
               "prompt": { "type": "string" },
               "model": { "type": "string" },
               "effort": { "type": "string", "enum": ["off", "minimal", "low", "medium", "high", "xhigh", "max"] },
@@ -335,53 +334,40 @@
           }
         },
         "cwd": { "type": "string", "description": "Default: current directory" },
-        "background": { "type": "boolean" }
+        "run_in_background": { "type": "boolean" }
       }
     }
   },
   {
-    "name": "bg_wait",
-    "description": "Wait for background subagents (default: all running) and return their answers, which then do not arrive again as messages.",
+    "name": "TaskWait",
+    "description": "Wait for background Agent tasks (default: all running) and return their answers, which then do not arrive again as messages.",
     "input_schema": {
       "type": "object",
       "properties": {
-        "ids": { "type": "array", "items": { "type": "string" }, "description": "e.g. ['sa-1']" },
-        "timeout": { "type": "integer", "description": "Seconds, default 600" }
+        "task_ids": { "type": "array", "items": { "type": "string" }, "description": "e.g. ['sa-1']" },
+        "timeout": { "type": "integer", "description": "Milliseconds, default 600000" }
       }
     }
   },
   {
-    "name": "bg_start",
-    "description": "Start a long-running `sh -c` command in the background and return its id at once; its final output arrives as a message when it exits. No stdin. Output is tail-truncated and names its full log. Max 8 at once; killed when the agent exits.",
+    "name": "TaskOutput",
+    "description": "A background Bash task's status and output tail, without blocking; without `task_id`, lists every task with pid, elapsed time, exit status and output sizes.",
     "input_schema": {
       "type": "object",
-      "required": ["command", "title"],
-      "properties": {
-        "command": { "type": "string" },
-        "title": { "type": "string", "description": "Short name for listings" },
-        "working_dir": { "type": "string", "description": "Default: current directory" }
-      }
+      "properties": { "task_id": { "type": "string", "description": "Task id, e.g. \"bt-1\"" } }
     }
   },
   {
-    "name": "bg_status",
-    "description": "A background terminal's status and output tail, without blocking; without `id`, lists every terminal with pid, elapsed time, exit status and output sizes.",
+    "name": "TaskStop",
+    "description": "Stop background Bash tasks: SIGTERM to the process group, SIGKILL after 2s. Returns each final state.",
     "input_schema": {
       "type": "object",
-      "properties": { "id": { "type": "string", "description": "Terminal id, e.g. \"bt-1\"" } }
+      "required": ["task_ids"],
+      "properties": { "task_ids": { "type": "array", "items": { "type": "string" }, "description": "Task ids to stop, e.g. [\"bt-1\"]" } }
     }
   },
   {
-    "name": "bg_kill",
-    "description": "Stop background terminals: SIGTERM to the process group, SIGKILL after 2s. Returns each final state.",
-    "input_schema": {
-      "type": "object",
-      "required": ["ids"],
-      "properties": { "ids": { "type": "array", "items": { "type": "string" }, "description": "Terminal ids to stop, e.g. [\"bt-1\"]" } }
-    }
-  },
-  {
-    "name": "ask_user_question",
+    "name": "AskUserQuestion",
     "description": "Ask the user structured questions for preferences, unclear instructions or decisions. A \"Type something.\" row for a custom answer is added to every question; never write \"Other\", \"Next\" or \"Type something.\" labels yourself. Put a recommended option first with \"(Recommended)\" at the end of its label. Use `preview` (markdown in a monospace box, single-select only) only to compare concrete artifacts such as mockups or code.",
     "eager_input_streaming": true,
     "input_schema": {
@@ -451,8 +437,8 @@
     }
   },
   {
-    "name": "rg",
-    "description": "Search file contents with ripgrep: smart-case, respects .gitignore, at most 100 matches per file by default. Rows are `path:anchor│line` (match) and `path-anchor│line` (context); the anchors work in the edit tools without a read. Output is capped at 2000 lines or 50KB.",
+    "name": "Grep",
+    "description": "Search file contents with ripgrep: smart-case, respects .gitignore, at most 100 matches per file by default. Rows are `path:anchor│line` (match) and `path-anchor│line` (context); the anchors work in the edit tools without a Read. Output is capped at 2000 lines or 50KB.",
     "eager_input_streaming": true,
     "input_schema": {
       "type": "object",
@@ -469,13 +455,13 @@
           "type": "string",
           "description": "e.g. '*.ts' or 'src/**'."
         },
-        "file_type": {
+        "type": {
           "type": "string",
           "description": "ripgrep type, e.g. 'ts', 'rust'."
         },
-        "case_sensitive": {
+        "-i": {
           "type": "boolean",
-          "description": "Default: smart-case."
+          "description": "Ignore case. Default: smart-case."
         },
         "fixed_strings": {
           "type": "boolean",
@@ -485,7 +471,7 @@
           "type": "boolean",
           "description": "Include hidden files."
         },
-        "context": {
+        "-C": {
           "type": "integer",
           "description": "Context lines around each match.",
           "maximum": 20,
@@ -497,10 +483,10 @@
           "minimum": 1,
           "maximum": 1000
         },
-        "output": {
+        "output_mode": {
           "type": "string",
-          "enum": ["lines", "files", "count"],
-          "description": "lines (default): matching rows; files: only paths; count: `path:matches` per file."
+          "enum": ["content", "files_with_matches", "count"],
+          "description": "content (default): matching rows; files_with_matches: only paths; count: `path:matches` per file."
         }
       },
       "required": [
@@ -509,8 +495,8 @@
     }
   },
   {
-    "name": "web_search",
-    "description": "Search the web and return bounded, source-linked results or provider answers. Full results are stored for retrieval with get_search_content using the returned responseId.",
+    "name": "WebSearch",
+    "description": "Search the web and return bounded, source-linked results or provider answers. Full results are stored for retrieval with GetSearchContent using the returned responseId.",
     "input_schema": {
       "type": "object",
       "properties": {
@@ -533,8 +519,8 @@
     }
   },
   {
-    "name": "fetch_content",
-    "description": "Fetch web pages or GitHub repositories; full content is kept for get_search_content by the returned responseId.",
+    "name": "WebFetch",
+    "description": "Fetch web pages or GitHub repositories; full content is kept for GetSearchContent by the returned responseId.",
     "input_schema": {
       "type": "object",
       "properties": {
@@ -547,8 +533,8 @@
     }
   },
   {
-    "name": "get_search_content",
-    "description": "Page through stored content of a web_search or fetch_content call, or find passages with findText.",
+    "name": "GetSearchContent",
+    "description": "Page through stored content of a WebSearch or WebFetch call, or find passages with findText.",
     "input_schema": {
       "type": "object",
       "properties": {

@@ -46,7 +46,7 @@ impl Web {
                 }
             }
         }
-        output.push_str(&format!("\n---\nUse get_search_content({{ responseId: \"{id}\", urlIndex: 0 }}) to retrieve bounded content slices."));
+        output.push_str(&format!("\n---\nUse GetSearchContent({{ responseId: \"{id}\", urlIndex: 0 }}) to retrieve bounded content slices."));
         Ok(output)
     }
 }
@@ -67,7 +67,7 @@ fn first_page(content: &str, id: &str) -> String {
     }
     let page = super::char_slice(content, 0, end);
     format!(
-        "{page}\n\n---\nShowing {end} of {length} chars, {} of {} bytes, and {} of {} lines. Use get_search_content({{ responseId: \"{id}\", urlIndex: 0, offset: {end} }}) for the next slice.",
+        "{page}\n\n---\nShowing {end} of {length} chars, {} of {} bytes, and {} of {} lines. Use GetSearchContent({{ responseId: \"{id}\", urlIndex: 0, offset: {end} }}) for the next slice.",
         page.len(),
         content.len(),
         page.lines().count(),
@@ -239,7 +239,7 @@ mod tests {
         let content = format!("{}\n{}", "a".repeat(29_000), "b".repeat(2_000));
         let page = first_page(&content, "x1");
         assert!(page.starts_with(&format!("{}\n\n\n---\nShowing 29001 of 31001 chars, 29001 of 31001 bytes, and 1 of 2 lines.", "a".repeat(29_000))), "{}", &page[29_000..]);
-        assert!(page.ends_with("get_search_content({ responseId: \"x1\", urlIndex: 0, offset: 29001 }) for the next slice."));
+        assert!(page.ends_with("GetSearchContent({ responseId: \"x1\", urlIndex: 0, offset: 29001 }) for the next slice."));
         assert_eq!(first_page("short", "x1"), "short");
     }
 

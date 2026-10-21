@@ -77,7 +77,7 @@ mod tests {
         let image = json!({"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "A".repeat(100_000)}});
         let messages = [
             json!({"role": "user", "content": "x".repeat(98)}),
-            json!({"role": "assistant", "content": [{"type": "tool_use", "id": "t1", "name": "read", "input": {}}]}),
+            json!({"role": "assistant", "content": [{"type": "tool_use", "id": "t1", "name": "Read", "input": {}}]}),
             json!({"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": [{"type": "text", "text": "y"}, image]}]}),
         ];
         let tool_use_bytes = messages[1]["content"][0].to_string().len() as u64;

@@ -17,7 +17,7 @@ Begin the first bullet of each tool call with that tool's [[N:toolname]] label, 
 
 /// `elide` keeps this many chars at each end of a long output.
 const KEPT_CHARS_EACH_END: usize = 4000;
-const PROTECTED_TOOLS: [&str; 4] = ["context_tree_query", "ask_user_question", "todo", "goal"];
+const PROTECTED_TOOLS: [&str; 4] = ["ContextTreeQuery", "AskUserQuestion", "Todo", "Goal"];
 /// Below this a cached tool output costs 0.1x input, so a summary saves little and costs a context_tree_query turn when the model needs the original back.
 const MIN_CONTEXT_TOKENS: u64 = 60_000;
 pub const SUMMARY_MAX_TOKENS: u64 = 4096;
@@ -70,7 +70,7 @@ fn is_protected(call: &Call) -> bool {
     if PROTECTED_TOOLS.contains(&call.name.as_str()) {
         return true;
     }
-    call.name == "read" && call.input["path"].as_str().is_some_and(|path| path.contains("/skills/") && path.ends_with(".md"))
+    call.name == "Read" && call.input["file_path"].as_str().is_some_and(|path| path.contains("/skills/") && path.ends_with(".md"))
 }
 
 /// The summarizer's system prompt and user prompt for one batch.
@@ -144,7 +144,7 @@ pub fn view(messages: &[Value], condensed: &[Condensed]) -> Vec<Value> {
             *block = json!({
                 "type": "tool_result",
                 "tool_use_id": id,
-                "content": format!("[Summarized in pruner summary, ref `{reference}`. Use context_tree_query to retrieve full output.]"),
+                "content": format!("[Summarized in pruner summary, ref `{reference}`. Use ContextTreeQuery to retrieve full output.]"),
                 "is_error": false,
             });
             if !summaries.contains(&index) {
@@ -175,7 +175,7 @@ pub fn next_ref(condensed: &[Condensed]) -> usize {
 
 fn summary_block(batch: &Condensed) -> String {
     let refs: Vec<String> = batch.refs.iter().map(|(reference, _)| format!("`{reference}`")).collect();
-    format!("Pruner summary:\n\n{}\n\n---\n**Summarized tool refs**: {}\nUse `context_tree_query` with these refs to retrieve the original full outputs.", batch.summary, refs.join(", "))
+    format!("Pruner summary:\n\n{}\n\n---\n**Summarized tool refs**: {}\nUse `ContextTreeQuery` with these refs to retrieve the original full outputs.", batch.summary, refs.join(", "))
 }
 
 /// context_tree_query: the original outputs for short refs or raw tool_use ids.
@@ -241,24 +241,24 @@ mod tests {
 
     #[test]
     fn selection_skips_small_batches_and_protected_calls() {
-        assert!(select(vec![call("a", "bash", json!({}), &"x".repeat(999))], 1000, MIN_CONTEXT_TOKENS).is_empty());
-        let skill = json!({"path": "/u/.pi/agent/skills/tdd/SKILL.md"});
+        assert!(select(vec![call("a", "Bash", json!({}), &"x".repeat(999))], 1000, MIN_CONTEXT_TOKENS).is_empty());
+        let skill = json!({"file_path": "/u/.pi/agent/skills/tdd/SKILL.md"});
         let picked =
-            select(vec![call("a", "read", skill, &"x".repeat(5000)), call("b", "todo", json!({}), &"x".repeat(5000)), call("c", "bash", json!({}), &"x".repeat(1000))], 1000, MIN_CONTEXT_TOKENS);
+            select(vec![call("a", "Read", skill, &"x".repeat(5000)), call("b", "Todo", json!({}), &"x".repeat(5000)), call("c", "Bash", json!({}), &"x".repeat(1000))], 1000, MIN_CONTEXT_TOKENS);
         assert_eq!(picked.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), ["c"]);
     }
 
     #[test]
     fn selection_waits_until_the_context_is_large() {
-        let big = || vec![call("a", "bash", json!({}), &"x".repeat(50_000))];
+        let big = || vec![call("a", "Bash", json!({}), &"x".repeat(50_000))];
         assert!(select(big(), 1000, MIN_CONTEXT_TOKENS - 1).is_empty());
         assert_eq!(select(big(), 1000, MIN_CONTEXT_TOKENS).len(), 1);
     }
 
     #[test]
     fn labels_become_refs_and_unknown_labels_are_dropped() {
-        let calls = [call("a", "bash", json!({}), ""), call("b", "rg", json!({}), "")];
-        let batch = condensed("[[1:bash]] ran ls\n[[2:rg]] found x\n[[3:fd]] invented", &calls, 4);
+        let calls = [call("a", "Bash", json!({}), ""), call("b", "Grep", json!({}), "")];
+        let batch = condensed("[[1:Bash]] ran ls\n[[2:Grep]] found x\n[[3:fd]] invented", &calls, 4);
         assert_eq!(batch.summary, "`t4` ran ls\n`t5` found x\n invented");
         assert_eq!(batch.refs, [("t4".to_string(), "a".to_string()), ("t5".to_string(), "b".to_string())]);
         assert_eq!(condensed("a [[x", &calls, 4).summary, "a [[x");
@@ -266,15 +266,15 @@ mod tests {
 
     #[test]
     fn next_ref_follows_the_highest_saved_ref_across_a_gap() {
-        let calls = [call("a", "bash", json!({}), "")];
+        let calls = [call("a", "Bash", json!({}), "")];
         // Refs t1-t3 belonged to a batch whose summary failed and was never saved.
-        assert_eq!(next_ref(&[condensed("[[1:bash]] ran ls", &calls, 4)]), 5);
+        assert_eq!(next_ref(&[condensed("[[1:Bash]] ran ls", &calls, 4)]), 5);
         assert_eq!(next_ref(&[]), 1);
     }
 
     #[test]
     fn refs_keep_their_order_through_a_saved_session() {
-        let calls = [call("a", "bash", json!({}), ""), call("b", "rg", json!({}), "")];
+        let calls = [call("a", "Bash", json!({}), ""), call("b", "Grep", json!({}), "")];
         let batch = condensed("Ran two searches.", &calls, 9);
         assert_eq!(from_entry(&entry(&batch)).unwrap().refs, batch.refs);
     }
@@ -282,12 +282,12 @@ mod tests {
     #[test]
     fn view_stubs_condensed_results_and_query_returns_the_original() {
         let messages = [
-            json!({"role": "assistant", "content": [{"type": "tool_use", "id": "a", "name": "bash", "input": {"command": "ls"}}]}),
+            json!({"role": "assistant", "content": [{"type": "tool_use", "id": "a", "name": "Bash", "input": {"command": "ls"}}]}),
             json!({"role": "user", "content": [{"type": "tool_result", "tool_use_id": "a", "content": "big output", "is_error": false}]}),
         ];
         let batch = Condensed { refs: vec![("t1".into(), "a".into())], summary: "`t1` listed files".into() };
         let view = view(&messages, std::slice::from_ref(&batch));
-        assert_eq!(view[1]["content"][0]["content"], "[Summarized in pruner summary, ref `t1`. Use context_tree_query to retrieve full output.]");
+        assert_eq!(view[1]["content"][0]["content"], "[Summarized in pruner summary, ref `t1`. Use ContextTreeQuery to retrieve full output.]");
         assert!(view[1]["content"][1]["text"].as_str().unwrap().starts_with("Pruner summary:\n\n`t1` listed files"));
         assert_eq!(messages[1]["content"][0]["content"], "big output");
         assert!(query(&messages, std::slice::from_ref(&batch), &json!({"toolCallIds": ["t1"]})).unwrap().ends_with("Status: OK\n\nbig output"));

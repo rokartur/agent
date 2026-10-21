@@ -76,7 +76,7 @@ Same model (Claude Opus 5.5, medium thinking), same prompt, two coding tasks, 6 
 ```sh
 agent -p "Why is this test flaky?"     # print the answer and exit
 agent --headless "Fix the lint"        # JSONL events
-agent -p --tools read,rg "Map the API" # offer only these tools
+agent -p --tools Read,Grep "Map the API" # offer only these tools
 agent acp                              # Agent Client Protocol for Zed and other editors
 agent -p --trust "Fix the lint"        # load this project's .agents and run its edit hooks
 ```

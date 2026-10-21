@@ -45,7 +45,7 @@ struct State {
     exit: Option<(Status, String)>,
     settled: Option<Instant>,
     killed: bool,
-    /// The model already saw the final state (bg_status or bg_kill), so no follow-up.
+    /// The model already saw the final state (TaskOutput or TaskStop), so no follow-up.
     reported: bool,
 }
 
@@ -70,7 +70,7 @@ impl Status {
 
 impl Terminals {
     pub fn status_of(&self, input: &Value, follow_ups: &Arc<Mutex<Vec<FollowUp>>>) -> Result<String, String> {
-        let Some(id) = input["id"].as_str() else { return Ok(self.describe_all()) };
+        let Some(id) = input["task_id"].as_str() else { return Ok(self.describe_all()) };
         let terminal = self.find(id)?;
         terminal.mark_reported(follow_ups);
         Ok(terminal.status_text())
@@ -88,24 +88,17 @@ impl Terminals {
         if command.is_empty() {
             return Err("command must not be empty.".into());
         }
-        let cwd = match input["working_dir"].as_str() {
-            Some(dir) => cwd.join(dir),
-            None => cwd.to_path_buf(),
-        };
-        if !cwd.is_dir() {
-            return Err(format!("working_dir is not a directory: {}", cwd.display()));
-        }
         if self.running() >= MAX_RUNNING {
-            return Err(format!("Max {MAX_RUNNING} background terminals can run concurrently. Stop one with bg_kill before starting another."));
+            return Err(format!("Max {MAX_RUNNING} background terminals can run concurrently. Stop one with TaskStop before starting another."));
         }
-        let title: String = input["title"].as_str().unwrap_or_default().split_whitespace().collect::<Vec<_>>().join(" ").chars().take(MAX_TITLE_CHARS).collect();
+        let title: String = input["description"].as_str().unwrap_or_default().split_whitespace().collect::<Vec<_>>().join(" ").chars().take(MAX_TITLE_CHARS).collect();
         let title = if title.is_empty() { "terminal".to_string() } else { title };
         let (stdout_file, stdout) = super::private_file("bg", "stdout")?;
         let (stderr_file, stderr) = super::private_file("bg", "stderr")?;
-        let pid = crate::process::command("sh").args(["-c", command]).current_dir(&cwd).stdout(stdout_file).stderr(stderr_file).spawn().map_err(|e| format!("Cannot start sh: {e}"))?.id();
+        let pid = crate::process::command("sh").args(["-c", command]).current_dir(cwd).stdout(stdout_file).stderr(stderr_file).spawn().map_err(|e| format!("Cannot start sh: {e}"))?.id();
         self.counter += 1;
         let id = format!("bt-{}", self.counter);
-        let terminal = Arc::new(Terminal { id, title, cwd, pid, started: Instant::now(), stdout, stderr, state: Mutex::default() });
+        let terminal = Arc::new(Terminal { id, title, cwd: cwd.to_path_buf(), pid, started: Instant::now(), stdout, stderr, state: Mutex::default() });
         self.list.push(terminal.clone());
         let follow_ups = follow_ups.clone();
         let watched = terminal.clone();
@@ -113,7 +106,7 @@ impl Terminals {
             // shortcut: every settled `sh` stays a zombie until the agent exits, so `stop` and `kill_all` never signal a
             // reused group; reap once the group is empty if a session starts thousands of terminals.
             let status = crate::process::wait_unreaped(pid);
-            // follow_ups before state, the order bg_status and bg_kill use, so neither sees the exit before its report is queued.
+            // follow_ups before state, the order TaskOutput and TaskStop use, so neither sees the exit before its report is queued.
             let mut queued = follow_ups.lock().unwrap();
             let mut state = watched.state.lock().unwrap();
             let exit = match status {
@@ -131,7 +124,7 @@ impl Terminals {
             }
         });
         Ok(format!(
-            "Started background terminal {id} \"{title}\" (pid {pid}, {cwd}).\nIt runs in the background with no stdin. You'll get a message when it exits, or use bg_status(id: \"{id}\") to peek, bg_kill to stop it, bg_status without id to see all.",
+            "Started background terminal {id} \"{title}\" (pid {pid}, {cwd}).\nIt runs in the background with no stdin. You'll get a message when it exits, or use TaskOutput(task_id: \"{id}\") to peek, TaskStop to stop it, TaskOutput without task_id to see all.",
             id = terminal.id,
             title = terminal.title,
             pid = terminal.pid,
@@ -149,10 +142,10 @@ impl Terminals {
         if ids.is_empty() { "none".into() } else { ids.join(", ") }
     }
 
-    /// The terminals `bg_kill` names; it runs without the lock, since stopping can take seconds.
+    /// The terminals `TaskStop` names; it runs without the lock, since stopping can take seconds.
     pub fn for_kill(&self, input: &Value) -> Result<Vec<Arc<Terminal>>, String> {
         let mut ids: Vec<&str> = Vec::new();
-        for id in input["ids"].as_array().into_iter().flatten().filter_map(Value::as_str) {
+        for id in input["task_ids"].as_array().into_iter().flatten().filter_map(Value::as_str) {
             if !ids.contains(&id) {
                 ids.push(id);
             }
@@ -179,7 +172,7 @@ impl Terminals {
     }
 }
 
-/// bg_kill: SIGTERM to each group, SIGKILL after `FORCE_KILL_AFTER`, then the final states.
+/// TaskStop: SIGTERM to each group, SIGKILL after `FORCE_KILL_AFTER`, then the final states.
 pub fn kill(terminals: &[Arc<Terminal>], follow_ups: &Arc<Mutex<Vec<FollowUp>>>, abort: &AtomicBool) -> String {
     let was_running: Vec<bool> = terminals.iter().map(|t| t.stop()).collect();
     let deadline = Instant::now() + STOP_TIMEOUT;
@@ -346,15 +339,15 @@ mod tests {
         let dir = std::env::temp_dir();
         let follow_ups = Arc::default();
         let mut terminals = Terminals::default();
-        let started = terminals.start(&json!({"command": "echo out; echo err >&2; exit 3", "title": "  a\nb "}), &dir, &follow_ups).unwrap();
+        let started = terminals.start(&json!({"command": "echo out; echo err >&2; exit 3", "description": "  a\nb "}), &dir, &follow_ups).unwrap();
         assert!(started.starts_with("Started background terminal bt-1 \"a b\""));
         wait_until(|| !follow_ups.lock().unwrap().is_empty());
         let text = follow_ups.lock().unwrap().first().expect("no exit report within 5s").text.clone();
         assert!(text.starts_with("Background terminal bt-1 \"a b\" exited (exit 3) after 0s.\n\nstdout:\nout\n\nstderr:\nerr"), "{text}");
-        let status = terminals.status_of(&json!({"id": "bt-1"}), &follow_ups).unwrap();
+        let status = terminals.status_of(&json!({"task_id": "bt-1"}), &follow_ups).unwrap();
         assert!(status.starts_with("bt-1 [failed] \"a b\""), "{status}");
         assert!(follow_ups.lock().unwrap().is_empty());
-        assert_eq!(terminals.status_of(&json!({"id": "bt-9"}), &follow_ups).unwrap_err(), "Unknown terminal id \"bt-9\". Known: bt-1.");
+        assert_eq!(terminals.status_of(&json!({"task_id": "bt-9"}), &follow_ups).unwrap_err(), "Unknown terminal id \"bt-9\". Known: bt-1.");
     }
 
     #[test]
@@ -362,8 +355,8 @@ mod tests {
         let dir = std::env::temp_dir();
         let follow_ups = Arc::default();
         let mut terminals = Terminals::default();
-        terminals.start(&json!({"command": "sleep 30 & sleep 30", "title": "sleeper"}), &dir, &follow_ups).unwrap();
-        let targets = terminals.for_kill(&json!({"ids": ["bt-1"]})).unwrap();
+        terminals.start(&json!({"command": "sleep 30 & sleep 30", "description": "sleeper"}), &dir, &follow_ups).unwrap();
+        let targets = terminals.for_kill(&json!({"task_ids": ["bt-1"]})).unwrap();
         let abort = AtomicBool::new(false);
         assert_eq!(kill(&targets, &follow_ups, &abort), "Killed bt-1 \"sleeper\" (SIGTERM).");
         assert!(follow_ups.lock().unwrap().is_empty());
@@ -375,13 +368,13 @@ mod tests {
         let dir = std::env::temp_dir();
         let follow_ups = Arc::default();
         let mut terminals = Terminals::default();
-        terminals.start(&json!({"command": "sleep 30 & echo $!", "title": "orphan"}), &dir, &follow_ups).unwrap();
+        terminals.start(&json!({"command": "sleep 30 & echo $!", "description": "orphan"}), &dir, &follow_ups).unwrap();
         let terminal = terminals.find("bt-1").unwrap();
         wait_until(|| terminal.status() != Status::Running);
         let child = std::fs::read_to_string(&terminal.stdout).unwrap().trim().to_string();
         assert_eq!(kill(&[terminal], &follow_ups, &AtomicBool::new(false)), "bt-1 \"orphan\" was already done (exit 0).");
         wait_until(|| !alive(&child));
-        assert!(!alive(&child), "sleep {child} survived bg_kill");
+        assert!(!alive(&child), "sleep {child} survived TaskStop");
     }
 
     fn wait_until(done: impl Fn() -> bool) {

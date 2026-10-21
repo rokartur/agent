@@ -252,7 +252,7 @@ pub fn wait(runs: &[Arc<Run>], abort: &AtomicBool) {
 }
 
 /// Records a run's answer; a background run also queues it as a follow-up for the next turn.
-/// Holding `follow_ups` while the status flips lets bg_wait, which sees the run done, find its follow-up to withdraw.
+/// Holding `follow_ups` while the status flips lets TaskWait, which sees the run done, find its follow-up to withdraw.
 fn finish(run: &Run, result: Result<String, String>, follow_ups: &Mutex<Vec<FollowUp>>) {
     let mut queued = follow_ups.lock().unwrap();
     {
@@ -266,7 +266,7 @@ fn finish(run: &Run, result: Result<String, String>, follow_ups: &Mutex<Vec<Foll
     }
 }
 
-/// bg_wait: the answers of `runs` once they finish or `timeout` passes, withdrawing the follow-ups they queued.
+/// TaskWait: the answers of `runs` once they finish or `timeout` passes, withdrawing the follow-ups they queued.
 /// Esc ends the wait but leaves the runs going, so their answers still arrive as follow-ups.
 pub fn wait_background(runs: &[Arc<Run>], timeout: Duration, abort: &AtomicBool, follow_ups: &Mutex<Vec<FollowUp>>) -> Result<String, String> {
     let deadline = Instant::now() + timeout;
@@ -293,10 +293,10 @@ pub struct Task {
     pub explore: bool,
 }
 
-/// The `subagent` input: `{label, prompt, model?, effort?, explore?}` or `{tasks: [...]}`.
+/// The `Agent` input: `{description, prompt, model?, effort?, explore?}` or `{tasks: [...]}`.
 pub fn tasks(input: &Value) -> Result<Vec<Task>, String> {
     let one = |item: &Value| -> Result<Task, String> {
-        let label = item["label"].as_str().filter(|l| !l.trim().is_empty()).ok_or("Each task needs a label.")?;
+        let label = item["description"].as_str().filter(|l| !l.trim().is_empty()).ok_or("Each task needs a description.")?;
         let prompt = item["prompt"].as_str().filter(|p| !p.trim().is_empty()).ok_or("Each task needs a prompt.")?;
         let model = item["model"].as_str().filter(|m| *m != "inherit").map(String::from);
         let effort = item["effort"].as_str().map(String::from);
@@ -341,11 +341,11 @@ mod tests {
 
     #[test]
     fn single_and_parallel_task_shapes() {
-        let one = tasks(&json!({"label": "scout", "prompt": "look", "model": "inherit", "effort": "low", "explore": true})).unwrap();
+        let one = tasks(&json!({"description": "scout", "prompt": "look", "model": "inherit", "effort": "low", "explore": true})).unwrap();
         assert_eq!(one, [Task { label: "scout".into(), prompt: "look".into(), model: None, effort: Some("low".into()), explore: true }]);
-        assert_eq!(tasks(&json!({"tasks": [{"label": "a", "prompt": "x"}, {"label": "b", "prompt": "y"}]})).unwrap().len(), 2);
-        assert!(tasks(&json!({"label": "a", "prompt": "x", "effort": "huge"})).unwrap_err().starts_with("Unknown effort huge;"));
-        assert_eq!(tasks(&json!({"tasks": [{"label": " ", "prompt": "x"}]})).unwrap_err(), "Each task needs a label.");
+        assert_eq!(tasks(&json!({"tasks": [{"description": "a", "prompt": "x"}, {"description": "b", "prompt": "y"}]})).unwrap().len(), 2);
+        assert!(tasks(&json!({"description": "a", "prompt": "x", "effort": "huge"})).unwrap_err().starts_with("Unknown effort huge;"));
+        assert_eq!(tasks(&json!({"tasks": [{"description": " ", "prompt": "x"}]})).unwrap_err(), "Each task needs a description.");
     }
 
     #[test]
@@ -370,9 +370,9 @@ mod tests {
     fn the_childs_usage_record_shows_in_the_run_summary() {
         let run = scan_run();
         let usage = Usage { input: 1200, output: 300, cache_read: 40_000, cache_write: 0 };
-        let stdout: String = [json!({"type": "tool", "name": "read"}), usage::entry("opus", usage, 0), json!({"type": "done", "answer": "ok"})].iter().map(|event| format!("{event}\n")).collect();
+        let stdout: String = [json!({"type": "tool", "name": "Read"}), usage::entry("opus", usage, 0), json!({"type": "done", "answer": "ok"})].iter().map(|event| format!("{event}\n")).collect();
         assert_eq!(read_events(stdout.as_bytes(), &run), Ok("ok".into()));
-        assert_eq!(run.summary(), "sa-1 scan running: 1 tool calls, last read, 0s, ↑1k ↓300 cache 40k");
+        assert_eq!(run.summary(), "sa-1 scan running: 1 tool calls, last Read, 0s, ↑1k ↓300 cache 40k");
     }
 
     #[test]

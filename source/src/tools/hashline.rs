@@ -183,7 +183,7 @@ impl Anchors {
             }
             return self.read_many(cwd, paths);
         }
-        let path = existing_file(cwd, str_arg(input, "path")?)?;
+        let path = existing_file(cwd, str_arg(input, "file_path")?)?;
         let text = Text::load(&path)?;
         let empty = text.is_empty();
         self.sync(&path, text.lines)?;
@@ -221,14 +221,14 @@ impl Anchors {
         for entry in paths {
             let (path, offset, limit) = match entry {
                 Value::String(path) => (path.as_str(), &Value::Null, &Value::Null),
-                Value::Object(range) => match range.get("path").and_then(Value::as_str) {
+                Value::Object(range) => match range.get("file_path").and_then(Value::as_str) {
                     Some(path) => (path, &entry["offset"], &entry["limit"]),
                     None => return Err("[E_BAD_SHAPE] A \"paths\" range needs a string \"path\".".into()),
                 },
                 _ => return Err("[E_BAD_SHAPE] Every entry in \"paths\" must be a path or {path, offset, limit}.".into()),
             };
             let limit = if limit.is_null() { &json!(MAX_LINES) } else { limit };
-            let body = self.read(cwd, &json!({"path": path, "offset": offset, "limit": limit})).unwrap_or_else(|e| e);
+            let body = self.read(cwd, &json!({"file_path": path, "offset": offset, "limit": limit})).unwrap_or_else(|e| e);
             out.push(format!("== {path}\n{body}"));
         }
         Ok(crate::tools::truncate_head(out.join("\n\n"), "read"))
@@ -274,7 +274,7 @@ impl Anchors {
     }
 
     pub fn replace_match(&mut self, cwd: &Path, input: &Value) -> Result<String, String> {
-        let (path, mut file, first, last) = match input["path"].as_str() {
+        let (path, mut file, first, last) = match input["file_path"].as_str() {
             Some(path) => self.resolve_file(cwd, path)?,
             None => self.resolve_range(str_arg(input, "replace_from")?, str_arg(input, "replace_to")?)?,
         };
@@ -282,7 +282,7 @@ impl Anchors {
             replace_once(&mut file, first, last, input, &path)?;
             return self.commit(&path, file);
         };
-        if input["path"].is_null() {
+        if input["file_path"].is_null() {
             return Err("[E_BAD_SHAPE] edits need `path`, not anchors.".into());
         }
         for (i, edit) in edits.iter().enumerate() {
@@ -589,21 +589,21 @@ mod tests {
     fn read_serves_unique_anchors_and_pages_by_anchor() {
         let path = temp_file("read", "a\nb\nc\n");
         let mut anchors = Anchors::new("s");
-        let first = anchors.read(Path::new("/"), &json!({"path": path, "limit": 2})).unwrap();
+        let first = anchors.read(Path::new("/"), &json!({"file_path": path, "limit": 2})).unwrap();
         let served = anchors_of(&first);
         assert_eq!(served.len(), 2);
         assert!(first.ends_with(&format!("[Showing lines 1-2 of 3. Use offset={} to continue.]", served[1])));
-        let rest = anchors.read(Path::new("/"), &json!({"path": path, "offset": served[1]})).unwrap();
+        let rest = anchors.read(Path::new("/"), &json!({"file_path": path, "offset": served[1]})).unwrap();
         assert_eq!(rest.split_once('│').unwrap().1, "c");
         let last = anchors_of(&rest)[0].clone();
-        let after_last = anchors.read(Path::new("/"), &json!({"path": path, "offset": last})).unwrap();
+        let after_last = anchors.read(Path::new("/"), &json!({"file_path": path, "offset": last})).unwrap();
         assert_eq!(after_last, format!("[No lines after {last}: it is the last line of {}.]", path.display()));
     }
 
     #[test]
     fn read_without_limit_pages_at_the_default() {
         let path = temp_file("default", &"x\n".repeat(READ_DEFAULT_LINES + 1));
-        let page = Anchors::new("s").read(Path::new("/"), &json!({"path": path})).unwrap();
+        let page = Anchors::new("s").read(Path::new("/"), &json!({"file_path": path})).unwrap();
         assert!(page.contains(&format!("[Showing lines 1-{READ_DEFAULT_LINES} of {}.", READ_DEFAULT_LINES + 1)), "{}", &page[page.len() - 80..]);
     }
 
@@ -625,7 +625,7 @@ mod tests {
     fn read_serves_ranges_of_several_files_in_one_call() {
         let path = temp_file("read_ranges", "one\ntwo\nthree\nfour\n");
         let mut anchors = Anchors::new("s");
-        let ranges = json!({"paths": [{"path": path, "offset": 2, "limit": 1}, {"path": path, "offset": 4}]});
+        let ranges = json!({"paths": [{"file_path": path, "offset": 2, "limit": 1}, {"file_path": path, "offset": 4}]});
         let out = anchors.read(Path::new("/"), &ranges).unwrap();
         let rows: Vec<&str> = out.lines().filter(|line| line.contains('│')).map(|line| line.split('│').nth(1).unwrap()).collect();
         assert_eq!(rows, ["two", "four"], "{out}");
@@ -637,7 +637,7 @@ mod tests {
     fn replace_keeps_untouched_anchors_and_reports_diff() {
         let path = temp_file("replace", "one\ntwo\nthree\nfour\n");
         let mut anchors = Anchors::new("s");
-        let a = anchors_of(&anchors.read(Path::new("/"), &json!({"path": path})).unwrap());
+        let a = anchors_of(&anchors.read(Path::new("/"), &json!({"file_path": path})).unwrap());
         let diff = anchors.replace(&json!({"remove_from": a[1], "remove_to": a[2], "text": "TWO\n"})).unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "one\nTWO\nfour\n");
         let lines: Vec<&str> = diff.lines().collect();
@@ -654,7 +654,7 @@ mod tests {
     fn external_change_keeps_unchanged_anchors_and_refuses_stale_ones() {
         let path = temp_file("external", "one\ntwo\nthree\n");
         let mut anchors = Anchors::new("s");
-        let a = anchors_of(&anchors.read(Path::new("/"), &json!({"path": path})).unwrap());
+        let a = anchors_of(&anchors.read(Path::new("/"), &json!({"file_path": path})).unwrap());
         std::fs::write(&path, "one\n2\nthree\n").unwrap();
         assert!(anchors.replace(&json!({"remove_from": a[1], "remove_to": a[1], "text": "x"})).unwrap_err().contains("changed since read"));
         anchors.replace_match(Path::new("/"), &json!({"replace_from": a[2], "replace_to": a[2], "old_string": "ee", "new_string": "EE"})).unwrap();
@@ -666,7 +666,7 @@ mod tests {
     fn replace_match_refuses_a_fragment_that_occurs_twice() {
         let path = temp_file("ambiguous", "foo(foo)\n");
         let mut anchors = Anchors::new("s");
-        let a = anchors_of(&anchors.read(Path::new("/"), &json!({"path": path})).unwrap());
+        let a = anchors_of(&anchors.read(Path::new("/"), &json!({"file_path": path})).unwrap());
         let error = anchors.replace_match(Path::new("/"), &json!({"replace_from": a[0], "replace_to": a[0], "old_string": "foo", "new_string": "bar"})).unwrap_err();
         assert!(error.starts_with("[E_AMBIGUOUS]"), "{error}");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "foo(foo)\n");
@@ -676,7 +676,7 @@ mod tests {
     fn replace_match_with_a_trailing_break_keeps_text_after_the_match() {
         let path = temp_file("overlap", "aaa\n");
         let mut anchors = Anchors::new("s");
-        let a = anchors_of(&anchors.read(Path::new("/"), &json!({"path": path})).unwrap());
+        let a = anchors_of(&anchors.read(Path::new("/"), &json!({"file_path": path})).unwrap());
         anchors.replace_match(Path::new("/"), &json!({"replace_from": a[0], "replace_to": a[0], "old_string": "aa", "new_string": "x\n"})).unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "x\na\n");
     }
@@ -685,12 +685,12 @@ mod tests {
     fn replace_match_by_path_edits_an_unread_file_and_serves_anchors() {
         let path = temp_file("by_path", "one\ntwo\nthree\n");
         let mut anchors = Anchors::new("s");
-        let diff = anchors.replace_match(Path::new("/"), &json!({"path": path, "old_string": "two", "new_string": "TWO"})).unwrap();
+        let diff = anchors.replace_match(Path::new("/"), &json!({"file_path": path, "old_string": "two", "new_string": "TWO"})).unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "one\nTWO\nthree\n");
         let added = &diff.lines().find(|line| line.starts_with('+')).unwrap()[1..5];
         anchors.replace(&json!({"remove_from": added, "remove_to": added, "text": "2"})).unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "one\n2\nthree\n");
-        let error = anchors.replace_match(Path::new("/"), &json!({"path": path, "old_string": "e", "new_string": "E"})).unwrap_err();
+        let error = anchors.replace_match(Path::new("/"), &json!({"file_path": path, "old_string": "e", "new_string": "E"})).unwrap_err();
         assert!(error.starts_with("[E_AMBIGUOUS]"), "{error}");
     }
 
@@ -699,10 +699,10 @@ mod tests {
         let path = temp_file("edits", "one\ntwo\nthree\n");
         let mut anchors = Anchors::new("s");
         let edits = json!([{"old_string": "one", "new_string": "1"}, {"old_string": "three", "new_string": "3\n"}]);
-        anchors.replace_match(Path::new("/"), &json!({"path": path, "edits": edits})).unwrap();
+        anchors.replace_match(Path::new("/"), &json!({"file_path": path, "edits": edits})).unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "1\ntwo\n3\n");
         let edits = json!([{"old_string": "two", "new_string": "2"}, {"old_string": "missing", "new_string": "x"}]);
-        let error = anchors.replace_match(Path::new("/"), &json!({"path": path, "edits": edits})).unwrap_err();
+        let error = anchors.replace_match(Path::new("/"), &json!({"file_path": path, "edits": edits})).unwrap_err();
         assert!(error.starts_with("[E_NO_MATCH]") && error.contains("edits[1]"), "{error}");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "1\ntwo\n3\n");
     }
@@ -711,7 +711,7 @@ mod tests {
     fn crlf_bom_and_missing_final_newline_survive_edits() {
         let path = temp_file("crlf", "\u{feff}a\r\nb");
         let mut anchors = Anchors::new("s");
-        let a = anchors_of(&anchors.read(Path::new("/"), &json!({"path": path})).unwrap());
+        let a = anchors_of(&anchors.read(Path::new("/"), &json!({"file_path": path})).unwrap());
         anchors.insert(&json!({"anchor": a[0], "direction": "after", "text": "mid"})).unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "\u{feff}a\r\nmid\r\nb");
     }
@@ -720,7 +720,7 @@ mod tests {
     fn deleting_every_line_leaves_an_empty_line_anchor() {
         let path = temp_file("empty", "a\nb\n");
         let mut anchors = Anchors::new("s");
-        let a = anchors_of(&anchors.read(Path::new("/"), &json!({"path": path})).unwrap());
+        let a = anchors_of(&anchors.read(Path::new("/"), &json!({"file_path": path})).unwrap());
         let out = anchors.replace(&json!({"remove_from": a[0], "remove_to": a[1], "text": ""})).unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "");
         let empty = out.split("replace on ").nth(1).unwrap().split('│').next().unwrap();
@@ -731,9 +731,9 @@ mod tests {
     #[test]
     fn a_resumed_session_never_serves_the_anchors_of_its_previous_run() {
         let path = temp_file("resume", "a\nb\n");
-        let first = anchors_of(&Anchors::new("s").read(Path::new("/"), &json!({"path": path})).unwrap());
+        let first = anchors_of(&Anchors::new("s").read(Path::new("/"), &json!({"file_path": path})).unwrap());
         std::thread::sleep(std::time::Duration::from_millis(2));
-        let resumed = anchors_of(&Anchors::new("s").read(Path::new("/"), &json!({"path": path})).unwrap());
+        let resumed = anchors_of(&Anchors::new("s").read(Path::new("/"), &json!({"file_path": path})).unwrap());
         assert!(!resumed.iter().any(|anchor| first.contains(anchor)), "{first:?} {resumed:?}");
     }
 
@@ -742,14 +742,14 @@ mod tests {
         let path = temp_file("exhaust", "a\n");
         let mut anchors = Anchors::new("s");
         anchors.minted = ANCHOR_COUNT;
-        assert!(anchors.read(Path::new("/"), &json!({"path": path})).unwrap_err().starts_with("[E_ANCHORS_EXHAUSTED]"));
+        assert!(anchors.read(Path::new("/"), &json!({"file_path": path})).unwrap_err().starts_with("[E_ANCHORS_EXHAUSTED]"));
     }
 
     #[test]
     fn an_edit_needs_anchors_only_for_the_lines_it_adds() {
         let path = temp_file("exhaust-edit", "a\nb\nc\n");
         let mut anchors = Anchors::new("s");
-        let a = anchors_of(&anchors.read(Path::new("/"), &json!({"path": path})).unwrap());
+        let a = anchors_of(&anchors.read(Path::new("/"), &json!({"file_path": path})).unwrap());
         anchors.minted = ANCHOR_COUNT - 1;
         anchors.replace(&json!({"remove_from": a[1], "remove_to": a[1], "text": "B\n"})).unwrap();
     }
@@ -758,7 +758,7 @@ mod tests {
     fn a_mixed_line_ending_file_keeps_each_lines_ending() {
         let path = temp_file("mixed", "a\nb\r\nc\n");
         let mut anchors = Anchors::new("s");
-        let a = anchors_of(&anchors.read(Path::new("/"), &json!({"path": path})).unwrap());
+        let a = anchors_of(&anchors.read(Path::new("/"), &json!({"file_path": path})).unwrap());
         anchors.replace(&json!({"remove_from": a[2], "remove_to": a[2], "text": "C\n"})).unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "a\nb\r\nC\n");
     }
@@ -767,7 +767,7 @@ mod tests {
     fn replace_match_ends_the_line_on_a_trailing_break_in_the_files_line_ending() {
         let path = temp_file("match", "foo\r\nx\r\n");
         let mut anchors = Anchors::new("s");
-        let a = anchors_of(&anchors.read(Path::new("/"), &json!({"path": path})).unwrap());
+        let a = anchors_of(&anchors.read(Path::new("/"), &json!({"file_path": path})).unwrap());
         anchors.replace_match(Path::new("/"), &json!({"replace_from": a[0], "replace_to": a[0], "old_string": "foo", "new_string": "a\r\nb\n"})).unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "a\r\nb\r\nx\r\n");
     }
@@ -776,7 +776,7 @@ mod tests {
     fn a_row_of_exactly_max_bytes_is_served() {
         let line = "x".repeat(MAX_BYTES - "ABCD│".len());
         let path = temp_file("wide", &format!("{line}\nb\n"));
-        let out = Anchors::new("s").read(Path::new("/"), &json!({"path": path})).unwrap();
+        let out = Anchors::new("s").read(Path::new("/"), &json!({"file_path": path})).unwrap();
         assert!(out.lines().next().unwrap().ends_with(&line), "{}", &out[out.len() - 200..]);
     }
 
@@ -784,7 +784,7 @@ mod tests {
     fn the_diff_serves_only_anchors_of_lines_on_disk() {
         let path = temp_file("addnewline", "a");
         let mut anchors = Anchors::new("s");
-        let a = anchors_of(&anchors.read(Path::new("/"), &json!({"path": path})).unwrap());
+        let a = anchors_of(&anchors.read(Path::new("/"), &json!({"file_path": path})).unwrap());
         let out = anchors.insert(&json!({"anchor": a[0], "direction": "after", "text": ""})).unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "a\n");
         assert!(!out.lines().any(|row| row.starts_with('+')), "{out}");
@@ -792,7 +792,7 @@ mod tests {
 
     #[test]
     fn read_refuses_devices() {
-        let err = Anchors::new("s").read(Path::new("/"), &json!({"path": "/dev/null"})).unwrap_err();
+        let err = Anchors::new("s").read(Path::new("/"), &json!({"file_path": "/dev/null"})).unwrap_err();
         assert!(err.contains("is not a regular file"), "{err}");
     }
 

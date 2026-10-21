@@ -60,7 +60,7 @@ Flags:
   --auto                      Let a reviewer model approve tool calls
   --full-access, --yolo       Run every tool call without asking
   --ask                       Ask before commands, file edits, URL fetches, subagents, MCP and plugin tools
-  --parent <id>               Run as a subagent of that session: linked to it, no subagent, terminal, web or ask_user_question tools
+  --parent <id>               Run as a subagent of that session: linked to it, no Agent, Task*, web or AskUserQuestion tools
   --explore                   With --parent: only read and rg, no modes prompt
   --trust                     Trust this project for this run: load its .agents files and run its edit hooks
   --tools <a,b,...>           With acp, -p, --json or --headless: offer only these tools
@@ -511,10 +511,15 @@ fn run(options: Options) -> Result<(), String> {
         agent.announce_session();
         // After settle_model, which resets the tools. Only the root spawns, runs terminals and searches the web, and a child has no UI to ask in.
         if options.parent.is_some() {
-            const ROOT_ONLY: [&str; 9] = ["subagent", "bg_wait", "bg_start", "bg_status", "bg_kill", "web_search", "fetch_content", "get_search_content", "ask_user_question"];
-            let keep = |name: &str| if options.explore { matches!(name, "read" | "rg") } else { !ROOT_ONLY.contains(&name) };
+            const ROOT_ONLY: [&str; 8] = ["Agent", "TaskWait", "TaskOutput", "TaskStop", "WebSearch", "WebFetch", "GetSearchContent", "AskUserQuestion"];
+            let keep = |name: &str| if options.explore { matches!(name, "Read" | "Grep") } else { !ROOT_ONLY.contains(&name) };
             if let Some(tools) = agent.tools.as_array_mut() {
                 tools.retain(|tool| keep(tool["name"].as_str().unwrap_or_default()));
+                for tool in tools.iter_mut().filter(|tool| tool["name"] == "Bash") {
+                    if let Some(properties) = tool["input_schema"]["properties"].as_object_mut() {
+                        properties.remove("run_in_background");
+                    }
+                }
             }
             // An explore child only reads and reports, so the ponytail and caveman style rules would be dead weight.
             if options.explore {
@@ -630,15 +635,15 @@ mod tests {
     #[test]
     fn tools_flag_lists_names_and_needs_a_run_without_the_ui() {
         let args = |list: &[&str]| list.iter().map(|arg| arg.to_string()).collect::<Vec<_>>();
-        let options = super::parse_args(args(&["--tools", "read, rg,", "-p", "hi"])).unwrap();
-        assert_eq!(options.tools, Some(vec!["read".to_string(), "rg".to_string()]));
-        assert!(super::parse_args(args(&["--tools", "read", "hi"])).is_err());
+        let options = super::parse_args(args(&["--tools", "Read, Grep,", "-p", "hi"])).unwrap();
+        assert_eq!(options.tools, Some(vec!["Read".to_string(), "Grep".to_string()]));
+        assert!(super::parse_args(args(&["--tools", "Read", "hi"])).is_err());
     }
 
     #[test]
     fn acp_command_takes_flags_but_no_message() {
         let args = |list: &[&str]| list.iter().map(|arg| arg.to_string()).collect::<Vec<_>>();
-        let options = super::parse_args(args(&["acp", "--auto", "--tools", "read"])).unwrap();
+        let options = super::parse_args(args(&["acp", "--auto", "--tools", "Read"])).unwrap();
         assert!(options.acp && options.prompt.is_none());
         assert!(super::parse_args(args(&["acp", "hi"])).is_err());
         assert!(super::parse_args(args(&["acp", "-p"])).is_err());

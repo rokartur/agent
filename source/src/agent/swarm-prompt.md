@@ -36,7 +36,8 @@ Pass `effort` when spawning:
 
 Structure guidance for spawned agents:
 
-- Always pass `label` when spawning (e.g. `label: "api reviewer"`) so /subagents
-  shows what each agent is for. Spawns with a missing or blank label are rejected.
+- Always pass `description` when spawning (e.g. `description: "api reviewer"`) so
+  /subagents shows what each agent is for. Spawns with a missing or blank
+  description are rejected.
 - Only the root session may spawn agents. Children must complete their assigned
   task directly and report back rather than creating another generation.

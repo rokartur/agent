@@ -30,13 +30,13 @@ const SEARCH_ANCHOR_BUDGET: u32 = 10 * MAX_LINES as u32;
 
 const SCHEMAS: &str = include_str!("tools.json");
 
-/// Every tool in tools.json order; `subagent` carries the swarm prompt like jcode's `swarm`.
+/// Every tool in tools.json order; `Agent` carries the swarm prompt like jcode's `swarm`.
 /// One fixed list: the tools head the cached prompt prefix, so changing it mid-session rewrites the whole cache.
 pub fn schemas(swarm_prompt: &str, context_tree_query: bool) -> Value {
     let all: Vec<Value> = serde_json::from_str(SCHEMAS).expect("tools.json is valid JSON");
-    let mut tools: Vec<Value> = all.into_iter().filter(|tool| context_tree_query || tool["name"] != "context_tree_query").collect();
-    if let Some(tool) = tools.iter_mut().find(|tool| tool["name"] == "subagent") {
-        let base = tool["description"].as_str().expect("tools.json describes subagent");
+    let mut tools: Vec<Value> = all.into_iter().filter(|tool| context_tree_query || tool["name"] != "ContextTreeQuery").collect();
+    if let Some(tool) = tools.iter_mut().find(|tool| tool["name"] == "Agent") {
+        let base = tool["description"].as_str().expect("tools.json describes Agent");
         tool["description"] = format!("{base}\n\nSwarm prompt (user-tunable via ~/.agents/swarm-prompt.md):\n{swarm_prompt}").into();
     }
     Value::Array(tools)
@@ -45,13 +45,13 @@ pub fn schemas(swarm_prompt: &str, context_tree_query: bool) -> Value {
 /// Runs one tool call. The bool is true when the result is an error. Setting `abort` kills a running bash or rg.
 pub fn run(name: &str, input: &Value, cwd: &Path, anchors: &mut Anchors, rtk: &Rtk, abort: &AtomicBool) -> (String, bool) {
     let result = match name {
-        "read" => anchors.read(cwd, input),
-        "bash" => bash(input, cwd, rtk, abort),
-        "write" => write(input, cwd),
-        "replace" => anchors.replace(input),
-        "replace_match" => anchors.replace_match(cwd, input),
-        "insert" => anchors.insert(input),
-        "rg" => rg(input, cwd, anchors, abort),
+        "Read" => anchors.read(cwd, input),
+        "Bash" => bash(input, cwd, rtk, abort),
+        "Write" => write(input, cwd),
+        "ReplaceLines" => anchors.replace(input),
+        "Edit" => anchors.replace_match(cwd, input),
+        "InsertLines" => anchors.insert(input),
+        "Grep" => rg(input, cwd, anchors, abort),
         _ => Err(format!("Tool {name} not found")),
     };
     match result {
@@ -67,15 +67,15 @@ enum Killed {
 
 fn bash(input: &Value, cwd: &Path, rtk: &Rtk, abort: &AtomicBool) -> Result<String, String> {
     let command = rtk.rewrite(str_arg(input, "command")?);
-    let timeout = input["timeout"].as_f64().filter(|s| *s > 0.0);
+    let timeout = input["timeout"].as_f64().filter(|ms| *ms > 0.0);
     // A timeout too large for an Instant is no timeout.
-    let deadline = timeout.and_then(|secs| Instant::now().checked_add(Duration::try_from_secs_f64(secs).ok()?));
+    let deadline = timeout.and_then(|ms| Instant::now().checked_add(Duration::try_from_secs_f64(ms / 1000.0).ok()?));
     let child = process::command("bash").arg("-c").arg(format!("exec 2>&1; {command}")).current_dir(cwd).stdout(Stdio::piped()).spawn().map_err(|e| format!("Cannot start bash: {e}"))?;
     let mut capture = Capture::default();
     let (status, killed) = wait_streaming(child, abort, deadline, |chunk| capture.push(chunk))?;
     let output = truncate_tail(rtk.strip(String::from_utf8_lossy(&capture.text).into_owned()), rtk.max_bytes, capture.spilled());
     match killed {
-        Some(Killed::Timeout) => return Err(append_status(&output, &format!("Command timed out after {} seconds", timeout.unwrap_or_default()))),
+        Some(Killed::Timeout) => return Err(append_status(&output, &format!("Command timed out after {} ms", timeout.unwrap_or_default()))),
         Some(Killed::Aborted) => return Err(append_status(&output, "Command aborted")),
         None => {}
     }
@@ -199,7 +199,7 @@ fn append_status(output: &str, status: &str) -> String {
 }
 
 fn write(input: &Value, cwd: &Path) -> Result<String, String> {
-    let path = resolve(cwd, str_arg(input, "path")?);
+    let path = resolve(cwd, str_arg(input, "file_path")?);
     let content = str_arg(input, "content")?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("Cannot create {}: {e}", parent.display()))?;
@@ -222,30 +222,26 @@ fn write(input: &Value, cwd: &Path) -> Result<String, String> {
 
 /// pi file-search's rg argv as JSON events: the pattern after `--`, counts clamped.
 fn rg_args(input: &Value) -> Result<Vec<String>, String> {
-    let first = match input["output"].as_str() {
-        Some("files") => "--files-with-matches",
+    let first = match input["output_mode"].as_str() {
+        Some("files_with_matches") => "--files-with-matches",
         Some("count") => "--count",
         _ => "--json",
     };
     let mut args = vec![first.to_string()];
-    args.push(match input["case_sensitive"].as_bool() {
-        Some(true) => "--case-sensitive".into(),
-        Some(false) => "--ignore-case".into(),
-        None => "--smart-case".into(),
-    });
+    args.push(if input["-i"].as_bool() == Some(true) { "--ignore-case" } else { "--smart-case" }.into());
     if input["fixed_strings"].as_bool() == Some(true) {
         args.push("--fixed-strings".into());
     }
     if input["hidden"].as_bool() == Some(true) {
         args.push("--hidden".into());
     }
-    if !input["context"].is_null() {
-        args.extend(["--context".into(), clamped(&input["context"], 0, 0, MAX_CONTEXT_LINES)]);
+    if !input["-C"].is_null() {
+        args.extend(["--context".into(), clamped(&input["-C"], 0, 0, MAX_CONTEXT_LINES)]);
     }
     if let Some(glob) = input["glob"].as_str().filter(|g| !g.is_empty()) {
         args.extend(["--glob".into(), glob.into()]);
     }
-    if let Some(file_type) = input["file_type"].as_str().filter(|t| !t.is_empty()) {
+    if let Some(file_type) = input["type"].as_str().filter(|t| !t.is_empty()) {
         args.extend(["--type".into(), file_type.into()]);
     }
     args.extend(["--max-count".into(), clamped(&input["limit"], DEFAULT_MATCHES, 1, MAX_MATCHES)]);
@@ -498,34 +494,34 @@ mod tests {
     use std::sync::Arc;
 
     fn run_bash(input: Value, abort: &Arc<AtomicBool>) -> (String, bool) {
-        run("bash", &input, Path::new("/tmp"), &mut Anchors::new("t"), &Rtk::OFF, abort)
+        run("Bash", &input, Path::new("/tmp"), &mut Anchors::new("t"), &Rtk::OFF, abort)
     }
 
     #[test]
     fn context_tree_query_is_offered_only_when_asked() {
-        let offers = |query: bool| schemas("", query).as_array().unwrap().iter().any(|tool| tool["name"] == "context_tree_query");
+        let offers = |query: bool| schemas("", query).as_array().unwrap().iter().any(|tool| tool["name"] == "ContextTreeQuery");
         assert!(offers(true));
         assert!(!offers(false));
     }
 
     #[test]
     fn bash_reports_exit_code_and_merged_output() {
-        let (out, err) = run_bash(json!({"command": "echo out; echo err >&2; exit 3", "timeout": null}), &Arc::default());
+        let (out, err) = run_bash(json!({"command": "echo out; echo err >&2; exit 3"}), &Arc::default());
         assert!(err);
         assert_eq!(out, "out\nerr\n\n\nCommand exited with code 3");
     }
 
     #[test]
     fn bash_timeout_kills_the_command() {
-        let (out, err) = run_bash(json!({"command": "echo start; sleep 30", "timeout": 0.5}), &Arc::default());
+        let (out, err) = run_bash(json!({"command": "echo start; sleep 30", "timeout": 500}), &Arc::default());
         assert!(err);
-        assert_eq!(out, "start\n\n\nCommand timed out after 0.5 seconds");
+        assert_eq!(out, "start\n\n\nCommand timed out after 500 ms");
     }
 
     #[test]
     fn bash_commands_cannot_take_over_the_terminal() {
         // `zsh -i` from a command took the tty's foreground group, and the TUI stopped on its next read.
-        let (out, _) = run_bash(json!({"command": "if : </dev/tty; then echo tty; else echo no tty; fi", "timeout": null}), &Arc::default());
+        let (out, _) = run_bash(json!({"command": "if : </dev/tty; then echo tty; else echo no tty; fi"}), &Arc::default());
         assert!(out.ends_with("no tty\n"), "{out}");
     }
 
@@ -626,8 +622,8 @@ mod tests {
         std::fs::write(dir.join("a.txt"), "needle\nneedle\n").unwrap();
         let mut anchors = Anchors::new("t");
         let abort = AtomicBool::new(false);
-        assert_eq!(rg(&json!({"pattern": "needle", "output": "files"}), &dir, &mut anchors, &abort).unwrap(), "a.txt");
-        assert_eq!(rg(&json!({"pattern": "needle", "output": "count"}), &dir, &mut anchors, &abort).unwrap(), "a.txt:2");
+        assert_eq!(rg(&json!({"pattern": "needle", "output_mode": "files_with_matches"}), &dir, &mut anchors, &abort).unwrap(), "a.txt");
+        assert_eq!(rg(&json!({"pattern": "needle", "output_mode": "count"}), &dir, &mut anchors, &abort).unwrap(), "a.txt:2");
         assert_eq!(anchors.minted(), 0);
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -642,7 +638,7 @@ mod tests {
     fn long_bash_output_keeps_its_end_and_saves_the_full_log() {
         // 30 KB in 2000 lines: under the line and byte caps, over rtk's 24 KB.
         let (out, _) =
-            run("bash", &json!({"command": "awk 'BEGIN { for (i = 1; i <= 2000; i++) print \"line\", i, \"xxxx\" }'"}), Path::new("/tmp"), &mut Anchors::new("t"), &Rtk::ON, &Arc::default());
+            run("Bash", &json!({"command": "awk 'BEGIN { for (i = 1; i <= 2000; i++) print \"line\", i, \"xxxx\" }'"}), Path::new("/tmp"), &mut Anchors::new("t"), &Rtk::ON, &Arc::default());
         assert!(out.contains("\nline 2000 xxxx\n"), "{}", &out[out.len().saturating_sub(300)..]);
         let path = out.rsplit("Full output: ").next().unwrap().trim_end_matches(']');
         assert_eq!(std::fs::read_to_string(path).unwrap(), (1..=2000).map(|i| format!("line {i} xxxx\n")).collect::<String>());
@@ -679,13 +675,13 @@ mod tests {
         std::fs::write(dir.join("a.txt"), "alpha\nbeta\ngamma\n").unwrap();
         let mut anchors = Anchors::new("");
         let abort = Arc::new(AtomicBool::new(false));
-        let (found, is_error) = run("rg", &json!({"pattern": "beta", "context": 1}), &dir, &mut anchors, &Rtk::OFF, &abort);
+        let (found, is_error) = run("Grep", &json!({"pattern": "beta", "-C": 1}), &dir, &mut anchors, &Rtk::OFF, &abort);
         assert!(!is_error, "{found}");
         let rows: Vec<&str> = found.lines().collect();
         assert_eq!(rows.len(), 3, "{found}");
         assert!(rows[0].starts_with("a.txt-") && rows[0].ends_with("│alpha"), "{found}");
         let anchor = rows[1].strip_prefix("a.txt:").and_then(|row| row.strip_suffix("│beta")).expect(&found);
-        let (replaced, is_error) = run("replace", &json!({"remove_from": anchor, "remove_to": anchor, "text": "BETA"}), &dir, &mut anchors, &Rtk::OFF, &abort);
+        let (replaced, is_error) = run("ReplaceLines", &json!({"remove_from": anchor, "remove_to": anchor, "text": "BETA"}), &dir, &mut anchors, &Rtk::OFF, &abort);
         assert!(!is_error, "{replaced}");
         assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "alpha\nBETA\ngamma\n");
         std::fs::remove_dir_all(&dir).unwrap();
@@ -696,7 +692,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("agent-write-echo-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let mut anchors = Anchors::new("");
-        let (text, is_error) = run("write", &json!({"path": "a.txt", "content": "alpha\nbeta\n"}), &dir, &mut anchors, &Rtk::OFF, &Arc::new(AtomicBool::new(false)));
+        let (text, is_error) = run("Write", &json!({"file_path": "a.txt", "content": "alpha\nbeta\n"}), &dir, &mut anchors, &Rtk::OFF, &Arc::new(AtomicBool::new(false)));
         std::fs::remove_dir_all(&dir).unwrap();
         assert!(!is_error && text.contains("2 lines") && !text.contains("alpha"), "{text}");
     }
@@ -710,7 +706,7 @@ mod tests {
         std::fs::write(&file, "keep").unwrap();
         std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o000)).unwrap();
         let mut anchors = Anchors::new("");
-        let (text, is_error) = run("write", &json!({"path": file, "content": "lost"}), &dir, &mut anchors, &Rtk::OFF, &Arc::new(AtomicBool::new(false)));
+        let (text, is_error) = run("Write", &json!({"file_path": file, "content": "lost"}), &dir, &mut anchors, &Rtk::OFF, &Arc::new(AtomicBool::new(false)));
         std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
         let kept = std::fs::read_to_string(&file).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
@@ -720,7 +716,7 @@ mod tests {
 
     #[test]
     fn search_arguments_match_pi_file_search() {
-        let rg = rg_args(&json!({"pattern": "-x", "path": "@src", "context": 50, "limit": 5000, "case_sensitive": false, "glob": "*.rs"})).unwrap();
+        let rg = rg_args(&json!({"pattern": "-x", "path": "@src", "-C": 50, "limit": 5000, "-i": true, "glob": "*.rs"})).unwrap();
         assert_eq!(rg.join(" "), "--json --ignore-case --context 20 --glob *.rs --max-count 1000 -- -x src");
     }
 }

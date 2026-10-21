@@ -60,7 +60,7 @@ impl Status {
 impl Todos {
     /// Runs one `todo` tool call; the bool is true when the list changed and must be saved.
     pub fn apply(&mut self, input: &Value) -> Result<(String, bool), String> {
-        let id = input["id"].as_u64();
+        let id = input["taskId"].as_u64();
         let status = match input["status"].as_str() {
             Some(text) => Some(Status::parse(text).ok_or(format!("Error: unknown status {text}"))?),
             None => None,
@@ -81,7 +81,7 @@ impl Todos {
                 Ok((format!("Created #{id}: {subject} (pending)"), true))
             }
             "update" => {
-                let id = id.ok_or("Error: id required for update")?;
+                let id = id.ok_or("Error: taskId required for update")?;
                 let index = self.index_of(id)?;
                 let fields = ["subject", "description", "activeForm", "status"];
                 if fields.iter().all(|key| input.get(key).is_none_or(Value::is_null)) {
@@ -110,11 +110,11 @@ impl Todos {
                 Ok((if lines.is_empty() { "No tasks".into() } else { lines.join("\n") }, false))
             }
             "get" => {
-                let task = &self.tasks[self.index_of(id.ok_or("Error: id required for get")?)?];
+                let task = &self.tasks[self.index_of(id.ok_or("Error: taskId required for get")?)?];
                 Ok((Self::details(task), false))
             }
             "delete" => {
-                let index = self.index_of(id.ok_or("Error: id required for delete")?)?;
+                let index = self.index_of(id.ok_or("Error: taskId required for delete")?)?;
                 let task = &mut self.tasks[index];
                 if task.status == Status::Deleted {
                     return Err(format!("Error: #{} is already deleted", task.id));
@@ -220,12 +220,12 @@ mod tests {
         let mut todos = Todos::default();
         assert_eq!(run(&mut todos, json!({"action": "create", "subject": "a", "activeForm": "doing a"})), "Created #1: a (pending)");
         run(&mut todos, json!({"action": "create", "subject": "b"}));
-        assert_eq!(run(&mut todos, json!({"action": "update", "id": 1, "status": "in_progress"})), "Updated #1 (pending → in_progress)");
-        assert_eq!(run(&mut todos, json!({"action": "update", "id": 1, "status": "in_progress"})), "No change: #1 already matches the requested values (status: in_progress)");
+        assert_eq!(run(&mut todos, json!({"action": "update", "taskId": 1, "status": "in_progress"})), "Updated #1 (pending → in_progress)");
+        assert_eq!(run(&mut todos, json!({"action": "update", "taskId": 1, "status": "in_progress"})), "No change: #1 already matches the requested values (status: in_progress)");
         assert_eq!(run(&mut todos, json!({"action": "list"})), "[in_progress] #1 a (doing a)\n[pending] #2 b");
-        run(&mut todos, json!({"action": "update", "id": 1, "status": "completed"}));
-        assert_eq!(run(&mut todos, json!({"action": "update", "id": 1, "status": "pending"})), "Error: illegal transition completed → pending");
-        assert_eq!(run(&mut todos, json!({"action": "delete", "id": 2})), "Deleted #2: b");
+        run(&mut todos, json!({"action": "update", "taskId": 1, "status": "completed"}));
+        assert_eq!(run(&mut todos, json!({"action": "update", "taskId": 1, "status": "pending"})), "Error: illegal transition completed → pending");
+        assert_eq!(run(&mut todos, json!({"action": "delete", "taskId": 2})), "Deleted #2: b");
         assert_eq!(run(&mut todos, json!({"action": "list"})), "[completed] #1 a");
         assert!(!todos.has_open());
         assert_eq!(Todos::from_entry(&todos.entry()), todos);

@@ -186,11 +186,11 @@ fn session_update(event: &Event) -> Option<Value> {
 
 fn tool_kind(name: &str) -> &'static str {
     match name {
-        "read" => "read",
-        "rg" => "search",
-        "bash" | "bg_start" => "execute",
-        "write" | "replace" | "replace_match" | "insert" => "edit",
-        "web_search" | "fetch_content" | "get_search_content" => "fetch",
+        "Read" => "read",
+        "Grep" => "search",
+        "Bash" => "execute",
+        "Write" | "ReplaceLines" | "Edit" | "InsertLines" => "edit",
+        "WebSearch" | "WebFetch" | "GetSearchContent" => "fetch",
         _ => "other",
     }
 }
@@ -218,7 +218,7 @@ mod tests {
 
     #[test]
     fn tool_events_become_tool_call_updates() {
-        let start = session_update(&Event::ToolStart { id: "t1".into(), name: "bash".into(), input: json!({"command": "ls"}) }).unwrap();
+        let start = session_update(&Event::ToolStart { id: "t1".into(), name: "Bash".into(), input: json!({"command": "ls"}) }).unwrap();
         assert_eq!((start["sessionUpdate"].as_str(), start["kind"].as_str(), start["status"].as_str()), (Some("tool_call"), Some("execute"), Some("in_progress")));
         let end = session_update(&Event::ToolEnd { id: "t1".into(), output: "x".into(), is_error: true }).unwrap();
         assert_eq!(end, json!({"sessionUpdate": "tool_call_update", "toolCallId": "t1", "status": "failed", "content": [{"type": "content", "content": {"type": "text", "text": "x"}}]}));

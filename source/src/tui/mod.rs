@@ -1899,7 +1899,7 @@ impl App {
             }
             "skill-usage" => self.skill_usage(),
             "rtk" => self.rtk_gain(),
-            "ps" if self.terminals.lock().unwrap().list.is_empty() => self.system("ps", "No background terminals yet. The agent starts them with bg_start."),
+            "ps" if self.terminals.lock().unwrap().list.is_empty() => self.system("ps", "No background terminals yet. The agent starts them with Bash run_in_background."),
             "ps" => self.panel = Some(Panel::Terminals { index: 0 }),
             "subagents" if self.subagents.lock().unwrap().list.is_empty() => self.system("subagents", "No subagent runs yet."),
             "subagents" => self.open_subagents(),
@@ -4058,7 +4058,7 @@ fn render_tool(name: &str, input: &Value, result: Option<&(String, bool)>, width
     let pretty = serde_json::from_str::<Value>(output).ok().filter(|v| v.is_object() || v.is_array()).and_then(|v| serde_json::to_string_pretty(&v).ok());
     let output = pretty.as_deref().unwrap_or(output);
     let shown = output.lines().take(TOOL_OUTPUT_LINES).map(|line| line.replace('\t', "    "));
-    let is_diff = !is_error && matches!(name, "replace" | "replace_match" | "insert");
+    let is_diff = !is_error && matches!(name, "ReplaceLines" | "Edit" | "InsertLines");
     for (index, line) in shown.enumerate() {
         let lead = if index == 0 { "└ " } else { "  " };
         let style = match line.chars().next() {
@@ -4076,8 +4076,8 @@ fn render_tool(name: &str, input: &Value, result: Option<&(String, bool)>, width
 }
 
 fn skill_name(name: &str, input: &Value) -> Option<String> {
-    let path = Path::new(input["path"].as_str()?);
-    if name != "read" || path.file_name()? != "SKILL.md" {
+    let path = Path::new(input["file_path"].as_str()?);
+    if name != "Read" || path.file_name()? != "SKILL.md" {
         return None;
     }
     Some(path.parent()?.file_name()?.to_string_lossy().into_owned())
@@ -4086,19 +4086,19 @@ fn skill_name(name: &str, input: &Value) -> Option<String> {
 fn tool_args(name: &str, input: &Value) -> String {
     let field = |key: &str| input[key].as_str().unwrap_or_default().to_string();
     match name {
-        "bash" => {
+        "Bash" => {
             let command = field("command").lines().next().unwrap_or_default().to_string();
             match input["timeout"].as_f64() {
-                Some(secs) if secs > 0.0 => format!("{command} (timeout {secs}s)"),
+                Some(ms) if ms > 0.0 => format!("{command} (timeout {ms} ms)"),
                 _ => command,
             }
         }
         "read_image" => field("image"),
-        "read" => {
+        "Read" => {
             if let Some(paths) = input["paths"].as_array() {
-                return paths.iter().filter_map(|entry| entry.as_str().or(entry["path"].as_str())).collect::<Vec<_>>().join(", ");
+                return paths.iter().filter_map(|entry| entry.as_str().or(entry["file_path"].as_str())).collect::<Vec<_>>().join(", ");
             }
-            let mut text = field("path");
+            let mut text = field("file_path");
             if let Some(offset) = input["offset"].as_u64().map(|n| n.to_string()).or(input["offset"].as_str().map(String::from)) {
                 text.push_str(&format!(" from {offset}"));
             }
@@ -4107,23 +4107,23 @@ fn tool_args(name: &str, input: &Value) -> String {
             }
             text
         }
-        "write" => field("path"),
-        "replace" | "replace_match" | "insert" => {
+        "Write" => field("file_path"),
+        "ReplaceLines" | "Edit" | "InsertLines" => {
             let anchors = match name {
-                "insert" => format!("{} {}", field("direction"), field("anchor")),
+                "InsertLines" => format!("{} {}", field("direction"), field("anchor")),
                 _ => {
                     let from = input["remove_from"].as_str().or(input["replace_from"].as_str()).unwrap_or_default();
                     let to = input["remove_to"].as_str().or(input["replace_to"].as_str()).unwrap_or_default();
                     if from == to { from.to_string() } else { format!("{from}..{to}") }
                 }
             };
-            match input["path"].as_str() {
+            match input["file_path"].as_str() {
                 Some(path) if anchors.is_empty() => path.to_string(),
                 Some(path) => format!("{path} {anchors}"),
                 None => anchors,
             }
         }
-        "rg" => match input["path"].as_str() {
+        "Grep" => match input["path"].as_str() {
             Some(path) => format!("{} in {path}", field("pattern")),
             None => field("pattern"),
         },
@@ -4815,7 +4815,7 @@ mod tests {
     #[test]
     fn unknown_tool_args_read_as_key_values() {
         let input = json!({"action": "create", "subject": "Manifest: a, b", "ids": [1, 2], "q": [{"header": "Panel"}]});
-        assert_eq!(tool_args("todo", &input), "action: create · ids: [1, 2] · q: [{header: Panel}] · subject: Manifest: a, b");
+        assert_eq!(tool_args("Todo", &input), "action: create · ids: [1, 2] · q: [{header: Panel}] · subject: Manifest: a, b");
     }
 
     fn text(line: &Line) -> String {
@@ -4883,25 +4883,25 @@ mod tests {
     fn collapsed_tool_call_is_one_line_even_for_long_bash_and_errors() {
         let ok = ("total 1\na.txt  6B\n".to_string(), false);
         let long = json!({"command": "echo aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"});
-        let rows: Vec<String> = render_tool("bash", &long, Some(&ok), 20, false).iter().map(text).collect();
+        let rows: Vec<String> = render_tool("Bash", &long, Some(&ok), 20, false).iter().map(text).collect();
         assert_eq!(rows.len(), 1);
         assert!(rows[0].chars().count() <= 20, "{rows:?}");
         let failed = ("no such file\n".to_string(), true);
-        assert_eq!(render_tool("read", &json!({"path": "x"}), Some(&failed), 40, false).len(), 1);
+        assert_eq!(render_tool("Read", &json!({"file_path": "x"}), Some(&failed), 40, false).len(), 1);
     }
 
     #[test]
     fn expanded_tool_call_puts_the_output_under_a_hook() {
         let result = ("total 1\na.txt  6B\n".to_string(), false);
-        let lines = render_tool("bash", &json!({"command": "ls", "timeout": 10}), Some(&result), 40, true);
+        let lines = render_tool("Bash", &json!({"command": "ls", "timeout": 10000}), Some(&result), 40, true);
         let rows: Vec<String> = lines.iter().map(text).collect();
-        assert_eq!(rows, ["✓ bash ls (timeout 10s)", "└ total 1", "  a.txt  6B"]);
+        assert_eq!(rows, ["✓ Bash ls (timeout 10000 ms)", "└ total 1", "  a.txt  6B"]);
     }
 
     #[test]
     fn reading_a_skill_file_shows_the_skill_name() {
         let result = ("body".to_string(), false);
-        let lines = render_tool("read", &json!({"path": "/x/skills/verify-web-app/SKILL.md"}), Some(&result), 80, false);
+        let lines = render_tool("Read", &json!({"file_path": "/x/skills/verify-web-app/SKILL.md"}), Some(&result), 80, false);
         assert_eq!(text(&lines[0]), "✓ [skill] verify-web-app (ctrl+o to expand)");
     }
 
@@ -4922,7 +4922,7 @@ mod tests {
     #[test]
     fn edit_diff_colors_added_green_removed_red_context_gray() {
         let result = (" AAAA│keep\n-BBBB│old\n+CCCC│new".to_string(), false);
-        let lines = render_tool("replace", &json!({"path": "a.rs"}), Some(&result), 40, true);
+        let lines = render_tool("ReplaceLines", &json!({"file_path": "a.rs"}), Some(&result), 40, true);
         let colors: Vec<Style> = lines[1..].iter().map(|line| line[1].style).collect();
         assert_eq!(colors, [TOOL_ARGS, ERROR, OK]);
     }
@@ -5026,7 +5026,7 @@ mod tests {
     #[test]
     fn history_pairs_tool_results_with_their_calls() {
         let messages = [
-            json!({"role": "assistant", "content": [{"type": "tool_use", "id": "t1", "name": "read", "input": {"path": "a"}}]}),
+            json!({"role": "assistant", "content": [{"type": "tool_use", "id": "t1", "name": "Read", "input": {"file_path": "a"}}]}),
             json!({"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "x", "is_error": true}]}),
         ];
         let items = history_items(&messages);
@@ -5078,7 +5078,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("agent-subagent-tools-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let session = dir.join("abc123.jsonl");
-        let tool = |id: &str, path: &str| json!({"type": "tool_use", "id": id, "name": "read", "input": {"path": path}});
+        let tool = |id: &str, path: &str| json!({"type": "tool_use", "id": id, "name": "Read", "input": {"file_path": path}});
         let result = |id: &str| json!({"type": "tool_result", "tool_use_id": id, "content": "ok"});
         let messages = [
             json!({"role": "assistant", "content": [tool("a", "one.rs"), tool("b", "two.rs")]}),

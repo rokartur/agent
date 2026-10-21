@@ -30,7 +30,7 @@ pub fn apply_args(env: &BTreeMap<String, String>, manifest: &Value) -> Result<Op
     if let Some(key) = ["HEADROOM_HOST", "HEADROOM_PORT"].into_iter().find(|key| env.contains_key(*key)) {
         return Err(format!("headroom_env cannot set {key}: the agent sends requests to {}.", crate::api::HEADROOM_URL));
     }
-    // Tool search defers every tool off headroom's own core list, which holds none of rg, replace, insert or replace_match.
+    // Tool search defers every tool off headroom's own core list, which holds none of Grep, ReplaceLines, InsertLines or Edit.
     let mut env = env.clone();
     env.entry("HEADROOM_TOOL_SEARCH".into()).or_insert("0".into());
     if env.iter().all(|(key, value)| manifest["base_env"][key].as_str() == Some(value)) {

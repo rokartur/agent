@@ -19,7 +19,7 @@ const MAX_INLINE_CHARS: usize = 30_000;
 const STORED_RESPONSES: usize = 20;
 const MAX_FETCHED_PAGES: usize = 20;
 const MAX_QUERIES: usize = 8;
-const STORED_SOURCES: &str = "web_search or fetch_content";
+const STORED_SOURCES: &str = "WebSearch or WebFetch";
 
 #[derive(Clone, Debug)]
 pub struct Hit {
@@ -87,8 +87,8 @@ impl Web {
 
     pub fn run(&mut self, name: &str, input: &Value) -> Result<String, String> {
         match name {
-            "web_search" => self.web_search(input),
-            "fetch_content" => self.fetch_content(input),
+            "WebSearch" => self.web_search(input),
+            "WebFetch" => self.fetch_content(input),
             _ => self.get_search_content(input),
         }
     }
@@ -172,7 +172,7 @@ impl Web {
         if include_content && !inline.is_empty() {
             let fetch_id = self.store(fetch_entry(&inline))?;
             guidance.push_str(&format!(
-                "\n---\nFull content for {} sources is ready as responseId \"{fetch_id}\". Use get_search_content({{ responseId: \"{fetch_id}\", urlIndex: 0, offset: 0, limit: {MAX_INLINE_CHARS} }}) to retrieve the first bounded page.",
+                "\n---\nFull content for {} sources is ready as responseId \"{fetch_id}\". Use GetSearchContent({{ responseId: \"{fetch_id}\", urlIndex: 0, offset: 0, limit: {MAX_INLINE_CHARS} }}) to retrieve the first bounded page.",
                 inline.iter().filter(|p| p.error.is_none()).count()
             ));
         }
@@ -180,7 +180,7 @@ impl Web {
         let search_id = self.store(json!({"type": "search", "queries": stored}))?;
         let more = if count > 1 { format!("; repeat with queryIndex 1 through {}", count - 1) } else { String::new() };
         guidance.push_str(&format!(
-            "\n---\nFull search results are stored as responseId \"{search_id}\". Use get_search_content({{ responseId: \"{search_id}\", queryIndex: 0, offset: 0, limit: {MAX_INLINE_CHARS} }}) to retrieve the first bounded page{more}."
+            "\n---\nFull search results are stored as responseId \"{search_id}\". Use GetSearchContent({{ responseId: \"{search_id}\", queryIndex: 0, offset: 0, limit: {MAX_INLINE_CHARS} }}) to retrieve the first bounded page{more}."
         ));
         Ok(bound_presentation(&output, &guidance))
     }
@@ -280,7 +280,7 @@ impl Request<'_> {
         let mut end = offset + limit.min(length - offset);
         let mut continuation = String::new();
         while end < length {
-            continuation = format!("\n\n---\nShowing chars {offset}-{end} of {length}. Use get_search_content({{ {} }}) for the next slice.", next_args(end, limit));
+            continuation = format!("\n\n---\nShowing chars {offset}-{end} of {length}. Use GetSearchContent({{ {} }}) for the next slice.", next_args(end, limit));
             let overflow = (end - offset + continuation.chars().count()).saturating_sub(MAX_INLINE_CHARS);
             if overflow == 0 {
                 break;
@@ -300,7 +300,7 @@ impl Request<'_> {
             text.push_str(&format!("\n\n---\nShowing chars {offset}-{end} of {length}."));
         }
         if end < length {
-            text.push_str(&format!(" Use get_search_content({{ responseId: \"{}\", urlIndex: {index}, offset: {end}, limit: {limit} }}) for the next slice.", self.id));
+            text.push_str(&format!(" Use GetSearchContent({{ responseId: \"{}\", urlIndex: {index}, offset: {end}, limit: {limit} }}) for the next slice.", self.id));
         }
         Ok(text)
     }
@@ -490,7 +490,7 @@ mod tests {
         let page = web.get_search_content(&json!({"responseId": id, "offset": 49_990, "limit": 100})).unwrap();
         assert_eq!(page, "# A\n\nline\nline\n\n\n---\nShowing chars 49990-50000 of 50000.");
         let first = web.get_search_content(&json!({"responseId": id, "limit": 5})).unwrap();
-        assert!(first.ends_with(&format!("Showing chars 0-5 of 50000. Use get_search_content({{ responseId: \"{id}\", urlIndex: 0, offset: 5, limit: 5 }}) for the next slice.")), "{first}");
+        assert!(first.ends_with(&format!("Showing chars 0-5 of 50000. Use GetSearchContent({{ responseId: \"{id}\", urlIndex: 0, offset: 5, limit: 5 }}) for the next slice.")), "{first}");
         let bad = web.get_search_content(&json!({"responseId": id, "offset": -1})).unwrap_err();
         assert!(bad.starts_with("Invalid offset: received -1 for URL \"https://a.dev\""), "{bad}");
     }
@@ -502,7 +502,7 @@ mod tests {
         let id = web.store(json!({"type": "search", "queries": [{"query": "q", "answer": "", "results": hits, "providers": ["exa"]}]})).unwrap();
         let page = web.get_search_content(&json!({"responseId": id, "queryIndex": 0})).unwrap();
         assert_eq!(page.chars().count(), MAX_INLINE_CHARS);
-        assert!(page.contains(&format!("Use get_search_content({{ responseId: \"{id}\", queryIndex: 0, offset: ")), "{}", &page[page.len() - 200..]);
+        assert!(page.contains(&format!("Use GetSearchContent({{ responseId: \"{id}\", queryIndex: 0, offset: ")), "{}", &page[page.len() - 200..]);
         let missing = web.get_search_content(&json!({"responseId": id})).unwrap_err();
         assert_eq!(missing, format!("Specify query or queryIndex for responseId \"{id}\". Available queries: 0: \"q\"."));
     }

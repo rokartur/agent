@@ -313,8 +313,8 @@ impl Agent {
         self.abort.store(false, Ordering::Relaxed);
         let id = format!("user-bash-{}", now_ms());
         let input = json!({"command": command});
-        emit(Event::ToolStart { id: id.clone(), name: "bash".into(), input: input.clone() });
-        let (output, is_error) = tools::run("bash", &input, &self.cwd, &mut self.anchors, &Rtk::OFF, &self.abort);
+        emit(Event::ToolStart { id: id.clone(), name: "Bash".into(), input: input.clone() });
+        let (output, is_error) = tools::run("Bash", &input, &self.cwd, &mut self.anchors, &Rtk::OFF, &self.abort);
         if keep {
             self.shell_context.push(format!("Ran `{command}`\n```\n{}\n```", output.trim_end()));
         }
@@ -470,7 +470,7 @@ impl Agent {
                 let mut shown = input.clone();
                 // Anchors mean nothing to the user, show the file they resolve to.
                 if let Some(file) = targets.first() {
-                    shown["path"] = file.strip_prefix(&self.cwd).unwrap_or(file).display().to_string().into();
+                    shown["file_path"] = file.strip_prefix(&self.cwd).unwrap_or(file).display().to_string().into();
                 }
                 emit(Event::ToolStart { id: id.clone(), name: name.clone(), input: shown });
                 self.plugins.event(json!({"type": "tool_call", "name": name, "input": input, "context": self.plugin_context()}));
@@ -531,15 +531,15 @@ impl Agent {
             if self.abort.load(Ordering::Relaxed) {
                 break;
             }
-            let input = json!({"command": hook.command, "timeout": 120});
+            let input = json!({"command": hook.command, "timeout": 120_000});
             // The directory is part of what gets approved, so a grant does not also cover the command in cwd.
-            let approved = json!({"command": format!("cd {} && {}", edit_hooks::shell_quote(&hook.dir.display().to_string()), hook.command), "timeout": 120});
-            if let Some(refusal) = self.check_permission("bash", &approved, &[], user_request, emit) {
+            let approved = json!({"command": format!("cd {} && {}", edit_hooks::shell_quote(&hook.dir.display().to_string()), hook.command), "timeout": 120_000});
+            if let Some(refusal) = self.check_permission("Bash", &approved, &[], user_request, emit) {
                 emit(Event::Notice(format!("[edit-hooks] {} skipped: {refusal}", hook.command)));
                 continue;
             }
             emit(Event::Notice(format!("[edit-hooks] {}", hook.command)));
-            let (output, is_error) = tools::run("bash", &input, &hook.dir, &mut self.anchors, &self.rtk, &self.abort);
+            let (output, is_error) = tools::run("Bash", &input, &hook.dir, &mut self.anchors, &self.rtk, &self.abort);
             if is_error {
                 failures.push(edit_hooks::failure(&hook.command, &output));
             }
@@ -552,18 +552,18 @@ impl Agent {
         if self.abort.load(Ordering::Relaxed) {
             return (ABORTED.into(), true);
         }
-        if matches!(name, "bash" | "bg_start")
+        if name == "Bash"
             && let Some(read) = guard::file_read(input["command"].as_str().unwrap_or_default())
         {
-            let (output, is_error) = self.run_tool("read", &read, &[], user_request, emit);
+            let (output, is_error) = self.run_tool("Read", &read, &[], user_request, emit);
             return (format!("Ran as read, so these anchors are what edits use.\n{output}"), is_error);
         }
-        if matches!(name, "bash" | "bg_start")
+        if name == "Bash"
             && let Some(reason) = guard::bash(input["command"].as_str().unwrap_or_default())
         {
             return (reason, true);
         }
-        if matches!(name, "bash" | "bg_start")
+        if name == "Bash"
             && let Some(reason) = conflicts::commit_blocked(input["command"].as_str().unwrap_or_default(), &self.cwd)
         {
             return (reason, true);
@@ -579,19 +579,19 @@ impl Agent {
             }
         }
         let result = match name {
-            "context_tree_query" => condense::query(&self.messages, &self.condensed, input),
-            "todo" => self.todo(input),
-            "goal" => self.goal_tool(input),
-            "bg_start" => self.terminals.lock().unwrap().start(input, &self.cwd, &self.follow_ups),
-            "bg_status" => self.terminals.lock().unwrap().status_of(input, &self.follow_ups),
-            "bg_kill" => {
+            "ContextTreeQuery" => condense::query(&self.messages, &self.condensed, input),
+            "Todo" => self.todo(input),
+            "Goal" => self.goal_tool(input),
+            "Bash" if input["run_in_background"] == true => self.terminals.lock().unwrap().start(input, &self.cwd, &self.follow_ups),
+            "TaskOutput" => self.terminals.lock().unwrap().status_of(input, &self.follow_ups),
+            "TaskStop" => {
                 let targets = self.terminals.lock().unwrap().for_kill(input);
                 targets.map(|targets| bg::kill(&targets, &self.follow_ups, &self.abort))
             }
-            "subagent" => self.subagent(input, emit),
-            "bg_wait" => self.bg_wait(input),
-            "web_search" | "fetch_content" | "get_search_content" => self.web.run(name, input),
-            "ask_user_question" => self.ask_user(input, emit),
+            "Agent" => self.subagent(input, emit),
+            "TaskWait" => self.bg_wait(input),
+            "WebSearch" | "WebFetch" | "GetSearchContent" => self.web.run(name, input),
+            "AskUserQuestion" => self.ask_user(input, emit),
             _ => return self.plugins.tool(name, input, &self.plugin_context(), &self.abort).or_else(|| self.mcp.tool(name, input, &self.abort)).unwrap_or_else(|| self.run_file_tool(name, input)),
         };
         match result {
@@ -602,12 +602,12 @@ impl Agent {
 
     fn run_file_tool(&mut self, name: &str, input: &Value) -> (String, bool) {
         let (mut output, is_error) = tools::run(name, input, &self.cwd, &mut self.anchors, &self.rtk, &self.abort);
-        if name == "bash"
+        if name == "Bash"
             && let Some(hint) = conflicts::hint(input["command"].as_str().unwrap_or_default(), &self.cwd)
         {
             output = format!("{output}\n\n{hint}");
         }
-        if name == "read" && !is_error {
+        if name == "Read" && !is_error {
             let paths = match input["paths"].as_array() {
                 Some(paths) => paths.iter().filter_map(|entry| entry.as_str().or(entry["path"].as_str())).collect(),
                 None => vec![input["path"].as_str().unwrap_or_default()],
@@ -623,12 +623,12 @@ impl Agent {
         (output, is_error)
     }
 
-    /// The image file a single-path `read` names; it goes to the model as an image block, not as anchored text.
+    /// The image file a single-path `Read` names; it goes to the model as an image block, not as anchored text.
     fn requested_image(&self, name: &str, input: &Value) -> Option<PathBuf> {
-        if name != "read" {
+        if name != "Read" {
             return None;
         }
-        let path = tools::hashline::resolve(&self.cwd, input["path"].as_str()?);
+        let path = tools::hashline::resolve(&self.cwd, input["file_path"].as_str()?);
         crate::image::media_type(&path).map(|_| path)
     }
 
@@ -679,7 +679,7 @@ impl Agent {
     fn bg_wait(&self, input: &Value) -> Result<String, String> {
         let runs: Vec<_> = {
             let subagents = self.subagents.lock().unwrap();
-            match input["ids"].as_array() {
+            match input["task_ids"].as_array() {
                 Some(ids) => ids
                     .iter()
                     .map(|id| {
@@ -693,7 +693,7 @@ impl Agent {
         if runs.is_empty() {
             return Err("No background subagents are running.".into());
         }
-        let timeout = Duration::from_secs(input["timeout"].as_u64().unwrap_or(600).min(86_400));
+        let timeout = Duration::from_millis(input["timeout"].as_u64().unwrap_or(600_000).min(86_400_000));
         subagent::wait_background(&runs, timeout, &self.abort, &self.follow_ups)
     }
 
@@ -708,7 +708,7 @@ impl Agent {
             Some(dir) => self.cwd.join(dir),
             None => self.cwd.clone(),
         };
-        let background = input["background"].as_bool() == Some(true);
+        let background = input["run_in_background"].as_bool() == Some(true);
         let batch = if background { tasks.len() } else { self.subagent_concurrency.max(1) };
         let mode = *self.permission_mode.lock().unwrap();
         let mut runs = Vec::new();
@@ -752,7 +752,7 @@ impl Agent {
         }
         if background {
             let names: Vec<String> = runs.iter().map(|r| format!("{} ({})", r.id, r.label)).collect();
-            return Ok(format!("Started {} in the background. Each answer arrives as a message when it finishes, or bg_wait waits for them; /subagents shows progress.", names.join(", ")));
+            return Ok(format!("Started {} in the background. Each answer arrives as a message when it finishes, or TaskWait waits for them; /subagents shows progress.", names.join(", ")));
         }
         if let [run] = runs.as_slice() {
             return Ok(run.result_text());
@@ -962,7 +962,7 @@ impl Agent {
     /// Snapshots around a tool that can change files, so a rewind touches only what this session changed.
     /// A file another session edits while this call runs still counts as this session's.
     fn run_tool_with_checkpoint(&mut self, name: &str, input: &Value, targets: &[PathBuf], user_request: &str, emit: &mut dyn FnMut(Event)) -> Result<(String, bool), String> {
-        const CHANGES_FILES: [&str; 6] = ["write", "replace", "replace_match", "insert", "bash", "subagent"];
+        const CHANGES_FILES: [&str; 6] = ["Write", "ReplaceLines", "Edit", "InsertLines", "Bash", "Agent"];
         let Some(snapshots) = self.snapshots.as_ref().filter(|_| CHANGES_FILES.contains(&name)) else {
             return Ok(self.run_tool(name, input, targets, user_request, emit));
         };
@@ -1785,10 +1785,10 @@ mod tests {
     fn serialize_matches_pi_format() {
         let messages = [
             user("fix it"),
-            json!({"role": "assistant", "content": [{"type": "thinking", "thinking": "t"}, {"type": "text", "text": "ok"}, {"type": "tool_use", "id": "1", "name": "bash", "input": {"command": "ls"}}]}),
+            json!({"role": "assistant", "content": [{"type": "thinking", "thinking": "t"}, {"type": "text", "text": "ok"}, {"type": "tool_use", "id": "1", "name": "Bash", "input": {"command": "ls"}}]}),
             json!({"role": "user", "content": [{"type": "tool_result", "tool_use_id": "1", "content": "a.rs"}]}),
         ];
-        assert_eq!(serialize(&messages), "[User]: fix it\n\n[Assistant]: ok\n\n[Assistant tool calls]: bash(command=\"ls\")\n\n[Tool result]: a.rs");
+        assert_eq!(serialize(&messages), "[User]: fix it\n\n[Assistant]: ok\n\n[Assistant tool calls]: Bash(command=\"ls\")\n\n[Tool result]: a.rs");
     }
 
     #[test]
@@ -1796,7 +1796,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("agent-condense-{}", std::process::id()));
         let session = Session::start(&dir, true, Path::new("/w"), "m").unwrap();
         let messages = [
-            json!({"role": "assistant", "content": [{"type": "tool_use", "id": "a", "name": "bash", "input": {}}]}),
+            json!({"role": "assistant", "content": [{"type": "tool_use", "id": "a", "name": "Bash", "input": {}}]}),
             json!({"role": "user", "content": [{"type": "tool_result", "tool_use_id": "a", "content": "raw", "is_error": false}]}),
         ];
         for message in &messages {
