@@ -15,6 +15,7 @@ pub mod conflicts;
 pub mod goal;
 pub mod guard;
 pub mod hashline;
+pub mod plan;
 pub mod rtk;
 pub mod todo;
 pub mod web;

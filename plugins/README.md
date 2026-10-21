@@ -35,7 +35,7 @@ The agent runs `command` in the plugin directory. The directory name is the plug
 
 `commands` is optional. While the plugin runs, the TUI shows each command in the `/` menu.
 
-`tools` is optional. While the plugin runs, the model gets each tool as `<plugin>__<name>`, for example `my-plugin__lookup`. A tool name has letters, digits, `_` and `-`, and no `__`. Without `input_schema`, the tool takes no input. The user approves plugin tools like other tools that change state.
+`tools` is optional. While the plugin runs, the model gets each tool as `<plugin>__<name>`, for example `my-plugin__lookup`. A tool name has letters, digits, `_` and `-`, and no `__`. Without `input_schema`, the tool takes no input. The user approves plugin tools like other tools that change state. Plan mode blocks them.
 
 `settings` is optional. Each entry has a `key` and a `default`, and an optional `description`. The default is a boolean or a string. In `/plugins`, Enter opens the plugin's settings. Space or Enter toggles a boolean or edits a string. The values are kept in `plugin_settings` in `~/.agents/settings.json`. A value with a type that is not the type of the default is ignored.
 

@@ -33,6 +33,7 @@ use crate::tools::conflicts;
 use crate::tools::goal::{AfterTurn, Goal, Status as GoalStatus};
 use crate::tools::guard;
 use crate::tools::hashline::Anchors;
+use crate::tools::plan::{self, Plan};
 use crate::tools::rtk::Rtk;
 use crate::tools::todo::Todos;
 use condense::Condensed;
@@ -208,6 +209,8 @@ pub struct Agent {
     pub todos: Arc<Mutex<Todos>>,
     /// Shared with the UI for the footer and /goal pause, which must work mid-turn.
     pub goal: Arc<Mutex<Option<Goal>>>,
+    /// Shared with the UI, which opens the plan menu after the turn that completed the plan.
+    pub plan: Arc<Mutex<Plan>>,
     pub follow_ups: Arc<Mutex<Vec<FollowUp>>>,
     /// Shared with the UI for /ps and the running count above the editor.
     pub terminals: Arc<Mutex<Terminals>>,
@@ -274,6 +277,7 @@ pub struct History {
     pub condensed: Vec<Condensed>,
     pub todos: Todos,
     pub goal: Option<Goal>,
+    pub plan: Plan,
     pub spent: Spent,
     pub checkpoints: Vec<Checkpoint>,
     /// Provider to the account id that served the session's last reply, so a resume keeps the same account.
@@ -552,6 +556,11 @@ impl Agent {
         if self.abort.load(Ordering::Relaxed) {
             return (ABORTED.into(), true);
         }
+        if *self.plan.lock().unwrap() != Plan::Off
+            && let Some(reason) = plan::blocked(name, input)
+        {
+            return (reason, true);
+        }
         if name == "Bash"
             && let Some(read) = guard::file_read(input["command"].as_str().unwrap_or_default())
         {
@@ -581,6 +590,7 @@ impl Agent {
         let result = match name {
             "ContextTreeQuery" => condense::query(&self.messages, &self.condensed, input),
             "Todo" => self.todo(input),
+            "ExitPlanMode" => self.complete_plan(input),
             "Goal" => self.goal_tool(input),
             "Bash" if input["run_in_background"] == true => self.terminals.lock().unwrap().start(input, &self.cwd, &self.follow_ups),
             "TaskOutput" => self.terminals.lock().unwrap().status_of(input, &self.follow_ups),
@@ -760,6 +770,16 @@ impl Agent {
         Ok(result_sections(&runs))
     }
 
+    fn complete_plan(&mut self, input: &Value) -> Result<String, String> {
+        let plan = input["plan"].as_str().map(str::trim).unwrap_or_default();
+        if plan.is_empty() {
+            return Err("Error: plan required".into());
+        }
+        *self.plan.lock().unwrap() = Plan::Ready(plan.to_string());
+        self.save_plan()?;
+        Ok("Plan submitted. End your turn now; the user picks what happens next.".into())
+    }
+
     fn goal_tool(&mut self, input: &Value) -> Result<String, String> {
         let mut goal = self.goal.lock().unwrap();
         let text = match input["action"].as_str().unwrap_or_default() {
@@ -812,6 +832,11 @@ impl Agent {
 
     pub fn save_goal(&mut self) -> Result<(), String> {
         let entry = Goal::entry(self.goal.lock().unwrap().as_ref());
+        self.session.append(&entry)
+    }
+
+    pub fn save_plan(&mut self) -> Result<(), String> {
+        let entry = self.plan.lock().unwrap().entry();
         self.session.append(&entry)
     }
 
@@ -1182,13 +1207,17 @@ impl Agent {
         Ok(())
     }
 
-    /// The system prompt and tool schemas the next request sends, with modes and plugin tools applied.
+    /// The system prompt and tool schemas the next request sends, with modes, plugin tools and plan mode applied.
     fn system_and_tools(&self) -> (String, Value) {
-        let system = if self.modes.is_empty() { self.system.clone() } else { format!("{}\n\n{}", self.system, self.modes) };
+        let mut system = if self.modes.is_empty() { self.system.clone() } else { format!("{}\n\n{}", self.system, self.modes) };
         let mut tools = self.tools.clone();
         let list = tools.as_array_mut().expect("tool schemas are an array");
         list.extend(self.plugins.tools());
         list.extend(self.mcp.tools());
+        if *self.plan.lock().unwrap() != Plan::Off {
+            system = format!("{system}\n\n{}", plan::PROMPT);
+            list.push(plan::tool());
+        }
         if let Some(only) = &self.only_tools {
             list.retain(|tool| only.iter().any(|name| tool["name"] == name.as_str()));
         }
@@ -1223,6 +1252,7 @@ impl Agent {
         self.condensed = history.condensed;
         *self.todos.lock().unwrap() = history.todos;
         *self.goal.lock().unwrap() = history.goal;
+        *self.plan.lock().unwrap() = history.plan;
         self.tools = self.tool_schemas();
         self.spent = history.spent;
         self.pending_condense.clear();
@@ -1375,6 +1405,7 @@ impl Session {
                 }
                 Some("condense") => history.condensed.push(condense::from_entry(&entry).ok_or_else(|| missing("refs or summary"))?),
                 Some("goal") => history.goal = Goal::from_entry(&entry),
+                Some("plan") => history.plan = Plan::from_entry(&entry),
                 Some("todo") => history.todos = Todos::from_entry(&entry),
                 Some("spent") => history.spent.add(Spent::from_entry(&entry)),
                 Some("extra_dirs") => history.extra_dirs = serde_json::from_value(entry["dirs"].clone()).map_err(|_| missing("dirs"))?,
@@ -1833,6 +1864,17 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
         let expected = HashMap::from([("anthropic".to_string(), "uuid-work".to_string()), ("openai-codex".to_string(), "chatgpt-1".to_string())]);
         assert_eq!(history.accounts, expected);
+    }
+
+    #[test]
+    fn resumed_session_keeps_the_last_plan_mode() {
+        let dir = std::env::temp_dir().join(format!("agent-plan-{}", std::process::id()));
+        let session = Session::start(&dir, true, Path::new("/w"), "m").unwrap();
+        session.append(&Plan::Drafting.entry()).unwrap();
+        session.append(&Plan::Ready("# Plan".into()).entry()).unwrap();
+        let (_, history) = Session::resume(&dir, &session.id).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(history.plan, Plan::Ready("# Plan".into()));
     }
 
     #[test]

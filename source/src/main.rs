@@ -438,6 +438,7 @@ fn run(options: Options) -> Result<(), String> {
         grants: Grants::default(),
         todos: Arc::default(),
         goal: Arc::default(),
+        plan: Arc::default(),
         follow_ups: Arc::default(),
         terminals: Arc::default(),
         web: tools::web::Web::new(&home, tools::web::store_dir()),

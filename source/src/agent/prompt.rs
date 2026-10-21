@@ -281,6 +281,14 @@ pub fn expand_template(template: &Template, args: &str) -> Result<String, String
     Ok(substitute_args(without_frontmatter(&content), &split_args(args)))
 }
 
+/// `/plan args`: a loaded `plan` template overrides the built-in prompt.
+pub fn expand_plan(templates: &[Template], args: &str) -> Result<String, String> {
+    match templates.iter().find(|t| t.name == "plan") {
+        Some(template) => expand_template(template, args),
+        None => Ok(substitute_args(include_str!("plan-prompt.md"), &split_args(args))),
+    }
+}
+
 /// Splits on whitespace; `"..."` and `'...'` keep their spaces and lose the quotes, like pi.
 fn split_args(text: &str) -> Vec<String> {
     let mut args = Vec::new();
@@ -509,6 +517,18 @@ mod tests {
         let expanded: Vec<(String, String, String)> = templates.iter().map(|t| (t.name.clone(), t.description.clone(), expand_template(t, "HEAD~2").unwrap())).collect();
         std::fs::remove_dir_all(&root).unwrap();
         assert_eq!(expanded, [("commit".into(), "Commit".into(), "Commit. Context: HEAD~2".into()), ("review".into(), String::new(), "Review HEAD~2".into())]);
+    }
+
+    #[test]
+    fn plan_uses_the_plan_template_when_one_is_loaded() {
+        let root = std::env::temp_dir().join(format!("agent-plan-template-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("home/prompts")).unwrap();
+        let builtin = expand_plan(&load_templates(&root.join("home"), &root, true, false), "add login");
+        std::fs::write(root.join("home/prompts/plan.md"), "My plan for $ARGUMENTS").unwrap();
+        let custom = expand_plan(&load_templates(&root.join("home"), &root, true, false), "add login");
+        std::fs::remove_dir_all(&root).unwrap();
+        assert!(builtin.unwrap().contains("Task: add login"));
+        assert_eq!(custom.unwrap(), "My plan for add login");
     }
 
     #[test]

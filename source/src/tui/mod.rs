@@ -43,6 +43,7 @@ use crate::settings::THINKING_LEVELS;
 use crate::settings::{self, CACHE_TTLS, CONFLICT_PRIORITIES, PROVIDER_SORTS, PRUNE_SESSIONS, SPEEDS, Settings, model_key};
 use crate::tools::bg::{Status as TerminalStatus, Terminal, Terminals};
 use crate::tools::goal::{Goal, Status as GoalStatus};
+use crate::tools::plan::Plan;
 use crate::tools::rtk::strip_ansi;
 use crate::tools::todo::{Status, Todos};
 use crate::worktree::{self, Worktree};
@@ -270,13 +271,22 @@ enum Panel {
         index: usize,
         scroll: usize,
     },
+    /// What to do with the plan from plan_mode_complete, opened when its turn ends or by /plan.
+    Plan {
+        index: usize,
+    },
+    /// "Start fresh and implement": the model and thinking level for the new session, then Start.
+    PlanFresh {
+        index: usize,
+    },
 }
 
-/// The panel the model picker returns to: none for /model, or the settings list.
+/// The panel the model picker returns to: none for /model, the settings list, or the start-fresh panel.
 #[derive(Clone, Copy)]
 enum ModelsBack {
     Close,
     Settings,
+    PlanFresh,
 }
 
 enum Command {
@@ -291,6 +301,8 @@ enum Command {
     /// New settings; the worker settles their model and answers with Msg::ModelSettled.
     Apply(Box<Settings>),
     Clear,
+    /// Starts a fresh conversation with this prompt.
+    Fresh(String),
     Rename(String),
     RenameTitle,
     Resume(String),
@@ -313,6 +325,8 @@ enum Command {
     },
     /// Writes the goal the UI changed to the session.
     SaveGoal,
+    /// Writes the plan mode the UI changed to the session.
+    SavePlan,
     SaveSpent(Spent),
     /// Starts a turn from follow-ups that arrived while idle.
     FollowUps,
@@ -361,6 +375,7 @@ const BUILTIN_COMMANDS: &[(&str, MidTurn, &str)] = &[
     ("session", MidTurn::Runs, "Show the session id, file and context use"),
     ("hotkeys", MidTurn::Runs, "Show all keyboard shortcuts"),
     ("compact", MidTurn::Waits, "[focus]: Summarize older messages"),
+    ("plan", MidTurn::Waits, "[task | export [file] | implement | exit]: Plan mode, read-only until you pick what to do with the plan; ~/.agents/prompts/plan.md overrides the prompt"),
     ("todos", MidTurn::Runs, "Show and edit the todo list"),
     ("plugins", MidTurn::Runs, "Install, enable and disable plugins"),
     ("skills", MidTurn::Runs, "Enable and disable skills"),
@@ -384,6 +399,8 @@ const BUILTIN_COMMANDS: &[(&str, MidTurn, &str)] = &[
 ];
 const MENU_ROWS: [usize; 5] = [4, 6, 8, 10, 12];
 const PANEL_ROWS: usize = 8;
+const PLAN_OPTIONS: [&str; 3] = ["Start fresh and implement", "Export to a _PLAN.md file", "Keep planning"];
+const PLAN_FRESH_ROWS: [&str; 3] = ["Model", "Effort", "Start"];
 const EDITOR_ROWS: usize = 10;
 const SCROLL_LINES: [usize; 5] = [1, 2, 3, 5, 10];
 const SETTING_NAMES: [&str; 33] = [
@@ -575,6 +592,7 @@ struct App {
     input_top: usize,
     todos: Arc<Mutex<Todos>>,
     goal: Arc<Mutex<Option<Goal>>>,
+    plan: Arc<Mutex<Plan>>,
     follow_ups: Arc<Mutex<Vec<FollowUp>>>,
     terminals: Arc<Mutex<Terminals>>,
     subagents: Arc<Mutex<Runs>>,
@@ -708,6 +726,13 @@ fn spawn_worker(mut agent: Agent, mut settings: Settings, model_lists: JoinHandl
                     let _ = events.send(Msg::Agent(Event::SessionStarted { id: agent.session.id.clone(), path }));
                     String::new()
                 }),
+                Command::Fresh(text) => agent.new_session().and_then(|()| {
+                    let path = agent.session.path.as_ref().map(|p| p.display().to_string());
+                    let _ = events.send(Msg::Agent(Event::SessionStarted { id: agent.session.id.clone(), path }));
+                    agent.pursue(&text, &mut |event| {
+                        let _ = events.send(Msg::Agent(event));
+                    })
+                }),
                 Command::Rename(name) => {
                     if let Err(error) = agent.session.rename(&name) {
                         let _ = events.send(Msg::Agent(Event::Notice(error)));
@@ -817,6 +842,12 @@ fn spawn_worker(mut agent: Agent, mut settings: Settings, model_lists: JoinHandl
                         _ => agent.save_goal(),
                     };
                     if let Err(error) = saved {
+                        let _ = events.send(Msg::Agent(Event::Notice(error)));
+                    }
+                    continue;
+                }
+                Command::SavePlan => {
+                    if let Err(error) = agent.save_plan() {
                         let _ = events.send(Msg::Agent(Event::Notice(error)));
                     }
                     continue;
@@ -1020,6 +1051,7 @@ impl App {
             input_top: 0,
             todos: agent.todos.clone(),
             goal: agent.goal.clone(),
+            plan: agent.plan.clone(),
             follow_ups: agent.follow_ups.clone(),
             terminals: agent.terminals.clone(),
             subagents: agent.subagents.clone(),
@@ -1781,6 +1813,12 @@ impl App {
             self.goal_command(args);
             return;
         }
+        if let Some(args) = command_args(&text, "/plan")
+            && self.working.is_none()
+        {
+            self.plan_command(args);
+            return;
+        }
         let local = command_args(&text, "/exit").is_some() || BUILTIN_COMMANDS.iter().any(|(name, mid_turn, _)| *mid_turn == MidTurn::Runs && command_args(&text, &format!("/{name}")).is_some());
         // Plugin commands can carry secrets such as tokens, so they never become steering text.
         let plugin = self.plugins.commands().iter().any(|(name, _)| command_args(&text, &format!("/{name}")).is_some());
@@ -2040,6 +2078,36 @@ impl App {
                 self.system("permissions", format!("Denied {}", request.detail));
             }
             let _ = reply.send(decision);
+            return;
+        }
+        if let Some(Panel::Plan { index }) = self.panel.as_mut() {
+            let choice = match code {
+                KeyCode::Up => {
+                    *index = index.saturating_sub(1);
+                    return;
+                }
+                KeyCode::Down => {
+                    *index = (*index + 1).min(PLAN_OPTIONS.len() - 1);
+                    return;
+                }
+                KeyCode::Char(digit @ '1'..='3') => digit as usize - '1' as usize,
+                KeyCode::Esc => 2,
+                KeyCode::Enter => *index,
+                _ => return,
+            };
+            self.plan_action(choice);
+            return;
+        }
+        if let Some(Panel::PlanFresh { index }) = self.panel.as_mut() {
+            match (code, *index) {
+                (KeyCode::Up, _) => *index = index.saturating_sub(1),
+                (KeyCode::Down, _) => *index = (*index + 1).min(PLAN_FRESH_ROWS.len() - 1),
+                (KeyCode::Esc, _) => self.panel = Some(Panel::Plan { index: 0 }),
+                (KeyCode::Enter, 0) => self.open_models(0, "", ModelsBack::PlanFresh),
+                (KeyCode::Enter | KeyCode::Right | KeyCode::Left, 1) => self.change_setting(1, code != KeyCode::Left),
+                (KeyCode::Enter, _) => self.start_fresh_plan(),
+                _ => {}
+            }
             return;
         }
         if let Some(Panel::Ask(ask)) = self.panel.as_mut() {
@@ -2397,6 +2465,8 @@ impl App {
                 | Panel::Subagent { .. }
                 | Panel::Terminal { .. }
                 | Panel::Diff { .. }
+                | Panel::Plan { .. }
+                | Panel::PlanFresh { .. }
                 | Panel::PluginSettings { .. }
                 | Panel::Plugin { .. }
                 | Panel::Trust { .. }
@@ -2495,6 +2565,91 @@ impl App {
         }
     }
 
+    /// /plan: no argument turns plan mode on, or off when it is on; a ready plan reopens its menu.
+    /// Text starts planning on it through the plan prompt. A ready plan also takes `export [file]` and `implement`; `exit` leaves plan mode.
+    fn plan_command(&mut self, args: &str) {
+        let ready = matches!(*self.plan.lock().unwrap(), Plan::Ready(_));
+        match args.split_once(' ').map_or((args, ""), |(word, rest)| (word, rest.trim())) {
+            ("exit", "") => {
+                self.set_plan(Plan::Off);
+                return self.system("plan", "Plan mode off.");
+            }
+            ("export", file) if ready => return self.export_plan(file),
+            ("implement", "") if ready => return self.plan_action(0),
+            _ => {}
+        }
+        if args.is_empty() {
+            let current = self.plan.lock().unwrap().clone();
+            match current {
+                Plan::Off => {
+                    self.set_plan(Plan::Drafting);
+                    self.system("plan", "Plan mode on: read-only until you pick what to do with the plan.");
+                }
+                Plan::Drafting => {
+                    self.set_plan(Plan::Off);
+                    self.system("plan", "Plan mode off.");
+                }
+                Plan::Ready(_) => self.panel = Some(Panel::Plan { index: 0 }),
+            }
+            return;
+        }
+        let prompt = match crate::agent::prompt::expand_plan(&self.templates, args) {
+            Ok(prompt) => prompt,
+            Err(error) => return self.push(Item::Error(error)),
+        };
+        self.set_plan(Plan::Drafting);
+        self.push(Item::User(format!("/plan {args}")));
+        let images = self.take_images(args);
+        self.start(Command::Prompt(prompt, images));
+    }
+
+    fn plan_action(&mut self, choice: usize) {
+        self.panel = None;
+        let Plan::Ready(_) = *self.plan.lock().unwrap() else { return };
+        match choice {
+            0 => self.panel = Some(Panel::PlanFresh { index: PLAN_FRESH_ROWS.len() - 1 }),
+            1 => self.export_plan(""),
+            _ => {
+                self.set_plan(Plan::Drafting);
+                self.system("plan", "Still planning. Say what to change.");
+            }
+        }
+    }
+
+    /// Clears the transcript and implements the ready plan in a new session with the picked model and thinking level.
+    fn start_fresh_plan(&mut self) {
+        self.panel = None;
+        let Plan::Ready(text) = self.plan.lock().unwrap().clone() else { return };
+        self.set_plan(Plan::Off);
+        self.entries.truncate(self.header_len);
+        self.context_tokens = 0;
+        let prompt = format!("Implement this plan:\n\n{text}");
+        self.push(Item::User(prompt.clone()));
+        self.start(Command::Fresh(prompt));
+    }
+
+    /// Sets plan mode and writes it to the session, so resuming it comes back in the same mode.
+    fn set_plan(&mut self, plan: Plan) {
+        *self.plan.lock().unwrap() = plan;
+        let _ = self.commands.send(Command::SavePlan);
+    }
+
+    /// Writes the ready plan to `file` under the cwd, or to `<TITLE>_PLAN.md` when `file` is empty.
+    /// A failure keeps the plan ready so `/plan export <file>` can retry.
+    fn export_plan(&mut self, file: &str) {
+        let Plan::Ready(text) = self.plan.lock().unwrap().clone() else { return };
+        let path = self.cwd.join(if file.is_empty() { plan_file_name(&text) } else { file.to_string() });
+        // create_new: an existing file is the user's, never overwrite it.
+        let written = std::fs::File::create_new(&path).and_then(|mut file| std::io::Write::write_all(&mut file, format!("{text}\n").as_bytes()));
+        match written {
+            Ok(()) => {
+                self.set_plan(Plan::Off);
+                self.system("plan", format!("Exported to {}", path.display()));
+            }
+            Err(error) => self.push(Item::Error(format!("Cannot export to {}: {error}. /plan export <file> writes it elsewhere.", path.display()))),
+        }
+    }
+
     /// pi's worktree extension: no name picks from the list, a name opens or creates that worktree.
     fn worktree(&mut self, name: &str) -> Result<(), String> {
         let (worktrees, current) = worktree::list(&self.cwd)?;
@@ -2531,6 +2686,7 @@ impl App {
         let back = match back {
             ModelsBack::Close => None,
             ModelsBack::Settings => Some(Panel::Settings { row, query: Editor::new() }),
+            ModelsBack::PlanFresh => Some(Panel::PlanFresh { index: 0 }),
         };
         let matches = matching_models(self.client.catalog(), &self.settings, row, &query.text());
         match key.code {
@@ -2898,6 +3054,23 @@ impl App {
                 view.render(width, PANEL_ROWS)
             }
             Panel::Permission { request, index, .. } => permission_lines(request, *index, width),
+            Panel::Plan { index } => plan_lines(*index),
+            Panel::PlanFresh { index } => {
+                let [model, effort, ..] = self.setting_values();
+                let rights = [model, effort, Vec::new()];
+                let rows: Vec<panel::Row> = PLAN_FRESH_ROWS.iter().zip(rights).map(|(left, right)| panel::Row { left: left.to_string(), right }).collect();
+                let view = panel::Panel {
+                    title: PLAN_OPTIONS[0].into(),
+                    tabs: &[],
+                    tab: 0,
+                    search: None,
+                    rows: &rows,
+                    selected: *index,
+                    empty: "",
+                    hint: "↑↓ navigate     enter pick model / start     ←→ change effort     esc back",
+                };
+                view.render(width, PANEL_ROWS)
+            }
             Panel::Ask(ask) => ask.render(width),
             Panel::Subagents { index } => subagents_panel(&self.subagents.lock().unwrap().list, *index, width),
             Panel::Terminals { index } => terminals_panel(&self.terminals.lock().unwrap().list, *index, width),
@@ -3407,6 +3580,9 @@ impl App {
                 self.push(Item::Done { took, usage, total: self.spent.time });
             }
         }
+        if matches!(*self.plan.lock().unwrap(), Plan::Ready(_)) && self.panel.is_none() {
+            self.panel = Some(Panel::Plan { index: 0 });
+        }
         self.git = git_info(&self.cwd);
     }
 
@@ -3704,6 +3880,11 @@ impl App {
         }
         if let Some(goal) = self.goal.lock().unwrap().as_ref() {
             left.push(span(format!(" goal {}", goal.status.as_str()), MUTED));
+        }
+        match *self.plan.lock().unwrap() {
+            Plan::Off => {}
+            Plan::Drafting => left.push(span(" plan", WARN)),
+            Plan::Ready(_) => left.push(span(" plan ready", WARN)),
         }
         let percent = (self.context_tokens * 100).checked_div(self.context_window()).unwrap_or(0);
         let mut right = Line::default();
@@ -4181,6 +4362,7 @@ fn matching_args(name: &str, arg: &str) -> Vec<(String, String)> {
         "caveman" => CAVEMAN_LEVELS.iter().map(|level| (*level, "")).collect(),
         "permissions" => MODES.iter().map(|mode| (mode.label(), mode.description())).collect(),
         "goal" => vec![("pause", "Pause the goal"), ("resume", "Resume the goal"), ("stop", "Stop the goal"), ("done", "Mark the goal done")],
+        "plan" => vec![("export", "Write the ready plan to <TITLE>_PLAN.md or the file named after it"), ("implement", "Pick model and effort, then implement the ready plan in a new session"), ("exit", "Leave plan mode, dropping a ready plan")],
         "context-window" => vec![("auto", "Drop this model's override")],
         _ => return Vec::new(),
     };
@@ -4660,6 +4842,27 @@ fn permission_lines(request: &Request, selected: usize, width: usize) -> Vec<Lin
     lines
 }
 
+/// `<TITLE>_PLAN.md` from the plan's first `# ` heading: letters and digits upper-cased, runs of anything else become one `_`.
+fn plan_file_name(plan: &str) -> String {
+    let title = plan.lines().find_map(|line| line.strip_prefix("# ")).unwrap_or_default();
+    let mut name = String::new();
+    for word in title.split(|c: char| !c.is_alphanumeric()).filter(|word| !word.is_empty()) {
+        name.push_str(&word.to_uppercase());
+        name.push('_');
+    }
+    format!("{name}PLAN.md")
+}
+
+fn plan_lines(selected: usize) -> Vec<Line> {
+    let mut lines = vec![Vec::new(), vec![span("  ", PLAIN), span("Plan ready · Choose one", PLAIN.bold())], Vec::new()];
+    for (index, option) in PLAN_OPTIONS.iter().enumerate() {
+        let label = format!("{}. {option}", index + 1);
+        lines.push(if index == selected { vec![span("  ", PLAIN), span("→ ", OK), span(label, BRIGHT.bold())] } else { vec![span(format!("    {label}"), PLAIN)] });
+    }
+    lines.push(vec![span("↑↓ move     enter choose     1-3 pick     esc keep planning", MUTED)]);
+    lines
+}
+
 /// Picker rows for settings `row` whose provider or id matches `query` (see `panel::search`): pinned models first, each part grouped in provider order.
 /// `None` is "auto", offered for the optional condense and fallback models.
 fn matching_models<'a>(catalog: &'a [Model], settings: &Settings, row: usize, query: &str) -> Vec<Option<&'a Model>> {
@@ -4780,6 +4983,12 @@ mod tests {
     fn bracketed_notice_prefix_becomes_the_source() {
         assert_eq!(notice_source("[lsp] Cannot read a.rs"), ("lsp", "Cannot read a.rs"));
         assert_eq!(notice_source("Operation aborted"), ("agent", "Operation aborted"));
+    }
+
+    #[test]
+    fn plan_file_name_comes_from_the_first_heading() {
+        assert_eq!(plan_file_name("intro\n# Add /plan export, v2!\n## Steps"), "ADD_PLAN_EXPORT_V2_PLAN.md");
+        assert_eq!(plan_file_name("no heading"), "PLAN.md");
     }
 
     #[test]
@@ -4914,9 +5123,9 @@ mod tests {
 
     #[test]
     fn a_tabbed_log_row_wraps_its_description_under_the_description_column() {
-        let lines = system_lines("⚙", "help", "2 commands\n/goal\taaa bbb ccc\n/btw\t", SYSTEM, 16);
+        let lines = system_lines("⚙", "help", "2 commands\n/plan\taaa bbb ccc\n/btw\t", SYSTEM, 16);
         let rows: Vec<String> = lines.iter().map(text).collect();
-        assert_eq!(rows, ["⚙ help 2 ", "  commands", "  /goal aaa bbb ", "        ccc", "  /btw "]);
+        assert_eq!(rows, ["⚙ help 2 ", "  commands", "  /plan aaa bbb ", "        ccc", "  /btw "]);
     }
 
     #[test]
@@ -4949,6 +5158,7 @@ mod tests {
         let names = |text: &str| matching_commands(&[], text).into_iter().map(|c| c.0).collect::<Vec<_>>();
         assert_eq!(names("/thinking m"), ["thinking minimal", "thinking medium", "thinking max"]);
         assert_eq!(names("/permissions "), ["permissions ask", "permissions auto", "permissions full access"]);
+        assert_eq!(names("/plan e"), ["plan export", "plan exit"]);
         assert!(names("/thinking medium ").is_empty());
     }
 
