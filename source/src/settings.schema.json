@@ -17,6 +17,7 @@
     "keep_recent_tokens": { "type": "integer", "minimum": 0, "default": 20000, "description": "Recent tokens compaction keeps verbatim." },
     "expand_tools": { "type": "boolean", "default": false },
     "footer_cost": { "type": "boolean", "default": true, "description": "Show the session's estimated cost (~$, at OpenRouter list prices) in the footer." },
+    "footer_account": { "type": "boolean", "default": false, "description": "Show the name of the account in use before the model in the footer." },
     "context_windows": {
       "type": "object",
       "additionalProperties": { "type": "integer", "minimum": 1 },

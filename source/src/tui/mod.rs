@@ -386,7 +386,7 @@ const MENU_ROWS: [usize; 5] = [4, 6, 8, 10, 12];
 const PANEL_ROWS: usize = 8;
 const EDITOR_ROWS: usize = 10;
 const SCROLL_LINES: [usize; 5] = [1, 2, 3, 5, 10];
-const SETTING_NAMES: [&str; 32] = [
+const SETTING_NAMES: [&str; 33] = [
     "Model",
     "Thinking level",
     "Permission mode",
@@ -419,9 +419,10 @@ const SETTING_NAMES: [&str; 32] = [
     "Reviewer model",
     "Subagent model",
     "Cost in footer",
+    "Account in footer",
 ];
 /// Rows of `SETTING_NAMES` in the order the settings panel lists them.
-const SETTING_ORDER: [usize; 32] = [0, 1, 27, 18, 30, 13, 2, 29, 3, 4, 5, 6, 31, 7, 8, 9, 10, 11, 12, 25, 28, 14, 15, 16, 17, 26, 19, 20, 23, 21, 22, 24];
+const SETTING_ORDER: [usize; 33] = [0, 1, 27, 18, 30, 13, 2, 29, 3, 4, 5, 6, 31, 32, 7, 8, 9, 10, 11, 12, 25, 28, 14, 15, 16, 17, 26, 19, 20, 23, 21, 22, 24];
 const MODEL_ROWS: [usize; 5] = [0, 8, 12, 29, 30];
 const CONTEXT_WINDOW_ROW: usize = 13;
 const PROVIDER_ORDER_ROW: usize = 25;
@@ -2741,11 +2742,12 @@ impl App {
             27 => s.speed = step(&SPEEDS, &s.speed.as_str(), forward).to_string(),
             28 => s.cache_ttl = step(&CACHE_TTLS, &s.cache_ttl.as_str(), forward).to_string(),
             31 => s.footer_cost = !s.footer_cost,
+            32 => s.footer_account = !s.footer_account,
             _ => unreachable!("rows 0, 8, 12, 13, 29 and 30 open their own panels"),
         });
     }
 
-    fn setting_values(&self) -> [Line; 32] {
+    fn setting_values(&self) -> [Line; 33] {
         let s = &self.settings;
         let condense_model = if s.condense_model.is_empty() { "auto" } else { &s.condense_model };
         let fallback_model = if s.fallback_model.is_empty() { "auto" } else { &s.fallback_model };
@@ -2788,6 +2790,7 @@ impl App {
             vec![span(reviewer_model, BRIGHT.bold())],
             vec![span(subagent_model, BRIGHT.bold())],
             on_off_choices(s.footer_cost),
+            on_off_choices(s.footer_account),
         ]
     }
 
@@ -3715,6 +3718,11 @@ impl App {
                 right.push(span(text, style));
             }
             right.push(span("  ", MUTED));
+        }
+        if self.settings.footer_account
+            && let Some((name, _)) = self.model().and_then(|m| self.client.account(&m.provider))
+        {
+            right.push(span(format!("{name} "), MUTED));
         }
         right.push(span(self.model().map_or(LOADING_MODELS.into(), models::short_label), MUTED));
         right.push(span(" ", PLAIN));

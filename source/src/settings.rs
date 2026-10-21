@@ -25,6 +25,8 @@ pub struct Settings {
     pub expand_tools: bool,
     /// The session's estimated cost after the context tokens in the footer.
     pub footer_cost: bool,
+    /// The name of the account the current model's provider uses, before the model in the footer.
+    pub footer_account: bool,
     pub condense: bool,
     /// Empty means the default summarizer for the provider.
     pub condense_model: String,
@@ -257,6 +259,7 @@ fn from_json(own: &Value) -> Settings {
         keep_recent_tokens: own["keep_recent_tokens"].as_u64().unwrap_or(20_000),
         expand_tools: own["expand_tools"].as_bool().unwrap_or(false),
         footer_cost: own["footer_cost"].as_bool().unwrap_or(true),
+        footer_account: own["footer_account"].as_bool().unwrap_or(false),
         condense: own["condense"]["enabled"].as_bool().unwrap_or(true),
         condense_model: own["condense"]["model"].as_str().unwrap_or_default().to_string(),
         condense_min_batch_chars: own["condense"]["min_batch_chars"].as_u64().unwrap_or(CONDENSE_MIN_BATCH_CHARS).max(CONDENSE_MIN_BATCH_CHARS),
@@ -383,6 +386,7 @@ fn to_json(settings: &Settings) -> Value {
         "keep_recent_tokens": settings.keep_recent_tokens,
         "expand_tools": settings.expand_tools,
         "footer_cost": settings.footer_cost,
+        "footer_account": settings.footer_account,
         "context_windows": settings.context_windows,
         "provider_sort": settings.provider_sort,
         "provider_order": settings.provider_order,
