@@ -456,6 +456,7 @@ fn run(options: Options) -> Result<(), String> {
         snapshots: None,
         lsp: agent::lsp::Lsp::new(settings.lsp.clone()),
         checkpoints: Vec::new(),
+        compactions: Vec::new(),
         cwd,
         messages: Vec::new(),
         session,

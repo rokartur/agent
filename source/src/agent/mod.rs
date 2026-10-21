@@ -239,6 +239,7 @@ pub struct Agent {
     pub lsp: lsp::Lsp,
     /// Files changed by this session's own tool calls, oldest first.
     pub checkpoints: Vec<Checkpoint>,
+    pub compactions: Vec<Compaction>,
 }
 
 /// Work tree snapshots around one tool call made while message `at` was the latest.
@@ -249,6 +250,13 @@ pub struct Checkpoint {
     pub at: usize,
     pub before: String,
     pub after: String,
+}
+
+/// What the provider sees in place of `messages[..cut]`. The messages stay, so a rewind can go back past the summary.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Compaction {
+    pub cut: usize,
+    pub summary: String,
 }
 
 /// A user prompt the conversation can go back to.
@@ -280,6 +288,7 @@ pub struct History {
     pub plan: Plan,
     pub spent: Spent,
     pub checkpoints: Vec<Checkpoint>,
+    pub compactions: Vec<Compaction>,
     /// Provider to the account id that served the session's last reply, so a resume keeps the same account.
     pub accounts: HashMap<String, String>,
     pub extra_dirs: Vec<PathBuf>,
@@ -407,7 +416,7 @@ impl Agent {
                 }
             }
             self.collect_condensed(emit)?;
-            let messages = condense::view(&self.messages, &self.condensed);
+            let messages = self.provider_view();
             let (system, tools) = self.system_and_tools();
             let mut request = api::request(&self.model, self.max_tokens, &self.effort, &self.cache_ttl, &system, &prompt::cwd_section(&self.cwd, &self.extra_dirs), &tools, &messages);
             if self.speed != "standard" {
@@ -978,8 +987,9 @@ impl Agent {
     pub fn rewind(&mut self, index: usize) -> Result<Option<RestoredFiles>, String> {
         let files = self.snapshots.as_ref().map(|snapshots| restore_files(snapshots, &self.checkpoints, index)).transpose()?;
         self.checkpoints.retain(|checkpoint| checkpoint.at < index);
+        self.compactions.retain(|compaction| compaction.cut <= index);
         self.messages.truncate(index);
-        self.session.append(&json!({"type": "rewind", "to": index}))?;
+        self.session.append(&json!({"type": "rewind", "index": index}))?;
         self.estimate_context_tokens();
         Ok(files)
     }
@@ -1004,7 +1014,7 @@ impl Agent {
             Ok(after) if after == before => {}
             Ok(after) => {
                 let at = self.messages.len();
-                self.session.append(&json!({"type": "tool_checkpoint", "at": at, "before": before, "after": after}))?;
+                self.session.append(&json!({"type": "tool_checkpoint", "index": at, "before": before, "after": after}))?;
                 self.checkpoints.push(Checkpoint { at, before, after });
             }
             Err(error) => emit(Event::Notice(format!("{SNAPSHOT_FAILED}: {error}"))),
@@ -1015,10 +1025,11 @@ impl Agent {
     /// Summarizes everything before a recent assistant message and keeps the rest verbatim, like pi.
     /// Returns None when there is nothing old enough to summarize.
     pub fn compact(&mut self, focus: Option<&str>) -> Result<Option<String>, String> {
-        let Some(first_kept) = cut_point(&self.messages, self.keep_recent_tokens) else {
+        let view = self.compacted();
+        let Some(first_kept) = cut_point(&view, self.keep_recent_tokens) else {
             return Ok(None);
         };
-        let prompt = compaction_prompt(&serialize(&self.messages[..first_kept]), focus);
+        let prompt = compaction_prompt(&serialize(&view[..first_kept]), focus);
         // The cheap model summarizes only when the conversation fits its window, so a 1M-context session keeps the main model.
         let cheap = self.client.catalog().iter().find(|model| model.id == self.cheap_model && model.context_window >= self.context_window);
         let (model, output_limit) = cheap.map_or((self.model.clone(), u64::MAX), |model| (model.id.clone(), model.max_tokens));
@@ -1034,9 +1045,9 @@ impl Agent {
         if summary.trim().is_empty() {
             return Err("The compaction summary came back empty.".into());
         }
-        self.session.append(&json!({"type": "compaction", "summary": summary, "first_kept": first_kept}))?;
-        self.messages = compacted(&self.messages, &summary, first_kept, self.session.path.as_deref());
-        shift_checkpoints(&mut self.checkpoints, first_kept);
+        let cut = message_index(&self.compactions, first_kept);
+        self.session.append(&json!({"type": "compaction", "summary": summary, "cut": cut}))?;
+        self.compactions.push(Compaction { cut, summary: summary.clone() });
         self.last_context_tokens = 0;
         Ok(Some(summary))
     }
@@ -1228,14 +1239,14 @@ impl Agent {
     pub fn context_split(&self) -> context::PerPart {
         let (system, tools) = self.system_and_tools();
         let system = format!("{system}{}", prompt::cwd_section(&self.cwd, &self.extra_dirs));
-        context::split(&system, &tools, &condense::view(&self.messages, &self.condensed), self.last_context_tokens)
+        context::split(&system, &tools, &self.provider_view(), self.last_context_tokens)
     }
 
     /// Set after a resume or rewind, so auto-compact runs before a first request that would not fit.
     fn estimate_context_tokens(&mut self) {
         let (system, tools) = self.system_and_tools();
         let system = format!("{system}{}", prompt::cwd_section(&self.cwd, &self.extra_dirs));
-        self.last_context_tokens = context::estimate(&system, &tools, &condense::view(&self.messages, &self.condensed));
+        self.last_context_tokens = context::estimate(&system, &tools, &self.provider_view());
     }
 
     fn tool_schemas(&self) -> Value {
@@ -1260,7 +1271,17 @@ impl Agent {
         self.estimate_context_tokens();
         self.nested_instructions.clear();
         self.checkpoints = history.checkpoints;
+        self.compactions = history.compactions;
         self.extra_dirs = history.extra_dirs;
+    }
+
+    /// The messages with everything before the latest compaction replaced by its summary.
+    fn compacted(&self) -> Vec<Value> {
+        compacted(&self.messages, &self.compactions, self.session.path.as_deref())
+    }
+
+    fn provider_view(&self) -> Vec<Value> {
+        condense::view(&self.compacted(), &self.condensed)
     }
 
     /// Tells plugins the session started; needs the settled model for the context's provider.
@@ -1384,24 +1405,25 @@ impl Session {
             match entry["type"].as_str() {
                 Some("message") => history.messages.push(entry["message"].clone()),
                 Some("rewind") => {
-                    let to = entry["to"].as_u64().ok_or_else(|| missing("to"))?;
-                    history.messages.truncate(to as usize);
-                    history.checkpoints.retain(|checkpoint| checkpoint.at < to as usize);
+                    let index = saved_index(&entry, "index", "to", &history.compactions).ok_or_else(|| missing("index"))?;
+                    history.messages.truncate(index);
+                    history.checkpoints.retain(|checkpoint| checkpoint.at < index);
+                    history.compactions.retain(|compaction| compaction.cut <= index);
                 }
                 Some("tool_checkpoint") => {
                     let text = |field: &str| entry[field].as_str().map(String::from).ok_or_else(|| missing(field));
-                    history.checkpoints.push(Checkpoint { at: entry["at"].as_u64().ok_or_else(|| missing("at"))? as usize, before: text("before")?, after: text("after")? });
+                    let at = saved_index(&entry, "index", "at", &history.compactions).ok_or_else(|| missing("index"))?;
+                    history.checkpoints.push(Checkpoint { at, before: text("before")?, after: text("after")? });
                 }
                 Some("checkpoints_reset") => history.checkpoints.clear(),
                 Some("compaction") => {
-                    let first_kept = entry["first_kept"].as_u64().ok_or_else(|| missing("first_kept"))?;
+                    let cut = saved_index(&entry, "cut", "first_kept", &history.compactions).ok_or_else(|| missing("cut"))?;
                     let summary = entry["summary"].as_str().ok_or_else(|| missing("summary"))?;
-                    // Two processes appending to one session file interleave their messages, so first_kept can point past them.
-                    if first_kept as usize > history.messages.len() {
-                        return Err(format!("{}:{}: compaction keeps from message {first_kept} of {}", path.display(), number + 1, history.messages.len()));
+                    // Two processes appending to one session file interleave their messages, so the cut can point past them.
+                    if cut > history.messages.len() {
+                        return Err(format!("{}:{}: compaction keeps from message {cut} of {}", path.display(), number + 1, history.messages.len()));
                     }
-                    history.messages = compacted(&history.messages, summary, first_kept as usize, Some(path));
-                    shift_checkpoints(&mut history.checkpoints, first_kept as usize);
+                    history.compactions.push(Compaction { cut, summary: summary.to_string() });
                 }
                 Some("condense") => history.condensed.push(condense::from_entry(&entry).ok_or_else(|| missing("refs or summary"))?),
                 Some("goal") => history.goal = Goal::from_entry(&entry),
@@ -1564,9 +1586,6 @@ pub fn rewind_points(messages: &[Value]) -> Vec<RewindPoint> {
         }
         // The typed text is the last block; shell output and todo notes come before it.
         let Some(text) = blocks.iter().rev().find_map(|block| block["text"].as_str()) else { continue };
-        if text.starts_with(SUMMARY_PREFIX) {
-            continue;
-        }
         let images = blocks.iter().filter(|block| block["type"] == "image").cloned().collect();
         points.push(RewindPoint { at, text: text.to_string(), images });
     }
@@ -1652,12 +1671,20 @@ fn changed_paths<'a>(snapshots: &Snapshots, checkpoints: impl IntoIterator<Item 
     Ok(changed)
 }
 
-/// The summary takes index 0, so a kept message moves from first_kept to 1.
-fn shift_checkpoints(checkpoints: &mut Vec<Checkpoint>, first_kept: usize) {
-    checkpoints.retain(|checkpoint| checkpoint.at >= first_kept);
-    for checkpoint in checkpoints {
-        checkpoint.at = checkpoint.at - first_kept + 1;
+/// The message index of position `view_index` in the compacted view, where the summary takes index 0.
+fn message_index(compactions: &[Compaction], view_index: usize) -> usize {
+    match compactions.last() {
+        Some(compaction) => compaction.cut + view_index - 1,
+        None => view_index,
     }
+}
+
+/// A message index saved under `key`. Sessions written before 0.2 saved positions in the compacted view under `view_key`.
+fn saved_index(entry: &Value, key: &str, view_key: &str, compactions: &[Compaction]) -> Option<usize> {
+    if let Some(index) = entry[key].as_u64() {
+        return Some(index as usize);
+    }
+    entry[view_key].as_u64().map(|position| message_index(compactions, position as usize))
 }
 
 fn compaction_prompt(conversation: &str, focus: Option<&str>) -> String {
@@ -1669,13 +1696,14 @@ fn compaction_prompt(conversation: &str, focus: Option<&str>) -> String {
 }
 
 /// `transcript` is the session file, which keeps every message the summary replaces.
-fn compacted(messages: &[Value], summary: &str, first_kept: usize, transcript: Option<&Path>) -> Vec<Value> {
-    let mut text = format!("{SUMMARY_PREFIX}{summary}{SUMMARY_SUFFIX}");
+fn compacted(messages: &[Value], compactions: &[Compaction], transcript: Option<&Path>) -> Vec<Value> {
+    let Some(compaction) = compactions.last() else { return messages.to_vec() };
+    let mut text = format!("{SUMMARY_PREFIX}{}{SUMMARY_SUFFIX}", compaction.summary);
     if let Some(path) = transcript {
         text.push_str(&format!("\n\nThe full conversation before this summary is in {}, one JSON entry per line. Search it with rg when the summary lacks a detail you need.", path.display()));
     }
     let mut kept = vec![json!({"role": "user", "content": [{"type": "text", "text": text}]})];
-    kept.extend_from_slice(&messages[first_kept..]);
+    kept.extend_from_slice(&messages[compaction.cut..]);
     kept
 }
 
@@ -1792,14 +1820,14 @@ mod tests {
     #[test]
     fn compacted_history_starts_with_the_summary() {
         let messages = [user("a"), assistant("b"), user("c")];
-        let kept = compacted(&messages, "S", 1, None);
+        let kept = compacted(&messages, &[Compaction { cut: 1, summary: "S".into() }], None);
         assert_eq!(text_of(&json!({"content": kept[0]["content"]})), format!("{SUMMARY_PREFIX}S{SUMMARY_SUFFIX}"));
         assert_eq!(kept[1..], messages[1..]);
     }
 
     #[test]
     fn compacted_summary_points_at_the_saved_transcript() {
-        let kept = compacted(&[user("a"), user("b")], "S", 1, Some(Path::new("/s/abc.jsonl")));
+        let kept = compacted(&[user("a"), user("b")], &[Compaction { cut: 1, summary: "S".into() }], Some(Path::new("/s/abc.jsonl")));
         assert!(
             text_of(&json!({"content": kept[0]["content"]}))
                 .ends_with("</summary>\n\nThe full conversation before this summary is in /s/abc.jsonl, one JSON entry per line. Search it with rg when the summary lacks a detail you need.")
@@ -1896,6 +1924,21 @@ mod tests {
     }
 
     #[test]
+    fn a_resumed_session_can_rewind_to_a_prompt_the_compaction_summarized() {
+        let dir = std::env::temp_dir().join(format!("agent-rewind-compacted-{}", std::process::id()));
+        let session = Session::start(&dir, true, Path::new("/w"), "m").unwrap();
+        session.append(&json!({"type": "message", "message": user("hi")})).unwrap();
+        session.append(&json!({"type": "message", "message": assistant("hello")})).unwrap();
+        session.append(&json!({"type": "message", "message": user("more")})).unwrap();
+        session.append(&json!({"type": "message", "message": assistant("ok")})).unwrap();
+        session.append(&json!({"type": "compaction", "summary": "S", "first_kept": 3})).unwrap();
+        let (_, history) = Session::resume(&dir, &session.id).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        let texts: Vec<String> = rewind_points(&history.messages).into_iter().map(|point| point.text).collect();
+        assert_eq!(texts, ["hi", "more"]);
+    }
+
+    #[test]
     fn resuming_a_compaction_past_the_saved_messages_fails_instead_of_panicking() {
         let dir = std::env::temp_dir().join(format!("agent-bad-compaction-{}", std::process::id()));
         let session = Session::start(&dir, true, Path::new("/w"), "m").unwrap();
@@ -1962,14 +2005,13 @@ mod tests {
     }
 
     #[test]
-    fn rewind_points_are_typed_prompts_not_tool_results_or_the_summary() {
-        let summary = user(&format!("{SUMMARY_PREFIX}S{SUMMARY_SUFFIX}"));
+    fn rewind_points_are_typed_prompts_not_tool_results() {
         let tool_result = json!({"role": "user", "content": [{"type": "tool_result", "tool_use_id": "1", "content": "x"}, {"type": "text", "text": "steer"}]});
         let image = json!({"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AA"}});
         let with_context = json!({"role": "user", "content": [{"type": "text", "text": "$ ls"}, image, {"type": "text", "text": "fix [Image #1]"}]});
-        let messages = [summary, assistant("a"), user("hi"), assistant("b"), tool_result, with_context];
-        let hi = RewindPoint { at: 2, text: "hi".into(), images: Vec::new() };
-        let fix = RewindPoint { at: 5, text: "fix [Image #1]".into(), images: vec![image] };
+        let messages = [user("hi"), assistant("b"), tool_result, with_context];
+        let hi = RewindPoint { at: 0, text: "hi".into(), images: Vec::new() };
+        let fix = RewindPoint { at: 3, text: "fix [Image #1]".into(), images: vec![image] };
         assert_eq!(rewind_points(&messages), [hi, fix]);
     }
 
