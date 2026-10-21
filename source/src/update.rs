@@ -30,6 +30,16 @@ pub fn install_latest(home: &Path, channel: &str) -> Result<Option<String>, Stri
         mark_checked(&stamp, channel)?;
     }
     let Some(latest) = latest? else { return Ok(None) };
+    install_if_newer(latest)
+}
+
+/// `agent update`: checks now, whatever the channel and the last check, and reports an offline start as an error.
+pub fn install_now(channel: &str) -> Result<Option<String>, String> {
+    let latest = latest_version(channel == "pre-release")?.ok_or("Cannot reach GitHub to check for updates.")?;
+    install_if_newer(latest)
+}
+
+fn install_if_newer(latest: String) -> Result<Option<String>, String> {
     if !is_newer(&latest, CURRENT) {
         return Ok(None);
     }

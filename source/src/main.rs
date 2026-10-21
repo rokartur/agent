@@ -43,6 +43,7 @@ Commands:
   plugin install <name|path>  Copy a bundled plugin or a plugin directory into ~/.agents/plugins
   plugin remove <name>        Remove an installed plugin
   plugin list                 List bundled and installed plugins
+  update                      Check for a newer release now and install it
   doctor [--provider <p>]     Ping every saved account and show its limits; exits 1 if one fails
   acp                         Serve the Agent Client Protocol on stdin and stdout, for editors like Zed
 
@@ -139,6 +140,21 @@ fn doctor_command(args: &[String]) -> Result<(), String> {
     if failed > 0 { Err(format!("{failed} of {} accounts failed.", lines.len())) } else { Ok(()) }
 }
 
+fn update_command(args: &[String]) -> Result<(), String> {
+    if !args.is_empty() {
+        return Err("Usage: agent update.".into());
+    }
+    if !update::enabled() {
+        return Err("Only release builds update themselves. Rebuild from source instead.".into());
+    }
+    // `off` only stops the automatic check, so an explicit update with it follows stable releases.
+    match update::install_now(&settings::load(&home()?)?.update_channel)? {
+        Some(version) => println!("Updated to v{version}."),
+        None => println!("agent v{} is up to date.", env!("CARGO_PKG_VERSION")),
+    }
+    Ok(())
+}
+
 fn plugin_command(args: &[String]) -> Result<(), String> {
     let home = home()?;
     match args {
@@ -171,6 +187,7 @@ fn main() {
     let command = match args.first().map(String::as_str) {
         Some("plugin") => Some(plugin_command(&args[1..])),
         Some("doctor") => Some(doctor_command(&args[1..])),
+        Some("update") => Some(update_command(&args[1..])),
         _ => None,
     };
     if let Some(result) = command {
