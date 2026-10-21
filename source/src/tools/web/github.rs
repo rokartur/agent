@@ -9,7 +9,7 @@ const NOISE: [&str; 15] = ["node_modules", "vendor", ".next", "dist", "build", "
 const TREE_LIMIT: usize = 200;
 const README_CHARS: usize = 8192;
 const FILE_CHARS: usize = 100_000;
-const FOOTER: &str = "Use `read` and `bash` tools at the path above to explore further. The clone is a cache that forceClone replaces; do not edit it.";
+const FOOTER: &str = "Use the Read and Bash tools at the path above to explore further. The clone is a cache that forceClone replaces; do not edit it.";
 
 #[derive(Debug, PartialEq)]
 pub enum Kind {

@@ -7,11 +7,12 @@ const HEAD_DEFAULT_LINES: u64 = 10;
 
 /// Why bash should not run `command` (a blind sleep), or None when it may run.
 pub fn bash(command: &str) -> Option<String> {
-    blind_sleep(command).then(|| "No blind sleep. Server: curl -sf --retry 30 --retry-all-errors --retry-delay 1 URL. CI: gh run watch --exit-status, gh pr checks --watch. Long job: Bash run_in_background.".into())
+    blind_sleep(command)
+        .then(|| "No blind sleep. Server: curl -sf --retry 30 --retry-all-errors --retry-delay 1 URL. CI: gh run watch --exit-status, gh pr checks --watch. Long job: Bash run_in_background.".into())
 }
 
-/// The `read` input for a command that only prints files: `cat FILE`, `head [-N] FILE` or `sed -n 'N,Mp' FILE`
-/// chained with `;`, `&&` or newlines, maybe after `cd DIR` and between `echo` separators. Running it as `read`
+/// The `Read` input for a command that only prints files: `cat FILE`, `head [-N] FILE` or `sed -n 'N,Mp' FILE`
+/// chained with `;`, `&&` or newlines, maybe after `cd DIR` and between `echo` separators. Running it as `Read`
 /// returns anchors in the same turn, where a refusal cost the model a second call.
 pub fn file_read(command: &str) -> Option<Value> {
     let command = command.replace("&&", ";").replace('\n', ";");
