@@ -1268,11 +1268,11 @@ impl Agent {
         self.spent = history.spent;
         self.pending_condense.clear();
         self.pending_title = None;
-        self.estimate_context_tokens();
         self.nested_instructions.clear();
         self.checkpoints = history.checkpoints;
         self.compactions = history.compactions;
         self.extra_dirs = history.extra_dirs;
+        self.estimate_context_tokens();
     }
 
     /// The messages with everything before the latest compaction replaced by its summary.
