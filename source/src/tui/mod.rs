@@ -73,6 +73,8 @@ const OK: Style = Style::rgb(0x7ee787);
 const ERROR: Style = Style::rgb(0xff7b72);
 const TOOL_NAME: Style = Style::rgb(0xffffff);
 const TOOL_ARGS: Style = Style::rgb(0x858585);
+const PROMPT_BG: u8 = 237;
+const PROMPT: Style = BRIGHT.on(PROMPT_BG);
 
 enum Msg {
     Input(Input),
@@ -1254,7 +1256,7 @@ impl App {
             let Some(index) = tail.len().checked_sub(line + 1) else { continue };
             let row = &tail[index];
             let (from, to) = self.selection.columns(line).expect("line is inside the range");
-            let from = if text_in(row, 0, 2) == "┃ " { from.max(2) } else { from };
+            let from = if row.first().is_some_and(|s| s.style.bg == Some(PROMPT_BG)) { from.max(2) } else { from };
             rows.push((row, from, to));
         }
         plain_text(&rows)
@@ -3655,15 +3657,14 @@ impl App {
             bottom.push(Vec::new());
             bottom.push(shimmer_line(working_label(self.entries.last().map(|e| &e.item)), tick));
         }
-        let queued = self.steering.lock().unwrap().clone();
-        for text in &queued {
-            bottom.push(vec![span(format!(" Steering: {}", text.replace('\n', " ")), DIM)]);
-        }
-        for (text, _) in &self.queued_commands {
-            bottom.push(vec![span(format!(" Queued: {}", text.replace('\n', " ")), DIM)]);
-        }
-        if !queued.is_empty() || !self.queued_commands.is_empty() {
-            bottom.push(vec![span(format!(" ↳ {ALT}+Up to edit all queued messages"), DIM)]);
+        let steering = self.steering.lock().unwrap().clone();
+        let queued: Vec<&String> = steering.iter().chain(self.queued_commands.iter().map(|(text, _)| text)).collect();
+        if !queued.is_empty() {
+            bottom.push(Vec::new());
+            for text in queued {
+                bottom.extend(prompt_rows(text, MUTED, width));
+            }
+            bottom.push(vec![span(format!("  {ALT}+Up to edit queued messages"), DIM)]);
         }
         if let Some(recording) = &self.recording {
             bottom.push(Vec::new());
@@ -4164,8 +4165,10 @@ fn pin_prompt(rows: &mut [Line], prompt: &[Line], width: usize) {
     rows[..pinned].clone_from_slice(&prompt[..pinned]);
     if prompt.len() > pinned && pinned > 0 {
         let last = &mut rows[pinned - 1];
-        last.push(span("…", BRIGHT.bold()));
+        last.pop().expect("a prompt row ends in its background padding");
+        last.push(span("…", PROMPT));
         *last = truncate(last, width);
+        last.push(span(" ".repeat(width.saturating_sub(line_width(last))), PROMPT));
     }
 }
 
@@ -4199,6 +4202,17 @@ fn todo_style(status: Status) -> Style {
     }
 }
 
+/// A prompt as in Claude Code: `❯ ` and the text on a background that fills the row.
+fn prompt_rows(text: &str, style: Style, width: usize) -> Vec<Line> {
+    let style = style.on(PROMPT_BG);
+    let mut rows = wrap(&[span(text, style)], width, &vec![span("  ", style)]);
+    rows[0][0] = span("❯ ", MUTED.on(PROMPT_BG));
+    for row in &mut rows {
+        row.push(span(" ".repeat(width.saturating_sub(line_width(row))), style));
+    }
+    rows
+}
+
 fn render_item(item: &Item, width: usize, expanded: bool) -> Vec<Line> {
     match item {
         Item::Lines(lines) => lines.clone(),
@@ -4206,10 +4220,7 @@ fn render_item(item: &Item, width: usize, expanded: bool) -> Vec<Line> {
         Item::System { source, text, failed: true } => system_lines("✗", source, text, ERROR, width),
         Item::Subagent(run) => subagent_done_lines(run, width),
         Item::Error(text) => system_lines("✗", "error", text, ERROR, width),
-        Item::User(text) => {
-            let indent = vec![span("┃", BRIGHT), span(" ", PLAIN)];
-            wrap(&[span(text, BRIGHT.bold())], width.saturating_sub(1), &indent)
-        }
+        Item::User(text) => prompt_rows(text, BRIGHT, width),
         Item::Assistant { text, thinking } => {
             let mut lines = Vec::new();
             if expanded && !thinking.trim().is_empty() {
@@ -5396,12 +5407,12 @@ mod tests {
     #[test]
     fn pinned_prompt_keeps_three_rows_and_marks_the_cut() {
         let text = |rows: &[Line]| rows.iter().map(|row| row.iter().map(|s| s.text.as_str()).collect::<String>()).collect::<Vec<_>>();
-        let line = |t: &str| vec![span(t, PLAIN)];
-        let mut rows = vec![line("x"); 5];
-        pin_prompt(&mut rows, &[line("a"), line("b")], 10);
-        assert_eq!(text(&rows), ["a", "b", "x", "x", "x"]);
-        pin_prompt(&mut rows, &[line("1"), line("2"), line("3"), line("4")], 10);
-        assert_eq!(text(&rows), ["1", "2", "3…", "x", "x"]);
+        let mut rows = vec![vec![span("x", PLAIN)]; 5];
+        pin_prompt(&mut rows, &render_item(&Item::User("a\nb".into()), 10, false), 10);
+        assert_eq!(text(&rows), ["❯ a       ", "  b       ", "x", "x", "x"]);
+        pin_prompt(&mut rows, &render_item(&Item::User("1\n2\n3\n4".into()), 10, false), 10);
+        assert_eq!(text(&rows), ["❯ 1       ", "  2       ", "  3…      ", "x", "x"]);
+        assert!(rows[2].iter().all(|s| s.style.bg == Some(PROMPT_BG)));
     }
 
     #[test]
