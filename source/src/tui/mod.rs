@@ -5199,6 +5199,14 @@ mod tests {
     }
 
     #[test]
+    fn done_line_reads_cooked_for_with_the_dim_star() {
+        let item = Item::Done { took: Duration::from_secs(83), usage: Usage { input: 1200, output: 300, ..Usage::default() }, total: Duration::from_secs(600) };
+        let line = &render_item(&item, 80, false)[0];
+        assert!(text(line).starts_with(" ✧ Cooked for 1m 23s (↑"), "{}", text(line));
+        assert_eq!(line[1].style, DIM);
+    }
+
+    #[test]
     fn recording_line_shows_minutes_and_seconds() {
         let line = recording_line(Duration::from_secs(75));
         assert_eq!(text(&line), " ● 1:15  Enter to transcribe · Esc to cancel");
@@ -5218,14 +5226,6 @@ mod tests {
     fn hotkeys_list_groups_with_keys_in_one_column() {
         let rows: Vec<String> = hotkeys_lines().iter().map(text).collect();
         assert_eq!(rows[0], "⚙ hotkeys");
-    #[test]
-    fn done_line_reads_cooked_for_with_the_dim_star() {
-        let item = Item::Done { took: Duration::from_secs(83), usage: Usage { input: 1200, output: 300, ..Usage::default() }, total: Duration::from_secs(600) };
-        let line = &render_item(&item, 80, false)[0];
-        assert!(text(line).starts_with(" ✧ Cooked for 1m 23s (↑"), "{}", text(line));
-        assert_eq!(line[1].style, DIM);
-    }
-
         assert_eq!(rows[1], "  Send");
         assert!(rows[2].starts_with("    Enter  "), "{rows:?}");
         let column = |row: &String| row.trim_start().len() - row.trim_start().split("  ").skip(1).collect::<Vec<_>>().join("  ").trim_start().len();
