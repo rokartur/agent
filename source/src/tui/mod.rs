@@ -17,7 +17,7 @@ use crossterm::event::{
 use crossterm::execute;
 use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
 use serde_json::{Value, json};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{Stdout, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -3984,8 +3984,11 @@ fn matching_accounts(accounts: Vec<AccountView>, query: &str) -> Vec<AccountView
     panel::search(accounts, query, |a| format!("{} {}", a.name, a.provider))
 }
 
+/// The prompts in scope that match `query`, each repeated prompt once at its best-ranked place.
 fn matching_prompts<'a>(entries: &'a [history::Entry], query: &str, in_scope: impl Fn(&history::Entry) -> bool) -> Vec<&'a str> {
-    panel::search(entries.iter().filter(|entry| in_scope(entry)), query, |entry| entry.prompt.clone()).into_iter().map(|entry| entry.prompt.as_str()).collect()
+    let mut seen = HashSet::new();
+    let matches = panel::search(entries.iter().filter(|entry| in_scope(entry)), query, |entry| entry.prompt.clone());
+    matches.into_iter().map(|entry| entry.prompt.as_str()).filter(|prompt| seen.insert(*prompt)).collect()
 }
 
 /// "+3 -1" for the /changes rows.
@@ -5072,6 +5075,14 @@ mod tests {
     fn bracketed_notice_prefix_becomes_the_source() {
         assert_eq!(notice_source("[lsp] Cannot read a.rs"), ("lsp", "Cannot read a.rs"));
         assert_eq!(notice_source("Operation aborted"), ("agent", "Operation aborted"));
+    }
+
+    #[test]
+    fn history_lists_a_repeated_prompt_once() {
+        let entry = |prompt: &str| history::Entry { prompt: prompt.into(), cwd: "/repo".into(), session: "s1".into() };
+        let entries = [entry("commits push pr merge"), entry("commits i push"), entry("commits push pr merge")];
+        assert_eq!(matching_prompts(&entries, "commits", |_| true), ["commits push pr merge", "commits i push"]);
+        assert_eq!(matching_prompts(&entries, "", |_| true), ["commits push pr merge", "commits i push"]);
     }
 
     #[test]
