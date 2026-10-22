@@ -37,11 +37,7 @@ pub fn file_read(command: &str) -> Option<Value> {
 /// Session logs had three of these for every pure read, so the reads came back without anchors.
 fn mixed_read(command: &str) -> Option<String> {
     // In a heredoc or an unbalanced quote, `;` and newlines are not command separators.
-    let quotes_balanced = command
-        .replace("&&", ";")
-        .replace('\n', ";")
-        .split(';')
-        .all(|segment| segment.matches('"').count() % 2 == 0 && segment.matches('\'').count() % 2 == 0);
+    let quotes_balanced = command.replace("&&", ";").replace('\n', ";").split(';').all(|segment| segment.matches('"').count() % 2 == 0 && segment.matches('\'').count() % 2 == 0);
     if command.contains("<<") || !quotes_balanced {
         return None;
     }
