@@ -125,6 +125,12 @@ pub enum Event {
         id: String,
         path: Option<String>,
     },
+    /// The session moved to a new session started in `cwd`.
+    Moved {
+        id: String,
+        path: Option<String>,
+        cwd: PathBuf,
+    },
     /// The session's `project｜topic` name, saved to `session_info`.
     Titled(String),
     /// Ask mode: the agent waits for one Decision on `reply`.
@@ -327,7 +333,13 @@ impl Agent {
         let id = format!("user-bash-{}", now_ms());
         let input = json!({"command": command});
         emit(Event::ToolStart { id: id.clone(), name: "Bash".into(), input: input.clone() });
-        let (output, is_error) = tools::run("Bash", &input, &self.cwd, &mut self.anchors, &Rtk::OFF, &self.abort);
+        let (output, is_error) = match tools::cd_target(command) {
+            Some(dir) => match self.cd(dir, emit) {
+                Ok(text) => (text, false),
+                Err(text) => (text, true),
+            },
+            None => tools::run("Bash", &input, &self.cwd, &mut self.anchors, &Rtk::OFF, &self.abort),
+        };
         if keep {
             self.shell_context.push(format!("Ran `{command}`\n```\n{}\n```", output.trim_end()));
         }
@@ -999,6 +1011,19 @@ impl Agent {
     /// A file another session edits while this call runs still counts as this session's.
     fn run_tool_with_checkpoint(&mut self, name: &str, input: &Value, targets: &[PathBuf], user_request: &str, emit: &mut dyn FnMut(Event)) -> Result<(String, bool), String> {
         const CHANGES_FILES: [&str; 6] = ["Write", "ReplaceLines", "Edit", "InsertLines", "Bash", "Agent"];
+        // Before the snapshot: the move swaps the snapshot repo, so before and after would come from different checkouts.
+        if name == "Bash"
+            && let Some(dir) = tools::cd_target(input["command"].as_str().unwrap_or_default())
+        {
+            // The auto reviewer trusts calls inside the working directory, so moving it is a call to review.
+            if let Some(reason) = self.check_permission(name, input, targets, user_request, emit) {
+                return Ok((reason, true));
+            }
+            return Ok(match self.cd(dir, emit) {
+                Ok(text) => (text, false),
+                Err(text) => (text, true),
+            });
+        }
         let Some(snapshots) = self.snapshots.as_ref().filter(|_| CHANGES_FILES.contains(&name)) else {
             return Ok(self.run_tool(name, input, targets, user_request, emit));
         };
@@ -1146,8 +1171,25 @@ impl Agent {
         self.session.append(&json!({"type": "extra_dirs", "dirs": self.extra_dirs}))
     }
 
-    /// /worktree: pi pins a session to its cwd, so the history moves to a new session started in `cwd`.
-    pub fn move_to(&mut self, cwd: PathBuf) -> Result<(), String> {
+    /// `cd DIR` typed after `!` or sent as the model's whole Bash command: the session moves to DIR, like /worktree.
+    fn cd(&mut self, dir: &str, emit: &mut dyn FnMut(Event)) -> Result<String, String> {
+        let typed = match dir.strip_prefix('~') {
+            Some(rest) if rest.is_empty() || rest.starts_with('/') => self.home.join(rest.trim_start_matches('/')),
+            _ => self.cwd.join(dir),
+        };
+        let dir = typed.canonicalize().map_err(|e| format!("Cannot open {dir}: {e}"))?;
+        if !dir.is_dir() {
+            return Err(format!("{} is not a directory.", dir.display()));
+        }
+        if dir == self.cwd {
+            return Ok(format!("Already in {}.", dir.display()));
+        }
+        self.move_to(dir.clone(), emit)?;
+        Ok(format!("Session moved to {}; later commands and relative paths start there.", dir.display()))
+    }
+
+    /// /worktree and `cd`: pi pins a session to its cwd, so the history moves to a new session started in `cwd`.
+    pub fn move_to(&mut self, cwd: PathBuf, emit: &mut dyn FnMut(Event)) -> Result<(), String> {
         // Everything that can fail runs before the agent changes, so an error leaves it in the old checkout.
         let settings = crate::settings::load(&self.home)?;
         let session = self.copy_session(&cwd)?;
@@ -1163,9 +1205,10 @@ impl Agent {
         if self.snapshots.is_some() {
             self.snapshots = Snapshots::open(&self.home, &cwd);
         }
-        self.cwd = cwd;
+        self.cwd = cwd.clone();
         self.session = session;
         self.announce_session();
+        emit(Event::Moved { id: self.session.id.clone(), path: self.session.display_path(), cwd });
         Ok(())
     }
 

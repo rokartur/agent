@@ -67,7 +67,7 @@
   },
   {
     "name": "Bash",
-    "description": "Run a bash command in the cwd, stderr merged into stdout, no stdin. Output keeps the last 2000 lines or 24KB (50KB with rtk off); a truncated run names its full log. With `run_in_background: true` it returns a task id at once and its final output arrives as a message when it exits; max 8 at once, killed when the agent exits.",
+    "description": "Run a bash command in the cwd, stderr merged into stdout, no stdin. A command that is only `cd DIR` moves the session to DIR, so later calls run there. Output keeps the last 2000 lines or 24KB (50KB with rtk off); a truncated run names its full log. With `run_in_background: true` it returns a task id at once and its final output arrives as a message when it exits; max 8 at once, killed when the agent exits.",
     "eager_input_streaming": true,
     "input_schema": {
       "type": "object",

@@ -93,11 +93,6 @@ enum Msg {
     },
     BtwDelta(String),
     BtwDone(Result<(), String>),
-    Moved {
-        id: String,
-        path: Option<String>,
-        cwd: PathBuf,
-    },
     Cloned {
         id: String,
         path: Option<String>,
@@ -789,14 +784,11 @@ fn spawn_worker(mut agent: Agent, mut settings: Settings, model_lists: JoinHandl
                     }
                     Err(error) => Err(error),
                 },
-                Command::Worktree(cwd) => match agent.move_to(cwd.clone()) {
-                    Ok(()) => {
-                        let path = agent.session.display_path();
-                        let _ = events.send(Msg::Moved { id: agent.session.id.clone(), path, cwd });
-                        continue;
-                    }
-                    Err(error) => Err(error),
-                },
+                Command::Worktree(cwd) => agent
+                    .move_to(cwd, &mut |event| {
+                        let _ = events.send(Msg::Agent(event));
+                    })
+                    .map(|()| String::new()),
                 Command::Clone => match agent.clone_session() {
                     Ok(()) => {
                         let path = agent.session.display_path();
@@ -1319,15 +1311,6 @@ impl App {
                     btw.streaming = false;
                     btw.error = result.err();
                 }
-            }
-            Msg::Moved { id, path, cwd } => {
-                self.working = None;
-                self.system("worktree", format!("Session moved from {} to {}", self.cwd.display(), cwd.display()));
-                report_cwd(&cwd);
-                self.git = git_info(&cwd);
-                self.cwd = cwd;
-                self.session_id = id;
-                self.session_path = path;
             }
             Msg::Cloned { id, path } => {
                 self.working = None;
@@ -3540,6 +3523,14 @@ impl App {
                 self.spent = Spent::default();
                 self.session_usage = Vec::new();
                 self.system("session", "Started a fresh conversation");
+            }
+            Event::Moved { id, path, cwd } => {
+                self.system("session", format!("Session moved from {} to {}", self.cwd.display(), cwd.display()));
+                report_cwd(&cwd);
+                self.git = git_info(&cwd);
+                self.cwd = cwd;
+                self.session_id = id;
+                self.session_path = path;
             }
             Event::Permission { request, reply } => {
                 self.notify(&format!("{} {}", request.question, request.detail));

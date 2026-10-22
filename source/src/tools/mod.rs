@@ -61,6 +61,20 @@ pub fn run(name: &str, input: &Value, cwd: &Path, anchors: &mut Anchors, rtk: &R
     }
 }
 
+/// The directory a Bash command that is only `cd DIR` names: that command moves the session instead of running.
+pub fn cd_target(command: &str) -> Option<&str> {
+    let command = command.trim();
+    if command == "cd" {
+        return Some("~");
+    }
+    let arg = command.strip_prefix("cd ")?.trim();
+    let quoted = arg.len() >= 2 && ((arg.starts_with('"') && arg.ends_with('"')) || (arg.starts_with('\'') && arg.ends_with('\'')));
+    let dir = if quoted { &arg[1..arg.len() - 1] } else { arg };
+    // Anything the shell would expand or chain stays a real command.
+    let plain = !dir.is_empty() && dir != "-" && !dir.contains(['$', '`', '\\', '"', '\'', ';', '&', '|', '<', '>', '\n', '*', '?']) && (quoted || !dir.contains(' '));
+    plain.then_some(dir)
+}
+
 enum Killed {
     Timeout,
     Aborted,
@@ -493,6 +507,18 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::sync::Arc;
+
+    #[test]
+    fn only_a_plain_cd_names_a_directory() {
+        let moves = [("cd", "~"), ("cd ../api", "../api"), ("  cd ~/x  ", "~/x"), ("cd \"My Dir\"", "My Dir"), ("cd '/a b'", "/a b")];
+        for (command, dir) in moves {
+            assert_eq!(cd_target(command), Some(dir), "{command}");
+        }
+        let runs = ["cd x && ls", "cd x; ls", "cd $HOME", "cd -", "cd a b", "cd My\\ Dir", "cd *", "cdx", "ls", "cd x\nls", "cd \"x"];
+        for command in runs {
+            assert_eq!(cd_target(command), None, "{command}");
+        }
+    }
 
     fn run_bash(input: Value, abort: &Arc<AtomicBool>) -> (String, bool) {
         run("Bash", &input, Path::new("/tmp"), &mut Anchors::new("t"), &Rtk::OFF, abort)
