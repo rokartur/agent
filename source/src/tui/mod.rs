@@ -52,6 +52,7 @@ use render::{BRIGHT, Line, MUTED, PLAIN, Screen, Span, Style, line_width, link_a
 use selection::{Point, Selection};
 
 const WORKING: &str = "Working";
+const THINKING: &str = "Thinking";
 const TRANSCRIBING: &str = "Transcribing";
 const LOADING_MODELS: &str = "loading models";
 // Matched whole: an error hint that mentions Ctrl+C must not arm quitting.
@@ -3652,7 +3653,8 @@ impl App {
         if let Some(started) = self.working {
             let tick = (started.elapsed().as_millis() / 80) as usize;
             bottom.push(Vec::new());
-            bottom.push(shimmer_line(WORKING, tick));
+            let thinking = matches!(self.entries.last().map(|e| &e.item), Some(Item::Assistant { text, thinking }) if text.is_empty() && !thinking.is_empty());
+            bottom.push(shimmer_line(if thinking { THINKING } else { WORKING }, tick));
         }
         let queued = self.steering.lock().unwrap().clone();
         for text in &queued {
@@ -4227,7 +4229,8 @@ fn render_item(item: &Item, width: usize, expanded: bool) -> Vec<Line> {
         }
         Item::Tool { name, input, result, .. } => render_tool(name, input, result.as_ref(), width, expanded),
         Item::Done { took, usage, total } => {
-            vec![vec![span(format!(" {} (↑{} ↓{}) total {}", duration(*took), tokens(usage.input), tokens(usage.output), duration(*total)), MUTED)]]
+            let stats = format!(" (↑{} ↓{}) total {}", tokens(usage.input), tokens(usage.output), duration(*total));
+            vec![vec![span(" ", PLAIN), star(usize::MAX), span(format!(" Cooked for {}", duration(*took)), Style::fg(245)), span(stats, MUTED)]]
         }
     }
 }
@@ -5215,6 +5218,14 @@ mod tests {
     fn hotkeys_list_groups_with_keys_in_one_column() {
         let rows: Vec<String> = hotkeys_lines().iter().map(text).collect();
         assert_eq!(rows[0], "⚙ hotkeys");
+    #[test]
+    fn done_line_reads_cooked_for_with_the_dim_star() {
+        let item = Item::Done { took: Duration::from_secs(83), usage: Usage { input: 1200, output: 300, ..Usage::default() }, total: Duration::from_secs(600) };
+        let line = &render_item(&item, 80, false)[0];
+        assert!(text(line).starts_with(" ✧ Cooked for 1m 23s (↑"), "{}", text(line));
+        assert_eq!(line[1].style, DIM);
+    }
+
         assert_eq!(rows[1], "  Send");
         assert!(rows[2].starts_with("    Enter  "), "{rows:?}");
         let column = |row: &String| row.trim_start().len() - row.trim_start().split("  ").skip(1).collect::<Vec<_>>().join("  ").trim_start().len();
