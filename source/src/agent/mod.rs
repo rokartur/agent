@@ -86,6 +86,7 @@ pub const ABORTED: &str = "Operation aborted";
 const TOOL_RESULT_SUMMARY_CHARS: usize = 2000;
 const COMPACT_MAX_TOKENS: u64 = 128_000;
 const SNAPSHOT_FAILED: &str = "File snapshot failed, a rewind will not restore files from this tool call";
+const BG_WAIT_SUBAGENTS_ONLY: &str = "TaskWait waits for subagents only. A background Bash task (bt-N) reports its exit as a message: keep working or end the turn, or peek with TaskOutput.";
 const NAMING_SYSTEM: &str =
     "Name a coding session from the user's first message. Reply with the name only: 3 to 6 words naming the concrete task, in the language of the message, one line, no quotes, no markdown.";
 const NAMING_PROMPT_CHARS: usize = 2000;
@@ -716,14 +717,14 @@ impl Agent {
                     .iter()
                     .map(|id| {
                         let id = id.as_str().unwrap_or_default();
-                        subagents.list.iter().find(|r| r.id == id && r.background).cloned().ok_or_else(|| format!("No background subagent {id}."))
+                        subagents.list.iter().find(|r| r.id == id && r.background).cloned().ok_or_else(|| format!("No background subagent {id}. {BG_WAIT_SUBAGENTS_ONLY}"))
                     })
                     .collect::<Result<_, _>>()?,
                 None => subagents.list.iter().filter(|r| r.background && r.is_running()).cloned().collect(),
             }
         };
         if runs.is_empty() {
-            return Err("No background subagents are running.".into());
+            return Err(format!("No background subagents are running. {BG_WAIT_SUBAGENTS_ONLY}"));
         }
         let timeout = Duration::from_millis(input["timeout"].as_u64().unwrap_or(600_000).min(86_400_000));
         subagent::wait_background(&runs, timeout, &self.abort, &self.follow_ups)

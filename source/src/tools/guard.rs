@@ -5,10 +5,21 @@ use serde_json::{Value, json};
 const MIN_BLOCKED_SLEEP_SECS: u64 = 15;
 const HEAD_DEFAULT_LINES: u64 = 10;
 
-/// Why bash should not run `command` (a blind sleep), or None when it may run.
+/// Why bash should not run `command` (a blind sleep, a merge that ignores CI), or None when it may run.
 pub fn bash(command: &str) -> Option<String> {
-    blind_sleep(command)
-        .then(|| "No blind sleep. Server: curl -sf --retry 30 --retry-all-errors --retry-delay 1 URL. CI: gh run watch --exit-status, gh pr checks --watch. Long job: Bash run_in_background.".into())
+    if blind_sleep(command) {
+        return Some("No blind sleep. Server: curl -sf --retry 30 --retry-all-errors --retry-delay 1 URL. CI: gh run watch --exit-status, gh pr checks --watch (rerun it when it says no checks reported yet). Long job: Bash run_in_background.".into());
+    }
+    unchecked_merge(command).then(|| "gh pr merge would run whatever gh pr checks returned. Gate it on the exit status: gh pr checks N --watch --fail-fast && gh pr merge N ...".into())
+}
+
+/// `gh pr merge` reached from `gh pr checks` through `;`, a newline or a pipe, which drop the checks' exit status.
+/// A script that reads `$?` gates the merge itself.
+fn unchecked_merge(command: &str) -> bool {
+    let Some(merge) = command.find("gh pr merge") else { return false };
+    let Some(checks) = command[..merge].rfind("gh pr checks") else { return false };
+    let between = &command[checks..merge];
+    between.contains([';', '\n', '|']) && !between.contains("$?")
 }
 
 /// The `Read` input for a command that only prints files: `cat FILE`, `head [-N] FILE` or `sed -n 'N,Mp' FILE`
@@ -144,6 +155,10 @@ mod tests {
             ("if true; then sleep 60; fi", "gh run watch"),
             ("sleep 60 && echo waiting for deploy", "gh run watch"),
             ("sleep 60; for f in *.log; do wc -l $f; done", "gh run watch"),
+            ("gh pr checks 26 --watch 2>&1 | tail -5; gh pr merge 26 --squash", "&& gh pr merge"),
+            ("gh pr checks 12 --watch; gh pr merge 12 --squash", "&& gh pr merge"),
+            ("gh pr checks 12 --watch\ngh pr merge 12", "&& gh pr merge"),
+            ("gh pr checks 12 --watch || gh pr merge 12", "&& gh pr merge"),
         ];
         for (command, advice) in blocked {
             let reason = bash(command).unwrap_or_else(|| panic!("{command} should be blocked"));
@@ -166,6 +181,9 @@ mod tests {
             "cat a.txt; rm a.txt",
             "echo hi > a.txt; cat a.txt",
             "echo ---",
+            "gh pr checks 5 --watch --fail-fast && gh pr merge 5 --squash --delete-branch",
+            "gh pr checks 13 --watch >/dev/null 2>&1; s=$?; [ $s -eq 0 ] && gh pr merge 13 --squash",
+            "gh pr merge 7 --squash; gh pr checks 8",
         ];
         for command in allowed {
             assert_eq!(bash(command), None, "{command}");
