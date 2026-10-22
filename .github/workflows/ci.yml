@@ -25,6 +25,9 @@ jobs:
       - if: runner.os == 'macOS'
         run: brew install ripgrep fd
       - run: rustup update stable && rustup default stable && rustup component add clippy rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: source
       - run: cargo fmt --check
       - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo test --locked
