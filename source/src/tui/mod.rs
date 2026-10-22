@@ -1107,9 +1107,12 @@ impl App {
         let row = mouse.row as usize;
         self.edge_drag = None;
         if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
-            self.input_selection = Selection::default();
             let (top, rows, _) = self.input_view;
             self.selecting_input = (top..top + rows).contains(&row);
+            // A press inside keeps the selection: `press` needs its last click to count double and triple clicks.
+            if !self.selecting_input {
+                self.input_selection = Selection::default();
+            }
         }
         let wheel = matches!(mouse.kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollDown);
         let (top, rows, _) = self.input_view;
