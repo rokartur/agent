@@ -83,6 +83,8 @@ const SUMMARY_PREFIX: &str = "The conversation history before this point was com
 const SUMMARY_SUFFIX: &str = "\n</summary>";
 /// The result of a tool call or wait that Esc stopped.
 pub const ABORTED: &str = "Operation aborted";
+/// The refused input stays in the context, so "continue" or any retry is refused again.
+const REFUSED: &str = "Stopped: the model refused this request, and every retry will refuse too while it stays in the context. Rewind (Esc Esc) to before the message that caused it, or start a new session. A screenshot of the model's own reasoning is a known cause.";
 const TOOL_RESULT_SUMMARY_CHARS: usize = 2000;
 const COMPACT_MAX_TOKENS: u64 = 128_000;
 const SNAPSHOT_FAILED: &str = "File snapshot failed, a rewind will not restore files from this tool call";
@@ -464,8 +466,12 @@ impl Agent {
                 return Ok(answer);
             }
             if calls.is_empty() {
-                if reply.stop_reason == "max_tokens" || reply.stop_reason == "refusal" {
-                    emit(Event::Notice(format!("Stopped: {}", reply.stop_reason)));
+                if reply.stop_reason == "refusal" {
+                    emit(Event::Notice(REFUSED.into()));
+                    return Ok(answer);
+                }
+                if reply.stop_reason == "max_tokens" {
+                    emit(Event::Notice("Stopped: max_tokens".into()));
                     return Ok(answer);
                 }
                 let queued = self.take_queued(emit);
