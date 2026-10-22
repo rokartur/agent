@@ -3580,6 +3580,8 @@ impl App {
                 self.session_path = path;
                 self.spent = Spent::default();
                 self.session_usage = Vec::new();
+                // An empty OSC 0 hands the title back to the terminal's default until the new session is named.
+                set_terminal_title("");
                 self.system("session", "Started a fresh conversation");
             }
             Event::Moved { id, path, cwd } => {
