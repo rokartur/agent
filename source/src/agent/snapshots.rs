@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::fmt::Write as _;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -14,6 +15,8 @@ pub struct Snapshots {
     index: PathBuf,
     /// The project's `.git/info/exclude`; `git add` with our git dir would read our own instead.
     exclude: PathBuf,
+    /// The ref this process wrote last.
+    last_ref: RefCell<String>,
 }
 
 impl Snapshots {
@@ -28,7 +31,7 @@ impl Snapshots {
         let spills = crate::tools::spill_dir();
         crate::process::private_dir(&spills).ok()?;
         let index = spills.join("snapshot.index");
-        let snapshots = Snapshots { git_dir, work_tree, index, exclude };
+        let snapshots = Snapshots { git_dir, work_tree, index, exclude, last_ref: RefCell::default() };
         if snapshots.git_dir.exists() {
             // Only costs disk space when it fails, so it never turns snapshots off.
             let _ = snapshots.expire();
@@ -54,9 +57,15 @@ impl Snapshots {
         self.copy_exclude()?;
         self.git(&["add", "-A"])?;
         let tree = self.git(&["write-tree"])?;
-        self.git(&["update-ref", &format!("refs/snapshots/{}/{tree}", today()), &tree])?;
+        let tree_ref = format!("refs/snapshots/{}/{tree}", today());
+        // Most tool calls change nothing: the ref already exists and no new objects need a gc check.
+        if *self.last_ref.borrow() == tree_ref {
+            return Ok(tree);
+        }
+        self.git(&["update-ref", &tree_ref, &tree])?;
         // add and write-tree never start auto gc; it checks a count, and packs in the background.
         self.git(&["gc", "--auto", "--quiet"])?;
+        *self.last_ref.borrow_mut() = tree_ref;
         Ok(tree)
     }
 
