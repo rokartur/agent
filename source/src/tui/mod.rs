@@ -3653,8 +3653,7 @@ impl App {
         if let Some(started) = self.working {
             let tick = (started.elapsed().as_millis() / 80) as usize;
             bottom.push(Vec::new());
-            let thinking = matches!(self.entries.last().map(|e| &e.item), Some(Item::Assistant { text, thinking }) if text.is_empty() && !thinking.is_empty());
-            bottom.push(shimmer_line(if thinking { THINKING } else { WORKING }, tick));
+            bottom.push(shimmer_line(working_label(self.entries.last().map(|e| &e.item)), tick));
         }
         let queued = self.steering.lock().unwrap().clone();
         for text in &queued {
@@ -5055,6 +5054,14 @@ fn age(time: SystemTime) -> String {
     }
 }
 
+/// Thinking only while reasoning streams, before the answer text or a tool call starts.
+fn working_label(last: Option<&Item>) -> &'static str {
+    match last {
+        Some(Item::Assistant { text, thinking }) if text.is_empty() && !thinking.is_empty() => THINKING,
+        _ => WORKING,
+    }
+}
+
 fn shimmer_line(label: &str, tick: usize) -> Line {
     let head = (tick % (label.len() + 10)) as isize - 3;
     let level = |column: usize| match (column as isize - head).unsigned_abs() {
@@ -5196,6 +5203,15 @@ mod tests {
         assert_eq!(text(&later), " ✧ Working");
         assert_eq!(later[1].style, DIM);
         assert_eq!(later[3 + 5].style, Style::fg(255));
+    }
+
+    #[test]
+    fn working_label_says_thinking_only_before_the_answer_starts() {
+        let assistant = |text: &str, thinking: &str| Item::Assistant { text: text.into(), thinking: thinking.into() };
+        assert_eq!(working_label(Some(&assistant("", "hm"))), THINKING);
+        assert_eq!(working_label(Some(&assistant("ok", "hm"))), WORKING);
+        assert_eq!(working_label(Some(&assistant("", ""))), WORKING);
+        assert_eq!(working_label(None), WORKING);
     }
 
     #[test]
