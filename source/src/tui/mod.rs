@@ -207,7 +207,7 @@ enum Panel {
         data: Value,
         index: usize,
     },
-    /// The agent rows under the footer: `row` 0 is main, then each running subagent in list order.
+    /// The rows under the footer: `row` 0 is main, 1 the shells pill while shells run, then each running subagent.
     Agents {
         row: usize,
     },
@@ -403,6 +403,7 @@ const BUILTIN_COMMANDS: &[(&str, MidTurn, &str)] = &[
 ];
 const MENU_ROWS: [usize; 5] = [4, 6, 8, 10, 12];
 const PANEL_ROWS: usize = 8;
+const TASK_NAME_WIDTH: usize = 48;
 const PLAN_OPTIONS: [&str; 3] = ["Start fresh and implement", "Export to a _PLAN.md file", "Keep planning"];
 const PLAN_FRESH_ROWS: [&str; 3] = ["Model", "Effort", "Start"];
 const EDITOR_ROWS: usize = 10;
@@ -479,7 +480,7 @@ const HOTKEYS: [(&str, &[(&str, &str)]); 4] = [
             ("Ctrl+P", "cycle models listed in cycle_models"),
             ("PageUp, PageDown", "scroll the transcript"),
             (if cfg!(target_os = "macos") { "Option+Down" } else { "Alt+Down" }, "jump to the latest message"),
-            ("Down", "walk the running subagents, Enter opens one (empty editor)"),
+            ("Down", "walk the shells pill and running subagents, Enter opens one (empty editor)"),
         ],
     ),
     ("Stop", &[("Esc", "abort the running turn"), ("Esc Esc", "rewind to an earlier prompt and its files (idle)"), ("Ctrl+C Ctrl+C", "quit"), ("Ctrl+D", "quit on an empty editor")]),
@@ -1533,7 +1534,7 @@ impl App {
             KeyCode::PageUp => self.scroll += self.transcript_view.0.max(1),
             KeyCode::PageDown => self.scroll = self.scroll.saturating_sub(self.transcript_view.0.max(1)),
             KeyCode::Up => self.editor.up(self.editor_width),
-            KeyCode::Down if self.editor.is_empty() && self.subagents.lock().unwrap().running() > 0 => {
+            KeyCode::Down if self.editor.is_empty() && (self.subagents.lock().unwrap().running() > 0 || self.terminals.lock().unwrap().running() > 0) => {
                 self.panel = Some(Panel::Agents { row: 1 });
             }
             KeyCode::Down => self.editor.down(self.editor_width),
@@ -2362,13 +2363,24 @@ impl App {
             Some(Panel::Agents { row }) => {
                 let list = self.subagents.lock().unwrap().list.clone();
                 let running: Vec<usize> = (0..list.len()).filter(|&index| list[index].is_running()).collect();
-                let selected = (*row).min(running.len());
+                let pill = self.terminals.lock().unwrap().running() > 0;
+                let first_run = 1 + usize::from(pill);
+                let selected = (*row).min(usize::from(pill) + running.len());
+                let run = selected.checked_sub(first_run).map(|offset| running[offset]);
                 match code {
                     KeyCode::Up if selected > 0 => *row = selected - 1,
-                    KeyCode::Down => *row = (selected + 1).min(running.len()),
-                    KeyCode::Char('x') if selected > 0 => list[running[selected - 1]].stop(),
-                    KeyCode::Enter if selected > 0 => self.panel = Some(Panel::Subagent { index: running[selected - 1], scroll: 0, loaded: None, lines: Vec::new() }),
-                    KeyCode::Up | KeyCode::Enter | KeyCode::Esc => self.panel = None,
+                    KeyCode::Down => *row = (selected + 1).min(usize::from(pill) + running.len()),
+                    KeyCode::Char('x') => {
+                        if let Some(index) = run {
+                            list[index].stop();
+                        }
+                    }
+                    KeyCode::Enter => match run {
+                        Some(index) => self.panel = Some(Panel::Subagent { index, scroll: 0, loaded: None, lines: Vec::new() }),
+                        None if pill && selected == 1 => self.open_tasks(),
+                        None => self.panel = None,
+                    },
+                    KeyCode::Up | KeyCode::Esc => self.panel = None,
                     _ => {}
                 }
             }
@@ -3674,13 +3686,9 @@ impl App {
             bottom.push(shimmer_line(TRANSCRIBING, (started.elapsed().as_millis() / 80) as usize));
         }
         bottom.extend(todo_lines(&self.todos.lock().unwrap()));
-        let running = self.terminals.lock().unwrap().running();
-        if running > 0 {
-            let noun = if running == 1 { "terminal" } else { "terminals" };
-            bottom.push(vec![span(format!(" {running} background {noun} running • /tasks to view"), DIM)]);
-        }
+        let shells = self.terminals.lock().unwrap().running();
         let runs: Vec<Arc<Run>> = self.subagents.lock().unwrap().list.iter().filter(|run| run.is_running()).cloned().collect();
-        if runs.is_empty() && matches!(self.panel, Some(Panel::Agents { .. })) {
+        if shells == 0 && runs.is_empty() && matches!(self.panel, Some(Panel::Agents { .. })) {
             self.panel = None;
         }
         let mut panel_cursor = None;
@@ -3714,13 +3722,11 @@ impl App {
         let cursor = panel_cursor.unwrap_or((cursor_x, editor_top + cursor_row - self.input_top));
         bottom.push(Vec::new());
         bottom.extend(self.footer(width));
-        if !runs.is_empty() {
-            let selected = match self.panel {
-                Some(Panel::Agents { row }) => Some(row.min(runs.len())),
-                _ => None,
-            };
-            bottom.extend(agent_rows(&runs, &self.client.catalog(), selected));
-        }
+        let focus = match self.panel {
+            Some(Panel::Agents { row }) => Some(row.min(usize::from(shells > 0) + runs.len())),
+            _ => None,
+        };
+        bottom.extend(background_rows(shells, &runs, focus, width));
 
         let room = height.saturating_sub(bottom.len());
         // The last column is kept for the scrollbar so text does not rewrap when it appears.
@@ -4768,31 +4774,37 @@ fn thinking_style(level: &str) -> Style {
     Style::rgb(gray * 0x010101)
 }
 
-/// /tasks: a "Shells" and a "Local agents" section; each agent row adds model, effort, time and output tokens in dim columns.
-/// Main, then the running subagents, as in Claude Code; `selected` is the row walked to with ↓, None while typing.
-fn agent_rows(runs: &[Arc<Run>], catalog: &[Model], selected: Option<usize>) -> Vec<Line> {
-    let name_width = runs.iter().map(|run| width(&run.label)).max().unwrap_or(0);
-    let model_names: Vec<String> = runs.iter().map(|run| model_name(catalog, &run.model)).collect();
-    let model_width = model_names.iter().map(|name| width(name)).max().unwrap_or(0);
-    let thinking_width = runs.iter().map(|run| width(&run.thinking)).max().unwrap_or(0);
-    let marker = |row: usize| if selected.unwrap_or(0) == row { ("● ", BRIGHT.bold()) } else { ("○ ", PLAIN) };
-    let hint = if selected.is_some() { "   ↑↓ select · enter view · x stop · esc back" } else { "   ↓ to manage agents" };
-    let (glyph, style) = marker(0);
-    let mut rows = vec![Vec::new(), vec![span(glyph, style), span("main", style), span(hint, DIM)]];
+/// The rows under the footer, as in Claude Code: a shells pill, then main and the running subagents.
+/// `focus` is the row walked to with ↓ (1 is the pill when shells run), None while typing.
+fn background_rows(shells: usize, runs: &[Arc<Run>], focus: Option<usize>, columns: usize) -> Vec<Line> {
+    let mut rows = Vec::new();
+    if shells > 0 {
+        let focused = focus == Some(1);
+        let noun = if shells == 1 { "shell" } else { "shells" };
+        let (style, hint) = if focused { (Style::fg(16).on(80), " · Enter to view tasks") } else { (Style::fg(80), " · ↓ to view tasks") };
+        rows.push(vec![span(format!("{shells} {noun}"), style), span(hint, DIM)]);
+    }
+    if runs.is_empty() {
+        return rows;
+    }
+    let first_run = if shells > 0 { 2 } else { 1 };
+    let selected_run = focus.and_then(|row| row.checked_sub(first_run));
+    let main_style = if selected_run.is_none() { BRIGHT.bold() } else { PLAIN };
+    let main_glyph = if selected_run.is_none() { "● " } else { "○ " };
+    let mut main = vec![span(main_glyph, main_style), span("main", main_style)];
+    if selected_run.is_some() {
+        main.push(span("   ↑↓ select · Enter view · x stop · Esc back", DIM));
+    }
+    rows.extend([Vec::new(), main]);
     for (offset, run) in runs.iter().enumerate() {
         let elapsed = duration(run.elapsed());
         let state = run.state.lock().unwrap();
         let activity = if state.last_tool.is_empty() { "starting" } else { &state.last_tool };
         let tokens = if state.usage.output == 0 { String::new() } else { format!(" · ↓ {} tokens", usage::tokens(state.usage.output)) };
-        let (glyph, style) = marker(offset + 1);
-        rows.push(vec![
-            span(glyph, style),
-            span(format!("{}{}", run.label, " ".repeat(name_width - width(&run.label))), style),
-            span(format!("  {}{} ", model_names[offset], " ".repeat(model_width - width(&model_names[offset]))), DIM),
-            span(format!("{}{}", run.thinking, " ".repeat(thinking_width - width(&run.thinking))), thinking_style(&run.thinking)),
-            span(format!("  {activity}  "), MUTED),
-            span(format!("{elapsed} · {} tools{tokens}", state.tool_calls), DIM),
-        ]);
+        let (glyph, style) = if selected_run == Some(offset) { ("● ", BRIGHT.bold()) } else { ("○ ", PLAIN) };
+        let left = vec![span(glyph, style), span(&run.label, style), span(format!("  {activity}"), MUTED)];
+        let right = vec![span(format!("{elapsed} · {} tools{tokens}", state.tool_calls), DIM)];
+        rows.push(truncate(&spread(left, right, columns), columns));
     }
     rows
 }
@@ -4802,82 +4814,73 @@ fn model_name(catalog: &[Model], id: &str) -> String {
     catalog.iter().find(|model| model.id == id).map_or(id.to_string(), models::short_name)
 }
 
+/// /tasks, as in Claude Code: a "Shells" and a "Local agents" section, each row with its status.
 fn tasks_panel(terminals: &[Arc<Terminal>], runs: &[Arc<Run>], catalog: &[Model], selected: usize, columns: usize) -> Vec<Line> {
-    let mut total = Usage::default();
-    for run in runs {
-        total.add(run.state.lock().unwrap().usage);
+    let active_shells = terminals.iter().filter(|t| t.status() == TerminalStatus::Running).count();
+    let active_agents = runs.iter().filter(|run| run.is_running()).count();
+    let mut counts = Vec::new();
+    if active_shells > 0 {
+        counts.push(format!("{active_shells} active {}", if active_shells == 1 { "shell" } else { "shells" }));
     }
-    let mut title = vec![span("Background tasks", BRIGHT.bold())];
-    if total != Usage::default() {
-        title.push(span(format!("  {}", usage::brief(total)), DIM));
+    if active_agents > 0 {
+        counts.push(format!("{active_agents} active {}", if active_agents == 1 { "agent" } else { "agents" }));
     }
-    let name_width = terminals.iter().map(|t| width(&t.title)).chain(runs.iter().map(|run| width(&run.label))).max().unwrap_or(0);
-    let model_names: Vec<String> = runs.iter().map(|run| model_name(catalog, &run.model)).collect();
-    let model_width = model_names.iter().map(|name| width(name)).max().unwrap_or(0);
-    let thinking_width = runs.iter().map(|run| width(&run.thinking)).max().unwrap_or(0);
-    // Shell times line up under the agent times.
-    let meta_width = if runs.is_empty() { 0 } else { model_width + thinking_width + 3 };
-    let pad = |text: &str, to: usize| format!("{text}{}", " ".repeat(to - width(text)));
-    let name_style = |index: usize, running: bool| {
-        if index == selected {
-            BRIGHT.bold()
+    let summary = if counts.is_empty() { "nothing running".to_string() } else { counts.join(" · ") };
+    let name_width = terminals.iter().map(|t| width(&t.title)).chain(runs.iter().map(|run| width(&run.label))).max().unwrap_or(0).min(TASK_NAME_WIDTH);
+    let name = |text: &str, index: usize, running: bool| {
+        let style = if index == selected {
+            SYSTEM
         } else if running {
-            BRIGHT
+            PLAIN
         } else {
             MUTED
-        }
+        };
+        let cell = truncate(&vec![span(text, style)], name_width);
+        let gap = name_width - line_width(&cell) + 3;
+        [cell, vec![span(" ".repeat(gap), PLAIN)]].concat()
     };
     let mut rows: Vec<(Option<usize>, Line)> = Vec::new();
     if !terminals.is_empty() {
-        rows.push((None, vec![span("Shells", BRIGHT.bold()), span(format!(" ({})", terminals.len()), DIM)]));
+        rows.push((None, vec![span("Shells", MUTED.bold()), span(format!(" ({})", terminals.len()), DIM)]));
     }
     for (index, terminal) in terminals.iter().enumerate() {
         let status = terminal.status();
         let dot = match status {
-            TerminalStatus::Running => SYSTEM,
+            TerminalStatus::Running | TerminalStatus::Killed => MUTED,
             TerminalStatus::Done => OK,
             TerminalStatus::Failed => ERROR,
-            TerminalStatus::Killed => MUTED,
         };
-        let running = status == TerminalStatus::Running;
-        rows.push((Some(index), vec![span("● ", dot), span(pad(&terminal.title, name_width), name_style(index, running)), span(format!("  {}{}", " ".repeat(meta_width), terminal.elapsed()), DIM)]));
+        let mut row = vec![span("● ", dot)];
+        row.extend(name(&terminal.title, index, status == TerminalStatus::Running));
+        row.push(span(status.as_str(), DIM));
+        rows.push((Some(index), row));
     }
     if !runs.is_empty() {
         if !rows.is_empty() {
             rows.push((None, Vec::new()));
         }
-        rows.push((None, vec![span("Local agents", BRIGHT.bold()), span(format!(" ({})", runs.len()), DIM)]));
+        rows.push((None, vec![span("Local agents", MUTED.bold()), span(format!(" ({})", runs.len()), DIM)]));
     }
     for (offset, run) in runs.iter().enumerate() {
         let index = terminals.len() + offset;
-        let elapsed = duration(run.elapsed());
-        let state = run.state.lock().unwrap();
-        let dot = match state.result {
-            None => SYSTEM,
-            Some(Ok(_)) => OK,
-            Some(Err(_)) => ERROR,
+        let (status, dot) = match run.state.lock().unwrap().result {
+            None => ("running", MUTED),
+            Some(Ok(_)) => ("done", OK),
+            Some(Err(_)) => ("failed", ERROR),
         };
-        let tokens = if state.usage.output == 0 { String::new() } else { format!("↓{}", usage::tokens(state.usage.output)) };
-        rows.push((
-            Some(index),
-            vec![
-                span("● ", dot),
-                span(pad(&run.label, name_width), name_style(index, state.result.is_none())),
-                span(format!("  {} ", pad(&model_names[offset], model_width)), DIM),
-                span(pad(&run.thinking, thinking_width), thinking_style(&run.thinking)),
-                span(format!("  {elapsed:<8} {tokens}"), DIM),
-            ],
-        ));
+        let mut row = vec![span("● ", dot)];
+        row.extend(name(&run.label, index, status == "running"));
+        row.push(span(format!("{status} · {} {}", model_name(catalog, &run.model), run.thinking), DIM));
+        rows.push((Some(index), row));
     }
     let shown = PANEL_ROWS + 3;
     let selected_row = rows.iter().position(|(index, _)| *index == Some(selected)).unwrap_or(0);
     let first = (selected_row + 1).saturating_sub(shown);
-    let mut lines = vec![Vec::new(), title, Vec::new()];
+    let mut lines = vec![Vec::new(), vec![span("Background", SYSTEM.bold())], vec![span(summary, MUTED)], Vec::new()];
     for (index, row) in rows.iter().skip(first).take(shown) {
         let marker = match index {
-            Some(index) if *index == selected => span("❯ ", OK),
-            Some(_) => span("  ", PLAIN),
-            None => span("", PLAIN),
+            Some(index) if *index == selected => span("❯ ", SYSTEM),
+            _ => span("  ", PLAIN),
         };
         let mut line = vec![marker];
         line.extend(row.iter().cloned());
@@ -4887,7 +4890,7 @@ fn tasks_panel(terminals: &[Arc<Terminal>], runs: &[Arc<Run>], catalog: &[Model]
     if rows.len() > shown {
         lines.extend([Vec::new(), vec![span(format!("  {}/{len}", selected + 1), DIM)]]);
     }
-    lines.extend([Vec::new(), vec![span("↑/↓ select · enter view · x stop · esc close", MUTED)]]);
+    lines.extend([Vec::new(), vec![span("↑/↓ to select · Enter to view · x to stop · Esc to close", MUTED.italic())]]);
     lines
 }
 
@@ -5155,7 +5158,7 @@ mod tests {
     }
 
     #[test]
-    fn tasks_list_agents_under_a_section_with_dim_model_effort_time_and_tokens() {
+    fn tasks_list_agents_under_a_section_with_status_and_model() {
         use crate::agent::subagent::{RunState, scan_run};
         let done = scan_run();
         *done.state.lock().unwrap() = RunState { elapsed: Some(Duration::from_secs(165)), result: Some(Ok("found".into())), usage: Usage { output: 11_000, ..Usage::default() }, ..Default::default() };
@@ -5163,14 +5166,15 @@ mod tests {
         (running.label, running.model, running.thinking) = ("recon 1a".into(), "claude-sonnet-5".into(), "medium".into());
         let sonnet = Model { provider: "anthropic".into(), id: "claude-sonnet-5".into(), name: "Claude Sonnet 5".into(), context_window: 1, max_tokens: 1, accounts: Vec::new(), price: None };
         let rows: Vec<String> = tasks_panel(&[], &[Arc::new(done), Arc::new(running)], &[sonnet], 1, 80).iter().map(text).collect();
-        assert_eq!(rows[1], "Background tasks  ↑0 ↓11k cache 0");
-        assert_eq!(rows[3], "Local agents (2)");
-        assert_eq!(rows[4], "  ● scan      opus     high    2m 45s   ↓11k");
-        assert_eq!(rows[5], "❯ ● recon 1a  sonnet 5 medium  0s       ");
+        assert_eq!(rows[1..3], ["Background", "1 active agent"]);
+        assert_eq!(rows[4], "  Local agents (2)");
+        assert_eq!(rows[5], "  ● scan       done · opus high");
+        assert_eq!(rows[6], "❯ ● recon 1a   running · sonnet 5 medium");
+        assert_eq!(rows.last().unwrap(), "↑/↓ to select · Enter to view · x to stop · Esc to close");
     }
 
     #[test]
-    fn agent_rows_mark_main_until_down_walks_to_a_running_subagent() {
+    fn background_rows_put_the_shells_pill_before_main_and_the_running_subagents() {
         use crate::agent::subagent::scan_run;
         let run = scan_run();
         {
@@ -5178,12 +5182,17 @@ mod tests {
             (state.tool_calls, state.last_tool) = (3, "Read".into());
         }
         let runs = [Arc::new(run)];
-        let typing: Vec<String> = agent_rows(&runs, &[], None).iter().map(text).collect();
-        assert_eq!(typing[1], "● main   ↓ to manage agents");
-        assert_eq!(typing[2], "○ scan  opus high  Read  0s · 3 tools");
-        let walked: Vec<String> = agent_rows(&runs, &[], Some(1)).iter().map(text).collect();
-        assert_eq!(walked[1], "○ main   ↑↓ select · enter view · x stop · esc back");
-        assert!(walked[2].starts_with("● scan"));
+        let typing: Vec<String> = background_rows(2, &runs, None, 40).iter().map(text).collect();
+        assert_eq!(typing, ["2 shells · ↓ to view tasks", "", "● main", "○ scan  Read                0s · 3 tools"]);
+        let on_pill: Vec<String> = background_rows(2, &runs, Some(1), 40).iter().map(text).collect();
+        assert_eq!(on_pill[0], "2 shells · Enter to view tasks");
+        assert_eq!(on_pill[2], "● main");
+        let on_agent: Vec<String> = background_rows(2, &runs, Some(2), 40).iter().map(text).collect();
+        assert_eq!(on_agent[2], "○ main   ↑↓ select · Enter view · x stop · Esc back");
+        assert!(on_agent[3].starts_with("● scan"));
+        let agents_only: Vec<String> = background_rows(0, &runs, Some(1), 40).iter().map(text).collect();
+        assert!(agents_only[2].starts_with("● scan"));
+        assert!(background_rows(0, &[], None, 40).is_empty());
     }
 
     #[test]
