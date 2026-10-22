@@ -1702,8 +1702,8 @@ impl App {
     }
 
     /// None until the model lists load.
-    fn model(&self) -> Option<&Model> {
-        self.client.catalog().iter().find(|m| m.id == self.settings.model)
+    fn model(&self) -> Option<Model> {
+        self.client.catalog().iter().find(|m| m.id == self.settings.model).cloned()
     }
 
     /// Rereads the session file; an unsaved session has none, so its footer shows no cost.
@@ -1713,7 +1713,7 @@ impl App {
 
     /// The settings key of the current model; says so when the model lists are still loading.
     fn loaded_model_key(&mut self) -> Option<String> {
-        let key = self.model().map(model_key);
+        let key = self.model().as_ref().map(model_key);
         if key.is_none() {
             self.system("models", MODELS_STILL_LOADING);
         }
@@ -1721,7 +1721,7 @@ impl App {
     }
 
     fn context_window(&self) -> u64 {
-        self.model().map_or(0, |model| self.settings.context_window(model))
+        self.model().map_or(0, |model| self.settings.context_window(&model))
     }
 
     fn enabled_skills(&self) -> impl Iterator<Item = &Skill> {
@@ -2441,7 +2441,10 @@ impl App {
                             return;
                         }
                         match self.client.remove(&account.provider, &account.name) {
-                            Ok(()) => self.system("logout", format!("Removed {}.", account.name)),
+                            Ok(()) => {
+                                self.system("logout", format!("Removed {}.", account.name));
+                                self.reload_models();
+                            }
                             Err(error) => self.push(Item::Error(error)),
                         }
                     }
@@ -2504,7 +2507,10 @@ impl App {
                 let previous_id = self.client.accounts().into_iter().find(|saved| saved.provider == account.provider && saved.name == name).and_then(|saved| saved.account_id);
                 let account_id = account.account_id().map(String::from);
                 match self.client.add(account) {
-                    Ok(()) => self.system("login", format!("Saved {name}.")),
+                    Ok(()) => {
+                        self.system("login", format!("Saved {name}."));
+                        self.reload_models();
+                    }
                     Err(error) => return self.push(Item::Error(error)),
                 }
                 if let (Some(previous_id), Some(account_id)) = (previous_id, account_id)
@@ -2514,6 +2520,16 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Lists the models again after /login or /logout changed the accounts, so /model shows them without a restart.
+    fn reload_models(&self) {
+        let (client, events) = (self.client.clone(), self.events.clone());
+        std::thread::spawn(move || {
+            for failure in client.load_catalog() {
+                let _ = events.send(Msg::Agent(Event::Notice(format!("Model list failed: {failure}"))));
+            }
+        });
     }
 
     /// /goal: no argument shows the goal, a keyword manages it, anything else sets a new goal and starts on it.
@@ -2686,7 +2702,8 @@ impl App {
             ModelsBack::Settings => Some(Panel::Settings { row, query: Editor::new() }),
             ModelsBack::PlanFresh => Some(Panel::PlanFresh { index: 0 }),
         };
-        let matches = matching_models(self.client.catalog(), &self.settings, row, &query.text());
+        let catalog = self.client.catalog();
+        let matches = matching_models(&catalog, &self.settings, row, &query.text());
         match key.code {
             KeyCode::Esc => self.panel = back,
             KeyCode::Up => *index = index.saturating_sub(1),
@@ -2705,7 +2722,8 @@ impl App {
                     Some(at) => _ = s.pinned_models.remove(at),
                     None => s.pinned_models.push(key.clone()),
                 });
-                let matches = matching_models(self.client.catalog(), &self.settings, row, &query);
+                let catalog = self.client.catalog();
+                let matches = matching_models(&catalog, &self.settings, row, &query);
                 let Some(Panel::Models { index, .. }) = self.panel.as_mut() else { return };
                 *index = matches.iter().position(|m| m.is_some_and(|m| model_key(m) == key)).unwrap_or(0);
             }
@@ -2719,13 +2737,14 @@ impl App {
 
     fn open_context_windows(&mut self) {
         let Some(current) = self.loaded_model_key() else { return };
-        let index = context_window_targets(self.client.catalog(), &self.settings, 1, "").iter().position(|(key, _)| *key == current).unwrap_or(0);
+        let index = context_window_targets(&self.client.catalog(), &self.settings, 1, "").iter().position(|(key, _)| *key == current).unwrap_or(0);
         self.panel = Some(Panel::ContextWindows { tab: 1, query: Editor::new(), index });
     }
 
     fn context_windows_key(&mut self, key: KeyEvent) {
         let Some(Panel::ContextWindows { tab, query, index }) = self.panel.as_mut() else { return };
-        let targets = context_window_targets(self.client.catalog(), &self.settings, *tab, &query.text());
+        let catalog = self.client.catalog();
+        let targets = context_window_targets(&catalog, &self.settings, *tab, &query.text());
         match key.code {
             KeyCode::Esc => self.panel = Some(Panel::Settings { row: CONTEXT_WINDOW_ROW, query: Editor::new() }),
             KeyCode::Tab | KeyCode::BackTab => {
@@ -2855,7 +2874,7 @@ impl App {
     /// The model picker for settings `row`, on the current model when it matches `query`.
     fn open_models(&mut self, row: usize, query: &str, back: ModelsBack) {
         let current = model_setting(&mut self.settings, row).clone();
-        let index = matching_models(self.client.catalog(), &self.settings, row, query).iter().position(|m| m.map_or("", |m| &m.id) == current).unwrap_or(0);
+        let index = matching_models(&self.client.catalog(), &self.settings, row, query).iter().position(|m| m.map_or("", |m| &m.id) == current).unwrap_or(0);
         self.panel = Some(Panel::Models { row, query: Editor::from_text(query), index, back });
     }
 
@@ -2908,6 +2927,7 @@ impl App {
         let reviewer_model = if s.reviewer_model.is_empty() { "auto" } else { &s.reviewer_model };
         let subagent_model = if s.subagent_model.is_empty() { "auto" } else { &s.subagent_model };
         let model = self.model();
+        let model = model.as_ref();
         [
             vec![span(model.map_or(LOADING_MODELS.into(), |m| format!("{} · {}", m.provider, m.id)), BRIGHT.bold())],
             choices(THINKING_LEVELS.map(String::from), &s.thinking),
@@ -2993,7 +3013,7 @@ impl App {
                 view.render(width, PANEL_ROWS)
             }
             Panel::ContextWindows { tab, query, index } => {
-                let rows: Vec<panel::Row> = context_window_targets(self.client.catalog(), &self.settings, *tab, &query.text())
+                let rows: Vec<panel::Row> = context_window_targets(&self.client.catalog(), &self.settings, *tab, &query.text())
                     .into_iter()
                     .map(|(target, model)| {
                         let mut right = choices(CONTEXT_WINDOWS.map(context_window_label), &context_window_label(self.settings.context_windows.get(&target).copied()));
@@ -3029,7 +3049,7 @@ impl App {
                 view.render(width, PANEL_ROWS)
             }
             Panel::Models { row, query, index, .. } => {
-                let rows: Vec<panel::Row> = matching_models(self.client.catalog(), &self.settings, *row, &query.text())
+                let rows: Vec<panel::Row> = matching_models(&self.client.catalog(), &self.settings, *row, &query.text())
                     .into_iter()
                     .map(|m| match m {
                         Some(m) => {
@@ -3071,7 +3091,7 @@ impl App {
             }
             Panel::Ask(ask) => ask.render(width),
             Panel::Agents { .. } => Vec::new(),
-            Panel::Tasks { index } => tasks_panel(&self.terminals.lock().unwrap().list, &self.subagents.lock().unwrap().list, self.client.catalog(), *index, width),
+            Panel::Tasks { index } => tasks_panel(&self.terminals.lock().unwrap().list, &self.subagents.lock().unwrap().list, &self.client.catalog(), *index, width),
             Panel::Todos { index } => {
                 let todos = self.todos.lock().unwrap();
                 let rows: Vec<panel::Row> = todos.visible().map(|t| panel::Row { left: format!("#{} {}", t.id, t.subject), right: vec![span(t.status.as_str(), todo_style(t.status))] }).collect();
@@ -3090,7 +3110,7 @@ impl App {
             Panel::Usage { tab, totals } => {
                 let (rows, selected) = match totals.get(*tab) {
                     Some(totals) => {
-                        let rows = usage_rows(totals, self.client.catalog());
+                        let rows = usage_rows(totals, &self.client.catalog());
                         let total_row = rows.len().saturating_sub(1);
                         (rows, total_row)
                     }
@@ -3665,7 +3685,7 @@ impl App {
                 Some(Panel::Agents { row }) => Some(row.min(runs.len())),
                 _ => None,
             };
-            bottom.extend(agent_rows(&runs, self.client.catalog(), selected));
+            bottom.extend(agent_rows(&runs, &self.client.catalog(), selected));
         }
 
         let room = height.saturating_sub(bottom.len());
@@ -3910,7 +3930,7 @@ impl App {
         {
             right.push(span(format!("{name} "), MUTED));
         }
-        right.push(span(self.model().map_or(LOADING_MODELS.into(), models::short_label), MUTED));
+        right.push(span(self.model().as_ref().map_or(LOADING_MODELS.into(), models::short_label), MUTED));
         right.push(span(" ", PLAIN));
         right.push(span(&self.settings.thinking, thinking_style(&self.settings.thinking)));
         // Fast tiers bill up to 6x, so the footer names the one in use.
@@ -3921,7 +3941,7 @@ impl App {
             right.push(span(format!(" {} {percent}%", tokens(self.context_tokens)), MUTED));
         }
         if self.settings.footer_cost
-            && let Some(cost) = usage::total_cost(&self.session_usage, self.client.catalog())
+            && let Some(cost) = usage::total_cost(&self.session_usage, &self.client.catalog())
         {
             right.push(span(format!(" {}", usage::dollars(cost)), MUTED));
         }

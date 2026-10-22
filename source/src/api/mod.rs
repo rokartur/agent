@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 pub mod accounts;
@@ -39,8 +39,8 @@ pub struct Client {
     anthropic_base: String,
     chatgpt_base: String,
     openrouter_base: String,
-    /// Set once by load_catalog; clones share it.
-    catalog: Arc<OnceLock<Vec<Model>>>,
+    /// Replaced by each load_catalog; clones share it.
+    catalog: Arc<RwLock<Arc<[Model]>>>,
     /// Codex prompt_cache_key; one per process, like pi's session id.
     cache_key: String,
     state: Arc<Mutex<State>>,
@@ -179,13 +179,13 @@ impl Client {
             }
         }
         catalog.extend(models::free_routers(&catalog));
-        assert!(self.catalog.set(catalog).is_ok(), "load_catalog runs once");
+        *self.catalog.write().unwrap() = catalog.into();
         errors
     }
 
     /// Empty until load_catalog finishes.
-    pub fn catalog(&self) -> &[Model] {
-        self.catalog.get().map_or(&[], Vec::as_slice)
+    pub fn catalog(&self) -> Arc<[Model]> {
+        self.catalog.read().unwrap().clone()
     }
 
     /// The models this account can use right now; see models-endpoints.md.
@@ -258,7 +258,7 @@ impl Client {
         let mut attempt = 0;
         loop {
             let model = self.model_of(&request)?;
-            let account = match self.choose(model, fell_back, on_delta)? {
+            let account = match self.choose(&model, fell_back, on_delta)? {
                 Choice::Use(account) => match self.fresh(account.clone()) {
                     Ok(account) => account,
                     // A failed refresh (network, revoked token) moves the request to the next account once, like a quota error.
@@ -274,7 +274,7 @@ impl Client {
                     let provider = &model.provider;
                     let fallback = self.fallback_model(provider).ok_or(format!("Every {provider} account is over its limit and accounts.fallback_model names no other provider's model."))?;
                     on_delta(Delta::Notice(&format!("Switched to {}: every {provider} account is over its limit", fallback.id)));
-                    moved_to(&mut request, fallback);
+                    moved_to(&mut request, &fallback);
                     fell_back = true;
                     continue;
                 }
@@ -318,7 +318,7 @@ impl Client {
                 && let Some(fallback) = self.fallback_model(&model.provider)
             {
                 on_delta(Delta::Notice(&format!("{} Switched to {} for this request.", error.message, fallback.id)));
-                moved_to(&mut request, fallback);
+                moved_to(&mut request, &fallback);
                 fell_back = true;
                 attempt = 0;
                 continue;
@@ -342,9 +342,9 @@ impl Client {
         self.state.lock().unwrap().custom_providers.iter().find(|p| p.name == name).cloned()
     }
 
-    fn model_of(&self, request: &Value) -> Result<&Model, String> {
+    fn model_of(&self, request: &Value) -> Result<Model, String> {
         let id = request["model"].as_str().unwrap_or_default();
-        self.catalog().iter().find(|m| m.id == id).ok_or(format!("Unknown model {id}."))
+        self.catalog().iter().find(|m| m.id == id).cloned().ok_or(format!("Unknown model {id}."))
     }
 
     /// Picks the account for this request and reports a change of account as "Switched to <name>: <reason>".
@@ -362,7 +362,7 @@ impl Client {
             };
             return Err(format!("No {provider} account. Use /login{hint}."));
         }
-        let (accounts, without_access): (Vec<Account>, Vec<Account>) = saved.into_iter().partition(|a| models::serves(self.catalog(), model, &a.name));
+        let (accounts, without_access): (Vec<Account>, Vec<Account>) = saved.into_iter().partition(|a| models::serves(&self.catalog(), model, &a.name));
         if accounts.is_empty() {
             return Err(format!("No {provider} account has access to {}.", model.id));
         }
@@ -464,14 +464,15 @@ impl Client {
     }
 
     /// The model `other-provider` and failover move a request to: `accounts.fallback_model`, or the other provider's default.
-    fn fallback_model(&self, provider: &str) -> Option<&Model> {
+    fn fallback_model(&self, provider: &str) -> Option<Model> {
         let configured = self.state.lock().unwrap().fallback_model.clone();
+        let catalog = self.catalog();
         let model = match configured.as_str() {
-            "" if provider == "anthropic" => self.catalog().iter().find(|m| m.provider == "openai-codex"),
-            "" => self.catalog().iter().find(|m| m.id == "claude-opus-5-5"),
-            id => self.catalog().iter().find(|m| m.id == id),
+            "" if provider == "anthropic" => catalog.iter().find(|m| m.provider == "openai-codex"),
+            "" => catalog.iter().find(|m| m.id == "claude-opus-5-5"),
+            id => catalog.iter().find(|m| m.id == id),
         };
-        model.filter(|m| m.provider != provider)
+        model.filter(|m| m.provider != provider).cloned()
     }
 
     fn try_send(&self, account: &Account, request: &Value, abort: &AtomicBool, on_delta: &mut dyn FnMut(Delta)) -> Result<Reply, ApiError> {
@@ -531,7 +532,7 @@ impl Client {
                     .header("authorization", format!("Bearer {key}"));
                 let mut body = request.clone();
                 // A clef router asks for its first free model; OpenRouter moves to the next on a rate limit or outage.
-                if let Some((first, rest)) = models::free_route(self.catalog(), request["model"].as_str().unwrap_or_default()).split_first() {
+                if let Some((first, rest)) = models::free_route(&self.catalog(), request["model"].as_str().unwrap_or_default()).split_first() {
                     body["model"] = json!(first.id);
                     body["fallbacks"] = rest.iter().map(|m| json!({"model": m.id})).collect();
                 }
@@ -1028,7 +1029,7 @@ mod tests {
         let expired = oauth::Tokens { access: "a".into(), refresh: "r".into(), expires: 0, account_id: None };
         let account = |name: &str| Account { provider: "anthropic".into(), name: name.into(), secret: Secret::OAuth(expired.clone()) };
         client.reload(vec![account("home"), account("work")]);
-        assert!(client.catalog.set(vec![Model { provider: "anthropic".into(), id: "claude".into(), ..Model::default() }]).is_ok());
+        *client.catalog.write().unwrap() = vec![Model { provider: "anthropic".into(), id: "claude".into(), ..Model::default() }].into();
 
         let mut notices = Vec::new();
         let error = client.send(&json!({"model": "claude"}), &AtomicBool::new(false), &mut |delta| {
@@ -1257,8 +1258,28 @@ mod tests {
         std::fs::remove_dir_all(&home).ok();
 
         assert!(errors.is_empty(), "{errors:?}");
-        let same_id: Vec<&str> = client.catalog().iter().filter(|m| m.id == "a/one:free").map(|m| m.provider.as_str()).collect();
+        let catalog = client.catalog();
+        let same_id: Vec<&str> = catalog.iter().filter(|m| m.id == "a/one:free").map(|m| m.provider.as_str()).collect();
         assert_eq!(same_id, ["a"]);
+    }
+
+    #[test]
+    fn loading_the_catalog_again_lists_the_models_of_an_account_added_since() {
+        let home = std::env::temp_dir().join(format!("agent-catalog-reload-{}", std::process::id()));
+        let mut client = Client::new(&home).unwrap();
+        let (base, _) = mock_provider(200, PONG);
+        (client.anthropic_base, client.openrouter_base) = (base.clone(), base);
+        client.reload(Vec::new());
+        client.load_catalog();
+        let has_claude = |client: &Client| client.catalog().iter().any(|m| m.provider == "anthropic" && m.id == "claude-haiku-9");
+        assert!(!has_claude(&client));
+
+        client.reload(vec![Account { provider: "anthropic".into(), name: "work".into(), secret: Secret::ApiKey("sk".into()) }]);
+        let errors = client.load_catalog();
+        std::fs::remove_dir_all(&home).ok();
+
+        assert!(errors.is_empty(), "{errors:?}");
+        assert!(has_claude(&client));
     }
 
     /// An Anthropic account answering `status` on every attempt, with an OpenRouter account and `a/one:free` as `fallback_model`.
@@ -1273,7 +1294,7 @@ mod tests {
             Account { provider: "openrouter".into(), name: "key".into(), secret: Secret::ApiKey("sk".into()) },
         ]);
         let models = vec![Model { provider: "anthropic".into(), id: "claude".into(), ..Model::default() }, Model { provider: "openrouter".into(), id: "a/one:free".into(), ..Model::default() }];
-        assert!(client.catalog.set(models).is_ok());
+        *client.catalog.write().unwrap() = models.into();
         client.state.lock().unwrap().fallback_model = "a/one:free".into();
 
         let mut notices = Vec::new();
@@ -1310,7 +1331,7 @@ mod tests {
         let client = Client::new(&home).unwrap();
         let (base, requests) = mock_provider(200, "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"pong\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n");
         let local = CustomProvider { name: "ollama".into(), base_url: format!("{base}/v1"), api_key_env: String::new(), api: CustomApi::OpenAi, models: Vec::new() };
-        assert!(client.catalog.set(vec![Model { provider: "ollama".into(), id: "ollama/qwen3:8b".into(), ..Model::default() }]).is_ok());
+        *client.catalog.write().unwrap() = vec![Model { provider: "ollama".into(), id: "ollama/qwen3:8b".into(), ..Model::default() }].into();
         client.state.lock().unwrap().custom_providers = vec![local];
 
         let reply = client.send(&plain_request("ollama/qwen3:8b", "Be brief.", "ping", 10), &AtomicBool::new(false), &mut |_| {});
@@ -1328,7 +1349,7 @@ mod tests {
         let client = Client::new(&home).unwrap();
         let (base, requests) = mock_provider(200, PONG);
         let minimax = CustomProvider { name: "minimax".into(), base_url: base, api_key_env: String::new(), api: CustomApi::Anthropic, models: Vec::new() };
-        assert!(client.catalog.set(vec![Model { provider: "minimax".into(), id: "minimax/MiniMax-M2".into(), ..Model::default() }]).is_ok());
+        *client.catalog.write().unwrap() = vec![Model { provider: "minimax".into(), id: "minimax/MiniMax-M2".into(), ..Model::default() }].into();
         client.state.lock().unwrap().custom_providers = vec![minimax];
         let mut request = plain_request("minimax/MiniMax-M2", "Be brief.", "ping", 10);
         request["thinking"] = json!({"type": "adaptive"});
@@ -1351,7 +1372,7 @@ mod tests {
         client.chatgpt_base = base;
         let tokens = oauth::Tokens { access: "a".into(), refresh: "r".into(), expires: u64::MAX, account_id: None };
         client.reload(vec![Account { provider: "openai-codex".into(), name: "pro".into(), secret: Secret::OAuth(tokens) }]);
-        assert!(client.catalog.set(vec![Model { provider: "openai-codex".into(), id: "gpt".into(), ..Model::default() }]).is_ok());
+        *client.catalog.write().unwrap() = vec![Model { provider: "openai-codex".into(), id: "gpt".into(), ..Model::default() }].into();
         let mut request = plain_request("gpt", "Be brief.", "ping", 10);
         request["speed"] = json!("ultrafast");
 

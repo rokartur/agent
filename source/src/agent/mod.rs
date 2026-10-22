@@ -393,7 +393,8 @@ impl Agent {
     /// Sent with every plugin message; see plugins/README.md.
     pub fn plugin_context(&self) -> Value {
         // None when every model list failed at startup.
-        let provider = self.client.catalog().iter().find(|m| m.id == self.model).map(|m| m.provider.as_str());
+        let catalog = self.client.catalog();
+        let provider = catalog.iter().find(|m| m.id == self.model).map(|m| m.provider.as_str());
         let (account_name, account_id) = provider.and_then(|provider| self.client.account(provider)).unzip();
         json!({
             "provider": provider,
@@ -1031,7 +1032,8 @@ impl Agent {
         };
         let prompt = compaction_prompt(&serialize(&view[..first_kept]), focus);
         // The cheap model summarizes only when the conversation fits its window, so a 1M-context session keeps the main model.
-        let cheap = self.client.catalog().iter().find(|model| model.id == self.cheap_model && model.context_window >= self.context_window);
+        let catalog = self.client.catalog();
+        let cheap = catalog.iter().find(|model| model.id == self.cheap_model && model.context_window >= self.context_window);
         let (model, output_limit) = cheap.map_or((self.model.clone(), u64::MAX), |model| (model.id.clone(), model.max_tokens));
         let max_tokens = (self.reserve_tokens * 4 / 5).min(COMPACT_MAX_TOKENS).min(output_limit);
         let request = api::plain_request(&model, SUMMARY_SYSTEM, &prompt, max_tokens);
@@ -1087,7 +1089,7 @@ impl Agent {
         };
         let notice = (model.id != settings.model).then(|| format!("{} is not on any account's model list; using {}.", settings.model, model.id));
         settings.model = model.id.clone();
-        let cheap_model = api::models::small_model(catalog, &model).id.clone();
+        let cheap_model = api::models::small_model(&catalog, &model).id.clone();
         self.apply(settings, &model, &cheap_model);
         Ok(notice)
     }
