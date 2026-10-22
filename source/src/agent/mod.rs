@@ -1546,32 +1546,37 @@ impl Session {
         let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
         let mut sessions = Vec::new();
         for path in entries.filter_map(|e| e.ok()).map(|e| e.path()) {
-            let Some(id) = path.file_name().and_then(|n| n.to_str()).and_then(|n| n.strip_suffix(".jsonl")) else { continue };
-            let Ok(text) = std::fs::read_to_string(&path) else { continue };
-            let Ok(modified) = path.metadata().and_then(|m| m.modified()) else { continue };
-            let mut info = SessionInfo { id: id.to_string(), cwd: String::new(), name: None, title: String::new(), turns: 0, modified };
-            let mut subagent = false;
-            for entry in text.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()) {
-                match entry["type"].as_str() {
-                    Some("session") => info.cwd = entry["cwd"].as_str().unwrap_or_default().to_string(),
-                    Some("session_info") => info.name = entry["name"].as_str().map(String::from),
-                    // Subagent sessions stay out of /resume and --continue; /tasks opens them.
-                    Some("parent") => subagent = true,
-                    Some("message") if entry["message"]["role"] == "user" && entry["message"]["content"][0]["type"] == "text" => {
-                        info.turns += 1;
-                        if info.title.is_empty() {
-                            info.title = entry["message"]["content"][0]["text"].as_str().unwrap_or_default().lines().next().unwrap_or_default().to_string();
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            if info.turns > 0 && !subagent {
+            if let Some(info) = Session::info(&path) {
                 sessions.push(info);
             }
         }
         sessions.sort_by_key(|s| std::cmp::Reverse(s.modified));
         sessions
+    }
+
+    /// One saved session file; None when unreadable, a subagent's, or without a prompt yet.
+    pub fn info(path: &Path) -> Option<SessionInfo> {
+        let id = path.file_name()?.to_str()?.strip_suffix(".jsonl")?;
+        let text = std::fs::read_to_string(path).ok()?;
+        let modified = path.metadata().and_then(|m| m.modified()).ok()?;
+        let mut info = SessionInfo { id: id.to_string(), cwd: String::new(), name: None, title: String::new(), turns: 0, modified };
+        let mut subagent = false;
+        for entry in text.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()) {
+            match entry["type"].as_str() {
+                Some("session") => info.cwd = entry["cwd"].as_str().unwrap_or_default().to_string(),
+                Some("session_info") => info.name = entry["name"].as_str().map(String::from),
+                // Subagent sessions stay out of /resume and --continue; /tasks opens them.
+                Some("parent") => subagent = true,
+                Some("message") if entry["message"]["role"] == "user" && entry["message"]["content"][0]["type"] == "text" => {
+                    info.turns += 1;
+                    if info.title.is_empty() {
+                        info.title = entry["message"]["content"][0]["text"].as_str().unwrap_or_default().lines().next().unwrap_or_default().to_string();
+                    }
+                }
+                _ => {}
+            }
+        }
+        (info.turns > 0 && !subagent).then_some(info)
     }
 
     /// Deletes saved sessions untouched for longer than `max_age`. A session open in any process, this one included, holds its lock and stays.
@@ -2150,6 +2155,25 @@ mod tests {
         let left = (open_path.exists(), closed_path.exists(), fresh.exists());
         std::fs::remove_dir_all(&dir).unwrap();
         assert_eq!(left, (true, false, true));
+    }
+
+    #[test]
+    fn session_info_titles_one_file_by_its_name_then_first_prompt() {
+        let dir = std::env::temp_dir().join(format!("agent-info-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let prompt = |text: &str| json!({"type": "message", "message": {"role": "user", "content": [{"type": "text", "text": text}]}}).to_string();
+        let write = |id: &str, lines: &[String]| {
+            let path = dir.join(format!("{id}.jsonl"));
+            std::fs::write(&path, lines.join("\n")).unwrap();
+            path
+        };
+        let titled = write("a", &[json!({"type": "session", "cwd": "/w"}).to_string(), prompt("fix login\nmore"), prompt("again")]);
+        let named = write("b", &[prompt("x"), json!({"type": "session_info", "name": "Login fix"}).to_string()]);
+        let child = write("c", &[json!({"type": "parent"}).to_string(), prompt("x")]);
+        let empty = write("d", &[]);
+        let infos = [&titled, &named, &child, &empty].map(|path| Session::info(path).map(|s| (s.title, s.name, s.turns)));
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(infos, [Some(("fix login".into(), None, 2)), Some(("x".into(), Some("Login fix".into()), 1)), None, None]);
     }
 
     #[test]

@@ -3395,7 +3395,7 @@ impl App {
 
     /// `None` for a session not saved yet, which has no prompt to name it by.
     fn saved_title(&self, id: &str) -> Option<String> {
-        let session = Session::list(&self.sessions_dir).into_iter().find(|s| s.id == id)?;
+        let session = Session::info(&self.sessions_dir.join(format!("{id}.jsonl")))?;
         Some(session.name.unwrap_or(session.title))
     }
 
