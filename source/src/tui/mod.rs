@@ -563,6 +563,8 @@ struct App {
     hint: Option<(String, Instant)>,
     /// Image blocks pasted into the editor; `[Image #n]` in the text refers to `images[n - 1]`.
     images: Vec<Value>,
+    /// `read_image` notes for the sent images, shown once the model's first reply proves it read them.
+    unread_images: Vec<String>,
     quit: bool,
     skills: Vec<Skill>,
     templates: Vec<Template>,
@@ -1033,6 +1035,7 @@ impl App {
             permission_mode: agent.permission_mode.clone(),
             hint: None,
             images: Vec::new(),
+            unread_images: Vec::new(),
             quit: false,
             skills: Vec::new(),
             templates: Vec::new(),
@@ -1546,12 +1549,13 @@ impl App {
         }
     }
 
-    /// The pasted images whose `[Image #n]` is still in `text`, shown as `read_image` rows; the rest are dropped.
+    /// The pasted images whose `[Image #n]` is still in `text`, later shown as `read_image` rows; the rest are dropped.
     fn take_images(&mut self, text: &str) -> Vec<Value> {
         let mut kept = Vec::new();
+        self.unread_images.clear();
         for (index, block) in std::mem::take(&mut self.images).into_iter().enumerate() {
             if text.contains(&format!("[Image #{}]", index + 1)) {
-                self.push(Item::Tool { id: String::new(), name: "read_image".into(), input: json!({"image": image_note(index + 1, &block)}), result: Some((String::new(), false)) });
+                self.unread_images.push(image_note(index + 1, &block));
                 kept.push(block);
             }
         }
@@ -3497,6 +3501,11 @@ impl App {
     }
 
     fn agent_event(&mut self, event: Event) {
+        if matches!(event, Event::Text(_) | Event::Thinking(_) | Event::ToolStart { .. } | Event::TurnEnd { .. }) {
+            for note in std::mem::take(&mut self.unread_images) {
+                self.push(Item::Tool { id: String::new(), name: "read_image".into(), input: json!({"image": note}), result: Some((String::new(), false)) });
+            }
+        }
         match event {
             Event::Text(delta) => self.append_assistant(&delta, false),
             Event::Thinking(delta) => self.append_assistant(&delta, true),
@@ -3589,6 +3598,8 @@ impl App {
     }
 
     fn done(&mut self, result: Result<String, String>) {
+        // A turn that failed before any reply never showed its images to the model.
+        self.unread_images.clear();
         match &result {
             Ok(answer) if answer.trim().is_empty() => self.notify("Done"),
             Ok(answer) => self.notify(answer),
