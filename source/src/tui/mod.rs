@@ -678,10 +678,32 @@ pub fn run(agent: Agent, setup: Setup, model_lists: JoinHandle<Vec<String>>) -> 
     if let Some(path) = &app.session_path {
         let has_messages = std::fs::read_to_string(path).is_ok_and(|text| text.contains(r#""type":"message""#));
         if has_messages {
-            println!("\x1b[38;5;245mContinue session with: agent --resume {}\x1b[0m", app.session_id);
+            print!("{}", exit_summary(&app, Path::new(path)));
         }
     }
     result
+}
+
+/// Printed to the normal screen after the TUI leaves, so it stays in the scrollback; mirrors `banner`.
+fn exit_summary(app: &App, session_path: &Path) -> String {
+    const DIM: &str = "\x1b[38;5;240m";
+    const MUTED: &str = "\x1b[38;5;245m";
+    const RESET: &str = "\x1b[0m";
+    let mut text = format!("\n  {DIM}░▒▓{RESET}\x1b[1m█▶ agent{RESET}   {MUTED}session saved{RESET}\n\n");
+    if let Some(title) = app.saved_title(&app.session_id) {
+        let title: String = title.chars().filter(|c| !c.is_control()).collect();
+        text += &format!("  {MUTED}title {RESET}  {title}\n");
+    }
+    let totals = usage::session_totals(session_path);
+    if let Some(cost) = usage::total_cost(&totals, &app.client.catalog()) {
+        let mut sum = Usage::default();
+        for total in &totals {
+            sum.add(total.usage());
+        }
+        text += &format!("  {MUTED}cost  {RESET}  {} {MUTED}· {}{RESET}\n", usage::dollars(cost), usage::brief(sum));
+    }
+    text += &format!("  {MUTED}resume{RESET}  \x1b[38;5;75magent --resume {}{RESET}\n\n", app.session_id);
+    text
 }
 
 fn enter(out: &mut Stdout) -> std::io::Result<()> {
