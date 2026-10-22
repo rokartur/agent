@@ -5,12 +5,15 @@ use serde_json::{Value, json};
 const MIN_BLOCKED_SLEEP_SECS: u64 = 15;
 const HEAD_DEFAULT_LINES: u64 = 10;
 
-/// Why bash should not run `command` (a blind sleep, a merge that ignores CI), or None when it may run.
+/// Why bash should not run `command` (a blind sleep, a merge that ignores CI, or file reads mixed with other commands), or None when it may run.
 pub fn bash(command: &str) -> Option<String> {
     if blind_sleep(command) {
         return Some("No blind sleep. Server: curl -sf --retry 30 --retry-all-errors --retry-delay 1 URL. CI: gh run watch --exit-status, gh pr checks --watch (rerun it when it says no checks reported yet). Long job: Bash run_in_background.".into());
     }
-    unchecked_merge(command).then(|| "gh pr merge would run whatever gh pr checks returned. Gate it on the exit status: gh pr checks N --watch --fail-fast && gh pr merge N ...".into())
+    if unchecked_merge(command) {
+        return Some("gh pr merge would run whatever gh pr checks returned. Gate it on the exit status: gh pr checks N --watch --fail-fast && gh pr merge N ...".into());
+    }
+    mixed_read(command)
 }
 
 /// `gh pr merge` reached from `gh pr checks` through `;`, a newline or a pipe, which drop the checks' exit status.
@@ -26,24 +29,46 @@ fn unchecked_merge(command: &str) -> bool {
 /// chained with `;`, `&&` or newlines, maybe after `cd DIR` and between `echo` separators. Running it as `Read`
 /// returns anchors in the same turn, where a refusal cost the model a second call.
 pub fn file_read(command: &str) -> Option<Value> {
+    let (paths, runs_other) = split_reads(command);
+    (!paths.is_empty() && !runs_other).then(|| json!({"paths": paths}))
+}
+
+/// A refusal for plain file reads chained with other commands, which `file_read` cannot run as `Read`.
+/// Session logs had three of these for every pure read, so the reads came back without anchors.
+fn mixed_read(command: &str) -> Option<String> {
+    // In a heredoc or an unbalanced quote, `;` and newlines are not command separators.
+    let quotes_balanced = command
+        .replace("&&", ";")
+        .replace('\n', ";")
+        .split(';')
+        .all(|segment| segment.matches('"').count() % 2 == 0 && segment.matches('\'').count() % 2 == 0);
+    if command.contains("<<") || !quotes_balanced {
+        return None;
+    }
+    let (paths, runs_other) = split_reads(command);
+    (!paths.is_empty() && runs_other).then(|| format!("Read files with Read, not Bash: {}. Run the rest of the command on its own.", json!({"paths": paths})))
+}
+
+/// The ranges the plain `cat`, `head` and `sed -n` segments of `command` print, and whether any other segment runs.
+fn split_reads(command: &str) -> (Vec<Value>, bool) {
     let command = command.replace("&&", ";").replace('\n', ";");
     let mut dir = None;
     let mut paths: Vec<Value> = Vec::new();
+    let mut runs_other = false;
     for (index, segment) in command.split(';').enumerate() {
         let words: Vec<&str> = segment.split_whitespace().collect();
         match words.as_slice() {
             [] => {}
             ["cd", cd_dir] if index == 0 => dir = Some(*cd_dir),
             ["echo", rest @ ..] if !rest.iter().any(|word| word.contains('>')) => {}
-            words => {
-                let range = printed_range(words, dir)?;
-                if !paths.contains(&range) {
-                    paths.push(range);
-                }
-            }
+            words => match printed_range(words, dir) {
+                Some(range) if !paths.contains(&range) => paths.push(range),
+                Some(_) => {}
+                None => runs_other = true,
+            },
         }
     }
-    (!paths.is_empty()).then(|| json!({"paths": paths}))
+    (paths, runs_other)
 }
 
 /// The `{path, offset, limit}` range a lone `cat FILE`, `head [-N] FILE` or `sed -n 'N,Mp' FILE` prints, with `path` joined onto `dir`.
@@ -143,7 +168,7 @@ mod tests {
     }
 
     #[test]
-    fn blocks_blind_sleeps_only() {
+    fn blocks_blind_sleeps_and_mixed_reads_only() {
         let blocked = [
             ("sleep 150; gh run list --limit 3", "gh run watch"),
             ("(bun run dev &) ; sleep 30 && curl localhost:3000", "curl -sf --retry"),
@@ -155,6 +180,10 @@ mod tests {
             ("if true; then sleep 60; fi", "gh run watch"),
             ("sleep 60 && echo waiting for deploy", "gh run watch"),
             ("sleep 60; for f in *.log; do wc -l $f; done", "gh run watch"),
+            ("cd ../api && sed -n 90,125p a.php; rg -n Bridge src", r#"{"paths":[{"file_path":"../api/a.php","limit":36,"offset":90}]}"#),
+            ("git status --short && cat a.rs", "Run the rest of the command on its own"),
+            ("cat a.txt; rm a.txt", "Read files with Read"),
+            ("echo hi > a.txt; cat a.txt", "Read files with Read"),
             ("gh pr checks 26 --watch 2>&1 | tail -5; gh pr merge 26 --squash", "&& gh pr merge"),
             ("gh pr checks 12 --watch; gh pr merge 12 --squash", "&& gh pr merge"),
             ("gh pr checks 12 --watch\ngh pr merge 12", "&& gh pr merge"),
@@ -178,8 +207,9 @@ mod tests {
             "cat --help",
             "cat src/{a,b}.ts",
             "cd $(foo) && cat x",
-            "cat a.txt; rm a.txt",
-            "echo hi > a.txt; cat a.txt",
+            "sed -n 1,400p a.php | rg -n Column",
+            "cat > /tmp/x.sh <<'EOF'\nhead a.rs\nEOF\nbash /tmp/x.sh",
+            "rg -n \"a; cat b.rs\" src",
             "echo ---",
             "gh pr checks 5 --watch --fail-fast && gh pr merge 5 --squash --delete-branch",
             "gh pr checks 13 --watch >/dev/null 2>&1; s=$?; [ $s -eq 0 ] && gh pr merge 13 --squash",
