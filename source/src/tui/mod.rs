@@ -644,6 +644,9 @@ pub fn run(agent: Agent, setup: Setup, model_lists: JoinHandle<Vec<String>>) -> 
     let mut out = std::io::stdout();
     enter(&mut out).map_err(|e| format!("Cannot set up the terminal: {e}"))?;
     report_cwd(&app.cwd);
+    if let Some(title) = app.saved_title(&app.session_id) {
+        set_terminal_title(&title);
+    }
     let previous_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         // `panic = "abort"` skips Drop, so ffmpeg and bg terminals in their own sessions would outlive the agent.
@@ -1285,7 +1288,9 @@ impl App {
                 self.spent = spent;
                 self.entries.truncate(self.header_len);
                 self.push_history(&messages);
-                self.system("session", format!("Resumed {}", self.session_title(&id)));
+                let title = self.saved_title(&id).unwrap_or_else(|| id.clone());
+                set_terminal_title(&title);
+                self.system("session", format!("Resumed {title}"));
                 if let Some(notice) = notice {
                     self.system("session", notice);
                 }
@@ -3379,9 +3384,10 @@ impl App {
         self.panel = Some(Panel::Tasks { index: 0 });
     }
 
-    fn session_title(&self, id: &str) -> String {
-        let session = Session::list(&self.sessions_dir).into_iter().find(|s| s.id == id);
-        session.map_or(id.to_string(), |s| s.name.unwrap_or(s.title))
+    /// `None` for a session not saved yet, which has no prompt to name it by.
+    fn saved_title(&self, id: &str) -> Option<String> {
+        let session = Session::list(&self.sessions_dir).into_iter().find(|s| s.id == id)?;
+        Some(session.name.unwrap_or(session.title))
     }
 
     fn copy_last_answer(&self) -> Result<(), String> {
