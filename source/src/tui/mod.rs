@@ -147,7 +147,7 @@ enum Panel {
         index: usize,
         sessions: Vec<SessionInfo>,
     },
-    /// `row` indexes `SETTING_NAMES`. Typing filters the list by name.
+    /// `row` indexes `SETTING_NAMES`; its section is the open tab. Typing filters all sections by name.
     Settings {
         row: usize,
         query: Editor,
@@ -465,8 +465,14 @@ const SETTING_NAMES: [&str; 36] = [
     "Headroom URL",
     "Headroom token",
 ];
-/// Rows of `SETTING_NAMES` in the order the settings panel lists them.
-const SETTING_ORDER: [usize; 36] = [0, 1, 27, 18, 30, 13, 2, 29, 3, 4, 5, 6, 31, 32, 7, 8, 9, 10, 11, 12, 25, 28, 14, 15, 16, 17, 34, 35, 26, 19, 33, 20, 23, 21, 22, 24];
+/// The settings panel's tabs with their rows of `SETTING_NAMES`, in the order it lists them.
+const SETTING_SECTIONS: [(&str, &[usize]); 5] = [
+    ("Model", &[0, 1, 27, 13, 2, 18, 30, 29]),
+    ("Context", &[3, 4, 5, 7, 8, 9, 28]),
+    ("Accounts", &[10, 11, 12, 25]),
+    ("Modes", &[14, 15, 16, 17, 34, 35, 26]),
+    ("Interface", &[6, 31, 32, 19, 33, 20, 23, 21, 22, 24]),
+];
 const MODEL_ROWS: [usize; 5] = [0, 8, 12, 29, 30];
 const CONTEXT_WINDOW_ROW: usize = 13;
 const PROVIDER_ORDER_ROW: usize = 25;
@@ -1506,7 +1512,7 @@ impl App {
             }
             Some(Panel::Settings { row, query }) => {
                 query.insert(&line);
-                if let Some(&first) = matching_settings(&query.text()).first() {
+                if let Some(&first) = matching_settings(*row, &query.text()).first() {
                     *row = first;
                 }
             }
@@ -2324,9 +2330,16 @@ impl App {
                 }
             }
             Some(Panel::Settings { row, query }) => {
-                let rows = matching_settings(&query.text());
+                let rows = matching_settings(*row, &query.text());
                 let index = rows.iter().position(|r| r == row);
                 match code {
+                    KeyCode::Tab | KeyCode::BackTab => {
+                        let count = SETTING_SECTIONS.len();
+                        let section = setting_section(*row);
+                        let next = if code == KeyCode::Tab { (section + 1) % count } else { (section + count - 1) % count };
+                        *row = SETTING_SECTIONS[next].1[0];
+                        *query = Editor::new();
+                    }
                     KeyCode::Enter if *row == PROVIDER_ORDER_ROW && index.is_some() => self.panel = Some(Panel::ProviderOrder { tab: 0, index: 0 }),
                     KeyCode::Up if !rows.is_empty() => *row = rows[index.map_or(0, |i| i.saturating_sub(1))],
                     KeyCode::Down if !rows.is_empty() => *row = rows[index.map_or(0, |i| (i + 1).min(rows.len() - 1))],
@@ -2336,7 +2349,7 @@ impl App {
                     }
                     _ => {
                         if query.edit_key(key)
-                            && let Some(&first) = matching_settings(&query.text()).first()
+                            && let Some(&first) = matching_settings(*row, &query.text()).first()
                         {
                             *row = first;
                         }
@@ -3181,18 +3194,18 @@ impl App {
                 view.render(width, PANEL_ROWS)
             }
             Panel::Settings { row, query } => {
-                let matches = matching_settings(&query.text());
+                let matches = matching_settings(*row, &query.text());
                 let values = self.setting_values();
                 let rows: Vec<panel::Row> = matches.iter().map(|&r| panel::Row { left: SETTING_NAMES[r].to_string(), right: values[r].clone() }).collect();
                 let view = panel::Panel {
                     title: "Settings".into(),
-                    tabs: &[],
-                    tab: 0,
+                    tabs: &SETTING_SECTIONS.map(|(name, _)| name),
+                    tab: setting_section(*row),
                     search: Some(query.field(None)),
                     rows: &rows,
                     selected: matches.iter().position(|r| r == row).unwrap_or(0),
                     empty: "No matching settings.",
-                    hint: "↑↓ navigate     ←→ change     type to search     esc close",
+                    hint: "↑↓ navigate     ←→ change     tab section     type to search     esc close",
                 };
                 view.render(width, PANEL_ROWS)
             }
@@ -5132,9 +5145,16 @@ fn context_window_label(window: Option<u64>) -> String {
     window.map_or("auto".to_string(), tokens)
 }
 
-/// `SETTING_ORDER` rows whose name matches the query, see `panel::search`.
-fn matching_settings(query: &str) -> Vec<usize> {
-    panel::search(SETTING_ORDER, query, |&r| SETTING_NAMES[r].to_string())
+/// The rows of `row`'s section, or with a query the rows of every section whose name matches it, see `panel::search`.
+fn matching_settings(row: usize, query: &str) -> Vec<usize> {
+    if query.is_empty() {
+        return SETTING_SECTIONS[setting_section(row)].1.to_vec();
+    }
+    panel::search(SETTING_SECTIONS.iter().flat_map(|(_, rows)| rows.iter().copied()), query, |&r| SETTING_NAMES[r].to_string())
+}
+
+fn setting_section(row: usize) -> usize {
+    SETTING_SECTIONS.iter().position(|(_, rows)| rows.contains(&row)).expect("every setting row is in a section")
 }
 
 /// Override keys for the context windows panel: providers on tab 0, models matching `query` on tab 1.
@@ -5706,12 +5726,14 @@ mod tests {
     }
 
     #[test]
-    fn settings_list_every_row_once_and_filter_by_name() {
-        let mut rows = matching_settings("");
+    fn settings_sections_hold_every_row_once_and_search_spans_them() {
+        let mut rows: Vec<usize> = SETTING_SECTIONS.iter().flat_map(|(_, rows)| rows.iter().copied()).collect();
         rows.sort();
         assert_eq!(rows, (0..SETTING_NAMES.len()).collect::<Vec<_>>());
-        assert_eq!(matching_settings("CONTEXT WIN"), [CONTEXT_WINDOW_ROW]);
-        assert!(matching_settings("no such setting").is_empty());
+        assert_eq!(matching_settings(HEADROOM_URL_ROW, ""), SETTING_SECTIONS[3].1);
+        assert_eq!(matching_settings(0, "CONTEXT WIN"), [CONTEXT_WINDOW_ROW]);
+        assert_eq!(matching_settings(0, "headroom"), [17, HEADROOM_URL_ROW, HEADROOM_TOKEN_ROW]);
+        assert!(matching_settings(0, "no such setting").is_empty());
     }
 
     #[test]
