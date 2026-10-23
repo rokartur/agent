@@ -55,6 +55,8 @@ use selection::{Point, Selection};
 const WORKING: &str = "Working";
 const THINKING: &str = "Thinking";
 const TRANSCRIBING: &str = "Transcribing";
+/// Key a dropped image's block carries its file path under until `take_images` shows and strips it.
+const DROPPED_PATH: &str = "dropped_path";
 const LOADING_MODELS: &str = "loading models";
 // Matched whole: an error hint that mentions Ctrl+C must not arm quitting.
 const EXIT_HINT: &str = "Press Ctrl+C again to exit";
@@ -1505,7 +1507,10 @@ impl App {
             Some(Panel::Btw) => self.btw.as_mut().expect("the btw panel opens with a thread").input.insert(&line),
             Some(_) => {}
             None => match image::pasted_path(text) {
-                Some(path) => self.attach(image::block(&path)),
+                Some(path) => self.attach(image::block(&path).map(|mut block| {
+                    block[DROPPED_PATH] = path.display().to_string().into();
+                    block
+                })),
                 None => self.editor.paste(text),
             },
         }
@@ -1647,10 +1652,14 @@ impl App {
     fn take_images(&mut self, text: &str) -> Vec<Value> {
         let mut kept = Vec::new();
         let mut tags = Vec::new();
-        for (index, block) in std::mem::take(&mut self.images).into_iter().enumerate() {
+        for (index, mut block) in std::mem::take(&mut self.images).into_iter().enumerate() {
             let tag = format!("[Image #{}]", index + 1);
             if text.contains(&tag) {
-                tags.push(tag);
+                // The API rejects unknown keys, so the dropped file's path leaves the block here.
+                match block.as_object_mut().unwrap().remove(DROPPED_PATH) {
+                    Some(Value::String(path)) => tags.push(format!("{tag} {path}")),
+                    _ => tags.push(tag),
+                }
                 kept.push(block);
             }
         }
