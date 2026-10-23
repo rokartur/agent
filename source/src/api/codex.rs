@@ -99,6 +99,7 @@ fn input_image(block: &Value) -> Value {
 pub fn parse_stream(reader: &mut dyn BufRead, abort: &AtomicBool, on_delta: &mut dyn FnMut(Delta)) -> Result<Reply, ApiError> {
     let mut slots: Vec<Option<Value>> = Vec::new();
     let mut arguments: Vec<String> = Vec::new();
+    let mut bad_tool_inputs = Vec::new();
     let mut usage = Usage::default();
     let mut id = String::new();
     let mut stop_reason: String;
@@ -148,7 +149,7 @@ pub fn parse_stream(reader: &mut dyn BufRead, abort: &AtomicBool, on_delta: &mut
             "response.output_item.done" => match item["type"].as_str() {
                 Some("function_call") => {
                     let raw = item["arguments"].as_str().filter(|a| !a.is_empty()).unwrap_or(&arguments[index]);
-                    let input = super::parse_tool_input(if raw.is_empty() { "{}" } else { raw })?;
+                    let input = super::parse_tool_input(item["call_id"].as_str().unwrap_or_default(), if raw.is_empty() { "{}" } else { raw }, &mut bad_tool_inputs);
                     slots[index] = Some(json!({"type": "tool_use", "id": item["call_id"], "name": item["name"], "input": input}));
                 }
                 Some("message") => {
@@ -181,7 +182,7 @@ pub fn parse_stream(reader: &mut dyn BufRead, abort: &AtomicBool, on_delta: &mut
     if stop_reason == "end_turn" && blocks.iter().any(|b| b["type"] == "tool_use") {
         stop_reason = "tool_use".into();
     }
-    Ok(Reply { message: json!({"role": "assistant", "content": blocks}), stop_reason, context_tokens: usage.context_tokens(), usage, id, ..Reply::default() })
+    Ok(Reply { message: json!({"role": "assistant", "content": blocks}), stop_reason, context_tokens: usage.context_tokens(), usage, id, bad_tool_inputs, ..Reply::default() })
 }
 
 /// Classified like the Anthropic stream's `error`: a rate limit switches accounts, an overloaded server retries.

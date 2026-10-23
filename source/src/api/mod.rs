@@ -79,6 +79,14 @@ pub struct Reply {
     pub provider: String,
     pub account_id: Option<String>,
     pub model: String,
+    /// Tool calls whose arguments were not valid JSON; their `input` in `message` is `{}` and they must not run.
+    pub bad_tool_inputs: Vec<BadToolInput>,
+}
+
+pub struct BadToolInput {
+    pub id: String,
+    pub error: String,
+    pub raw: String,
 }
 
 pub enum Delta<'a> {
@@ -904,6 +912,7 @@ impl std::io::Read for WatchedBody<'_> {
 fn parse_stream(reader: &mut dyn BufRead, abort: &AtomicBool, on_delta: &mut dyn FnMut(Delta)) -> Result<Reply, ApiError> {
     let mut blocks: Vec<Value> = Vec::new();
     let mut tool_json: Vec<String> = Vec::new();
+    let mut bad_tool_inputs = Vec::new();
     let mut usage = Usage::default();
     let mut cache_write_1h = None;
     let mut stop_reason = String::new();
@@ -968,7 +977,7 @@ fn parse_stream(reader: &mut dyn BufRead, abort: &AtomicBool, on_delta: &mut dyn
                     && block["type"] == "tool_use"
                     && !partial.is_empty()
                 {
-                    block["input"] = parse_tool_input(partial)?;
+                    block["input"] = parse_tool_input(block["id"].as_str().unwrap_or_default(), partial, &mut bad_tool_inputs);
                 }
             }
             "message_delta" => {
@@ -985,7 +994,7 @@ fn parse_stream(reader: &mut dyn BufRead, abort: &AtomicBool, on_delta: &mut dyn
             _ => {}
         }
     }
-    Ok(Reply { message: json!({"role": "assistant", "content": blocks}), stop_reason, context_tokens: prompt_tokens + usage.output, usage, cache_write_1h, id, ..Reply::default() })
+    Ok(Reply { message: json!({"role": "assistant", "content": blocks}), stop_reason, context_tokens: prompt_tokens + usage.output, usage, cache_write_1h, id, bad_tool_inputs, ..Reply::default() })
 }
 
 fn append(field: &mut Value, text: &str) {
@@ -1009,7 +1018,8 @@ fn read_usage(raw: &Value, usage: &mut Usage, cache_write_1h: &mut Option<u64>) 
 }
 
 /// Models sometimes write a raw tab or newline inside a string (tab-indented code); strict JSON rejects it, so escape it first.
-fn parse_tool_input(raw: &str) -> Result<Value, ApiError> {
+/// Invalid JSON becomes `{}` plus an entry in `bad`, so the agent answers that call with an error instead of losing the turn.
+fn parse_tool_input(id: &str, raw: &str, bad: &mut Vec<BadToolInput>) -> Value {
     let mut escaped = String::with_capacity(raw.len());
     let (mut in_string, mut after_backslash) = (false, false);
     for c in raw.chars() {
@@ -1023,7 +1033,10 @@ fn parse_tool_input(raw: &str) -> Result<Value, ApiError> {
         }
         after_backslash = in_string && c == '\\' && !after_backslash;
     }
-    serde_json::from_str(&escaped).map_err(|e| ApiError::fatal(format!("Bad tool input JSON: {e}.")))
+    serde_json::from_str(&escaped).unwrap_or_else(|e| {
+        bad.push(BadToolInput { id: id.to_string(), error: format!("Bad tool input JSON: {e}."), raw: raw.to_string() });
+        json!({})
+    })
 }
 
 #[cfg(test)]
@@ -1175,6 +1188,22 @@ mod tests {
         let body: String = events.iter().map(|e| format!("event: x\ndata: {e}\n\n")).collect();
         let reply = parse_stream(&mut body.as_bytes(), &AtomicBool::new(false), &mut |_| {}).ok().unwrap();
         assert_eq!(reply.message["content"][0]["input"], json!({"text": "\"\tx\n"}));
+    }
+
+    #[test]
+    fn invalid_tool_input_is_reported_not_fatal() {
+        let events = [
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"t1","name":"write","input":{}}}"#,
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"text\": \"a\"b\"}"}}"#,
+            r#"{"type":"content_block_stop","index":0}"#,
+            r#"{"type":"message_stop"}"#,
+        ];
+        let body: String = events.iter().map(|e| format!("event: x\ndata: {e}\n\n")).collect();
+        let reply = parse_stream(&mut body.as_bytes(), &AtomicBool::new(false), &mut |_| {}).ok().unwrap();
+        assert_eq!(reply.message["content"][0]["input"], json!({}));
+        let [bad] = reply.bad_tool_inputs.as_slice() else { panic!("expected one bad input") };
+        assert_eq!((bad.id.as_str(), bad.raw.as_str()), ("t1", r#"{"text": "a"b"}"#));
+        assert!(bad.error.starts_with("Bad tool input JSON: expected `,` or `}`"), "{}", bad.error);
     }
 
     #[test]

@@ -529,6 +529,9 @@ impl Agent {
                 self.push(json!({"role": "user", "content": queued}))?;
                 continue;
             }
+            for bad in &reply.bad_tool_inputs {
+                self.session.append(&json!({"type": "bad_tool_input", "id": bad.id, "error": bad.error, "raw": bad.raw}))?;
+            }
             let mut results = Vec::new();
             let mut finished = Vec::new();
             for call in calls {
@@ -544,15 +547,17 @@ impl Agent {
                 emit(Event::ToolStart { id: id.clone(), name: name.clone(), input: shown });
                 self.plugins.event(json!({"type": "tool_call", "name": name, "input": input, "context": self.plugin_context()}));
                 let started = Instant::now();
-                let (mut output, is_error, image) = match self.requested_image(&name, &input) {
-                    Some(path) => match crate::image::block(&path) {
+                let bad_input = reply.bad_tool_inputs.iter().find(|bad| bad.id == id);
+                let (mut output, is_error, image) = if let Some(bad) = bad_input {
+                    (format!("{} The call did not run; send it again with valid JSON.", bad.error), true, None)
+                } else if let Some(path) = self.requested_image(&name, &input) {
+                    match crate::image::block(&path) {
                         Ok(block) => (format!("[{} is attached as an image.]", path.display()), false, Some(block)),
                         Err(error) => (error, true, None),
-                    },
-                    None => {
-                        let (output, is_error) = self.run_tool_with_checkpoint(&name, &input, &targets, text, emit)?;
-                        (output, is_error, None)
                     }
+                } else {
+                    let (output, is_error) = self.run_tool_with_checkpoint(&name, &input, &targets, text, emit)?;
+                    (output, is_error, None)
                 };
                 if !is_error {
                     for file in &targets {

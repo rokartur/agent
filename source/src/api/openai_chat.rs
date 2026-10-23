@@ -161,14 +161,15 @@ pub fn parse_stream(reader: &mut dyn BufRead, abort: &AtomicBool, on_delta: &mut
         };
     }
     let mut blocks = Vec::new();
+    let mut bad_tool_inputs = Vec::new();
     if !text.is_empty() {
         blocks.push(json!({"type": "text", "text": text}));
     }
     if stop_reason != "aborted" {
         for (index, (call_id, name, arguments)) in calls.into_iter().enumerate() {
-            let input = if arguments.trim().is_empty() { json!({}) } else { parse_tool_input(&arguments)? };
             // llama.cpp and some Ollama versions send no call id.
             let call_id = if call_id.is_empty() { format!("call_{index}") } else { call_id };
+            let input = if arguments.trim().is_empty() { json!({}) } else { parse_tool_input(&call_id, &arguments, &mut bad_tool_inputs) };
             blocks.push(json!({"type": "tool_use", "id": call_id, "name": name, "input": input}));
         }
     }
@@ -177,7 +178,7 @@ pub fn parse_stream(reader: &mut dyn BufRead, abort: &AtomicBool, on_delta: &mut
         stop_reason = "tool_use".into();
     }
     let context_tokens = usage.context_tokens();
-    Ok(Reply { message: json!({"role": "assistant", "content": blocks}), stop_reason, usage, context_tokens, id, ..Reply::default() })
+    Ok(Reply { message: json!({"role": "assistant", "content": blocks}), stop_reason, usage, context_tokens, id, bad_tool_inputs, ..Reply::default() })
 }
 
 #[cfg(test)]
