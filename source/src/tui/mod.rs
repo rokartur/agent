@@ -4100,7 +4100,7 @@ impl App {
             // shortcut: about 4 chars per token for the request still streaming; tool inputs are not counted until its usage arrives.
             let output = self.prompt_usage.output + self.streamed_chars as u64 / 4;
             self.shown_output = count_toward(self.shown_output, output);
-            line.push(span(format!(" ({} · ↓ {} tokens)", duration(started.elapsed()), self.shown_output), DIM));
+            line.push(span(format!(" ({} · ↓ {} tokens)", duration(started.elapsed()), tokens(self.shown_output)), DIM));
             bottom.push(line);
         }
         let steering = self.steering.lock().unwrap().clone();
