@@ -516,7 +516,15 @@ const HOTKEYS: [(&str, &[(&str, &str)]); 4] = [
             ("Down", "walk the shells pill and running subagents, Enter opens one (empty editor)"),
         ],
     ),
-    ("Stop", &[("Esc", "abort the running turn; before any answer, take the prompt back into the editor"), ("Esc Esc", "rewind to an earlier prompt and its files (idle)"), ("Ctrl+C Ctrl+C", "quit"), ("Ctrl+D", "quit on an empty editor")]),
+    (
+        "Stop",
+        &[
+            ("Esc", "abort the running turn; before any answer, take the prompt back into the editor"),
+            ("Esc Esc", "rewind to an earlier prompt and its files (idle)"),
+            ("Ctrl+C Ctrl+C", "quit"),
+            ("Ctrl+D", "quit on an empty editor"),
+        ],
+    ),
 ];
 
 enum Item {
