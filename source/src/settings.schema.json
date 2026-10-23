@@ -40,7 +40,9 @@
     "ponytail": { "enum": ["off", "lite", "full", "ultra"], "default": "full" },
     "caveman": { "enum": ["off", "full", "ultra", "wenyan"], "default": "off" },
     "rtk": { "type": "boolean", "default": true },
-    "headroom": { "type": "boolean", "default": false, "description": "Route model requests through a local headroom proxy." },
+    "headroom": { "type": "boolean", "default": false, "description": "Route model requests through a headroom proxy." },
+    "headroom_url": { "type": "string", "default": "", "description": "A remote headroom proxy, e.g. https://headroom.example.com. Empty uses the local one." },
+    "headroom_token": { "type": "string", "default": "", "description": "The remote headroom proxy's HEADROOM_PROXY_TOKEN, sent as x-headroom-proxy-token." },
     "headroom_env": {
       "type": "object",
       "additionalProperties": { "type": "string" },

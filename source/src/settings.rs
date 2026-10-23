@@ -75,8 +75,12 @@ pub struct Settings {
     /// One of `modes::CAVEMAN_LEVELS`.
     pub caveman: String,
     pub rtk: bool,
-    /// Send model requests through a local `headroom proxy`.
+    /// Send model requests through `headroom proxy`.
     pub headroom: bool,
+    /// A remote `headroom proxy` (`https://headroom.example.com`); empty means the local one, which the agent installs and syncs.
+    pub headroom_url: String,
+    /// The remote proxy's `HEADROOM_PROXY_TOKEN`, sent as `x-headroom-proxy-token`, the header headroom checks on a non-loopback bind.
+    pub headroom_token: String,
     /// `--env` values the headroom deployment is installed with; the agent reinstalls it when one differs.
     pub headroom_env: BTreeMap<String, String>,
     /// Desktop notification when a task ends or the agent waits for an answer while the terminal is in the background.
@@ -311,6 +315,8 @@ fn from_json(own: &Value) -> Settings {
         caveman: level(&own["caveman"], &crate::agent::modes::CAVEMAN_LEVELS, "off"),
         rtk: own["rtk"].as_bool().unwrap_or(true),
         headroom: own["headroom"].as_bool().unwrap_or(false),
+        headroom_url: own["headroom_url"].as_str().unwrap_or_default().trim_end_matches('/').to_string(),
+        headroom_token: own["headroom_token"].as_str().unwrap_or_default().to_string(),
         headroom_env: own["headroom_env"].as_object().into_iter().flatten().filter_map(|(key, value)| Some((key.clone(), value.as_str()?.to_string()))).collect(),
         notifications: own["notifications"].as_bool().unwrap_or(true),
         progress_bar: own["progress_bar"].as_bool().unwrap_or(true),
@@ -394,7 +400,7 @@ const SCHEMA_URL: &str = "https://raw.githubusercontent.com/rokartur/agent/main/
 fn save(home: &Path, settings: &Settings) -> Result<(), String> {
     let path = path(home);
     std::fs::create_dir_all(path.parent().unwrap()).map_err(|e| format!("Cannot create {}: {e}", path.display()))?;
-    // plugin_settings can hold tokens.
+    // plugin_settings and headroom_token hold tokens.
     crate::api::accounts::write_private(&path, &format!("{:#}\n", to_json(settings)))
 }
 
@@ -431,6 +437,8 @@ fn to_json(settings: &Settings) -> Value {
         "caveman": settings.caveman,
         "rtk": settings.rtk,
         "headroom": settings.headroom,
+        "headroom_url": settings.headroom_url,
+        "headroom_token": settings.headroom_token,
         "headroom_env": settings.headroom_env,
         "notifications": settings.notifications,
         "progress_bar": settings.progress_bar,
@@ -576,6 +584,8 @@ mod tests {
         }];
         settings.cache_ttl = "1h".into();
         settings.headroom = true;
+        settings.headroom_url = "https://headroom.example.com".into();
+        settings.headroom_token = "t0ken".into();
         settings.headroom_env = BTreeMap::from([("HEADROOM_DISABLE_KOMPRESS".into(), "1".into())]);
         settings.notifications = false;
         settings.progress_bar = false;

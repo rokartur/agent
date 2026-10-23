@@ -56,7 +56,10 @@ struct State {
     threshold: f64,
     policy: Option<Policy>,
     fallback_model: String,
-    headroom: bool,
+    /// The headroom proxy requests go through, `None` when they go straight to the provider.
+    headroom: Option<String>,
+    /// Sent to `headroom` as `x-headroom-proxy-token` when not empty.
+    headroom_token: String,
     provider_order: Vec<&'static str>,
     custom_providers: Vec<CustomProvider>,
 }
@@ -228,7 +231,12 @@ impl Client {
         // A new pin from /account wins over the account the last request used.
         state.current.retain(|provider, _| state.pinned.get(provider) == settings.default_accounts.get(provider));
         state.pinned = settings.default_accounts.clone();
-        state.headroom = settings.headroom && crate::process::installed("headroom");
+        state.headroom = match settings.headroom_url.as_str() {
+            _ if !settings.headroom => None,
+            "" => crate::process::installed("headroom").then(|| HEADROOM_URL.to_string()),
+            url => Some(url.to_string()),
+        };
+        state.headroom_token = settings.headroom_token.clone();
         state.provider_order = settings.sort_providers(&models::PROVIDERS);
         state.custom_providers = settings.custom_providers.clone();
     }
@@ -478,9 +486,13 @@ impl Client {
     }
 
     fn try_send(&self, account: &Account, request: &Value, abort: &AtomicBool, on_delta: &mut dyn FnMut(Delta)) -> Result<Reply, ApiError> {
-        let headroom = self.state.lock().unwrap().headroom;
-        let anthropic_base = if headroom { HEADROOM_URL } else { &self.anthropic_base };
-        let chatgpt_base = if headroom { &format!("{HEADROOM_URL}/backend-api") } else { &self.chatgpt_base };
+        let (headroom, headroom_token) = {
+            let state = self.state.lock().unwrap();
+            (state.headroom.clone(), state.headroom_token.clone())
+        };
+        let anthropic_base = headroom.clone().unwrap_or_else(|| self.anthropic_base.clone());
+        let chatgpt_base = headroom.as_ref().map_or_else(|| self.chatgpt_base.clone(), |url| format!("{url}/backend-api"));
+        let proxy_token = headroom.as_ref().map(|_| headroom_token).filter(|token| !token.is_empty());
         let custom = self.custom_provider(&account.provider);
         let (call, body) = match (account.provider.as_str(), &account.secret) {
             (_, Secret::ApiKey(key)) if let Some(custom) = &custom => {
@@ -502,7 +514,7 @@ impl Client {
                 }
             }
             ("anthropic", secret) => {
-                let call = self.http.post(format!("{anthropic_base}/v1/messages")).header("anthropic-version", "2023-06-01");
+                let call = with_proxy_token(self.http.post(format!("{anthropic_base}/v1/messages")), proxy_token.as_deref()).header("anthropic-version", "2023-06-01");
                 let mut body = request.clone();
                 // Anthropic has one fast tier.
                 if body["speed"] == "ultrafast" {
@@ -562,9 +574,7 @@ impl Client {
                 (call, body)
             }
             ("openai-codex", Secret::OAuth(tokens)) => {
-                let call = self
-                    .http
-                    .post(format!("{chatgpt_base}/codex/responses"))
+                let call = with_proxy_token(self.http.post(format!("{chatgpt_base}/codex/responses")), proxy_token.as_deref())
                     .header("authorization", format!("Bearer {}", tokens.access))
                     .header("chatgpt-account-id", tokens.account_id.as_deref().unwrap_or_default())
                     .header("OpenAI-Beta", "responses=experimental")
@@ -576,7 +586,7 @@ impl Client {
             (provider, Secret::ApiKey(_)) => return Err(ApiError::fatal(format!("{provider} accounts need /login, not an API key."))),
             (provider, Secret::OAuth(_)) => return Err(ApiError::fatal(format!("{provider} accounts need an API key, not /login."))),
         };
-        let hint = if headroom { format!(" Is `headroom proxy` running on {HEADROOM_URL}?") } else { String::new() };
+        let hint = headroom.map(|url| format!(" Is `headroom proxy` running on {url}?")).unwrap_or_default();
         let response = call.header("content-type", "application/json").send(body.to_string()).map_err(|e| ApiError::retryable(format!("Request failed: {e}.{hint}")))?;
         let status = response.status().as_u16();
         let mut reader = watched_body(response.into_body().into_reader(), abort, STREAM_IDLE);
@@ -750,6 +760,14 @@ fn custom_models(provider: &CustomProvider) -> Result<Vec<Model>, String> {
         price: None,
     });
     Ok(listed.collect())
+}
+
+/// The token headroom asks of callers off loopback; only requests routed through headroom carry it.
+fn with_proxy_token(call: ureq::RequestBuilder<ureq::typestate::WithBody>, token: Option<&str>) -> ureq::RequestBuilder<ureq::typestate::WithBody> {
+    match token {
+        Some(token) => call.header("x-headroom-proxy-token", token),
+        None => call,
+    }
 }
 
 fn fetch_models(request: ureq::RequestBuilder<ureq::typestate::WithoutBody>, parse: impl Fn(&Value) -> Vec<Model>) -> Result<Vec<Model>, String> {
@@ -1029,6 +1047,25 @@ mod tests {
     }
 
     #[test]
+    fn a_remote_headroom_gets_the_requests_with_the_proxy_token() {
+        let home = std::env::temp_dir().join(format!("agent-remote-headroom-{}", std::process::id()));
+        let mut client = Client::new(&home).unwrap();
+        client.anthropic_base = "http://127.0.0.1:9".into();
+        let (headroom, requests) = mock_provider(200, PONG);
+        client.reload(vec![Account { provider: "anthropic".into(), name: "work".into(), secret: Secret::ApiKey("sk".into()) }]);
+        *client.catalog.write().unwrap() = vec![Model { provider: "anthropic".into(), id: "claude".into(), ..Model::default() }].into();
+        let mut settings = crate::settings::load(&home).unwrap();
+        (settings.headroom, settings.headroom_url, settings.headroom_token) = (true, headroom, "t0ken".into());
+        client.configure(&settings);
+
+        let sent = client.send(&json!({"model": "claude", "max_tokens": 10}), &AtomicBool::new(false), &mut |_| {});
+        std::fs::remove_dir_all(&home).ok();
+
+        assert!(sent.is_ok(), "{:?}", sent.err());
+        assert_eq!(requests.recv().unwrap()["x-headroom-proxy-token"], "t0ken");
+    }
+
+    #[test]
     fn a_failed_token_refresh_moves_the_request_to_the_next_account() {
         let home = std::env::temp_dir().join(format!("agent-refresh-{}", std::process::id()));
         let client = Client::new(&home).unwrap();
@@ -1196,10 +1233,14 @@ mod tests {
                 reader.read_line(&mut request_line).unwrap();
                 // Read the whole request, so closing the socket does not reset it under the client.
                 let mut length = 0;
+                let mut proxy_token = None;
                 let mut header = String::new();
                 while reader.read_line(&mut header).unwrap() > 2 {
                     if let Some(value) = header.to_lowercase().strip_prefix("content-length:") {
                         length = value.trim().parse().unwrap();
+                    }
+                    if let Some(value) = header.to_lowercase().strip_prefix("x-headroom-proxy-token:") {
+                        proxy_token = Some(value.trim().to_string());
                     }
                     header.clear();
                 }
@@ -1214,8 +1255,12 @@ mod tests {
                     // Codex and Claude usage windows; unknown usage does not block a request.
                     (404, "{}")
                 } else {
+                    let mut request: Value = serde_json::from_slice(&request).unwrap();
+                    if let Some(token) = proxy_token {
+                        request["x-headroom-proxy-token"] = json!(token);
+                    }
                     // A test that only reads the doctor lines has dropped the receiver.
-                    let _ = sent.send(serde_json::from_slice(&request).unwrap());
+                    let _ = sent.send(request);
                     (messages_status, messages_body)
                 };
                 write!(stream, "HTTP/1.1 {status} X\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len()).unwrap();

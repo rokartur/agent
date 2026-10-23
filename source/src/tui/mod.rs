@@ -165,6 +165,8 @@ enum Panel {
         query: Editor,
         index: usize,
     },
+    /// `headroom_url` or `headroom_token` (by settings `row`) being typed; Enter saves it, Esc goes back to the row.
+    Headroom { row: usize, input: Editor },
     /// Manual provider order, tab 0 model providers, tab 1 web search providers.
     ProviderOrder {
         tab: usize,
@@ -422,7 +424,7 @@ const PLAN_OPTIONS: [&str; 3] = ["Start fresh and implement", "Export to a _PLAN
 const PLAN_FRESH_ROWS: [&str; 3] = ["Model", "Effort", "Start"];
 const EDITOR_ROWS: usize = 10;
 const SCROLL_LINES: [usize; 5] = [1, 2, 3, 5, 10];
-const SETTING_NAMES: [&str; 34] = [
+const SETTING_NAMES: [&str; 36] = [
     "Model",
     "Thinking level",
     "Permission mode",
@@ -457,12 +459,16 @@ const SETTING_NAMES: [&str; 34] = [
     "Cost in footer",
     "Account in footer",
     "Progress bar",
+    "Headroom URL",
+    "Headroom token",
 ];
 /// Rows of `SETTING_NAMES` in the order the settings panel lists them.
-const SETTING_ORDER: [usize; 34] = [0, 1, 27, 18, 30, 13, 2, 29, 3, 4, 5, 6, 31, 32, 7, 8, 9, 10, 11, 12, 25, 28, 14, 15, 16, 17, 26, 19, 33, 20, 23, 21, 22, 24];
+const SETTING_ORDER: [usize; 36] = [0, 1, 27, 18, 30, 13, 2, 29, 3, 4, 5, 6, 31, 32, 7, 8, 9, 10, 11, 12, 25, 28, 14, 15, 16, 17, 34, 35, 26, 19, 33, 20, 23, 21, 22, 24];
 const MODEL_ROWS: [usize; 5] = [0, 8, 12, 29, 30];
 const CONTEXT_WINDOW_ROW: usize = 13;
 const PROVIDER_ORDER_ROW: usize = 25;
+const HEADROOM_URL_ROW: usize = 34;
+const HEADROOM_TOKEN_ROW: usize = 35;
 const PROVIDER_LISTS: [&[&str]; 2] = [&models::PROVIDERS, &crate::tools::web::SEARCH_PROVIDERS];
 const CONTEXT_WINDOWS: [Option<u64>; 5] = [None, Some(200_000), Some(272_000), Some(400_000), Some(1_000_000)];
 const RESERVE_TOKENS: [u64; 5] = [16_384, 32_768, 65_536, 100_000, 150_000];
@@ -666,7 +672,7 @@ pub fn run(agent: Agent, setup: Setup, model_lists: JoinHandle<Vec<String>>) -> 
         spawn_update(app.home.clone(), app.settings.update_channel.clone(), events.clone());
     }
     spawn_on_start(app.settings.on_start.clone(), events.clone());
-    if app.settings.headroom && crate::process::installed("headroom") {
+    if app.settings.headroom && app.settings.headroom_url.is_empty() && crate::process::installed("headroom") {
         spawn_headroom_sync(app.home.clone(), app.settings.headroom_env.clone(), events.clone());
     }
     spawn_input(events);
@@ -1502,6 +1508,7 @@ impl App {
                 }
             }
             Some(Panel::Btw) => self.btw.as_mut().expect("the btw panel opens with a thread").input.insert(&line),
+            Some(Panel::Headroom { input, .. }) => input.insert(line.trim()),
             Some(_) => {}
             None => match image::pasted_path(text) {
                 Some(path) => self.attach(image::block(&path).map(|mut block| {
@@ -2260,6 +2267,7 @@ impl App {
             Some(Panel::Models { .. }) => return self.models_key(key),
             Some(Panel::ContextWindows { .. }) => return self.context_windows_key(key),
             Some(Panel::ProviderOrder { .. }) => return self.provider_order_key(key),
+            Some(Panel::Headroom { .. }) => return self.headroom_key(key),
             Some(Panel::Diff { .. }) => return self.diff_key(code),
             Some(Panel::Terminal { .. }) => return self.terminal_key(code),
             Some(Panel::Workflows { .. } | Panel::WorkflowRun { .. } | Panel::WorkflowSave { .. }) => return self.workflow_key(code),
@@ -2599,6 +2607,7 @@ impl App {
                 | Panel::Models { .. }
                 | Panel::ContextWindows { .. }
                 | Panel::ProviderOrder { .. }
+                | Panel::Headroom { .. }
                 | Panel::Terminal { .. }
                 | Panel::Workflows { .. }
                 | Panel::WorkflowRun { .. }
@@ -2879,6 +2888,27 @@ impl App {
         self.panel = Some(Panel::ContextWindows { tab: 1, query: Editor::new(), index });
     }
 
+    fn headroom_key(&mut self, key: KeyEvent) {
+        let Some(Panel::Headroom { row, input }) = self.panel.as_mut() else { return };
+        let row = *row;
+        match key.code {
+            KeyCode::Esc => {}
+            KeyCode::Enter if row == HEADROOM_URL_ROW => {
+                let url = input.text().trim().trim_end_matches('/').to_string();
+                self.update_settings(|s| s.headroom_url = url);
+            }
+            KeyCode::Enter => {
+                let token = input.text().trim().to_string();
+                self.update_settings(|s| s.headroom_token = token);
+            }
+            _ => {
+                input.edit_key(key);
+                return;
+            }
+        }
+        self.panel = Some(Panel::Settings { row, query: Editor::new() });
+    }
+
     fn context_windows_key(&mut self, key: KeyEvent) {
         let Some(Panel::ContextWindows { tab, query, index }) = self.panel.as_mut() else { return };
         let catalog = self.client.catalog();
@@ -3026,6 +3056,12 @@ impl App {
             self.open_context_windows();
             return;
         }
+        if row == HEADROOM_URL_ROW || row == HEADROOM_TOKEN_ROW {
+            let mut input = Editor::new();
+            input.set(if row == HEADROOM_URL_ROW { &self.settings.headroom_url } else { &self.settings.headroom_token });
+            self.panel = Some(Panel::Headroom { row, input });
+            return;
+        }
         self.update_settings(|s| match row {
             1 => s.thinking = step(&THINKING_LEVELS, &s.thinking.as_str(), forward).to_string(),
             2 => s.permission_mode = step(&MODES, &s.permission_mode, forward),
@@ -3059,7 +3095,7 @@ impl App {
         });
     }
 
-    fn setting_values(&self) -> [Line; 34] {
+    fn setting_values(&self) -> [Line; 36] {
         let s = &self.settings;
         let condense_model = if s.condense_model.is_empty() { "auto" } else { &s.condense_model };
         let fallback_model = if s.fallback_model.is_empty() { "auto" } else { &s.fallback_model };
@@ -3088,7 +3124,7 @@ impl App {
             choices(PONYTAIL_LEVELS.map(String::from), &s.ponytail),
             choices(CAVEMAN_LEVELS.map(String::from), &s.caveman),
             optional_tool(s.rtk, "rtk"),
-            optional_tool(s.headroom, "headroom"),
+            if s.headroom_url.is_empty() { optional_tool(s.headroom, "headroom") } else { on_off_choices(s.headroom) },
             choices(THINKING_LEVELS.map(String::from), &s.subagent_effort),
             on_off_choices(s.notifications),
             choices(SCROLL_LINES.map(|n| n.to_string()), &s.scroll_lines.to_string()),
@@ -3105,6 +3141,11 @@ impl App {
             on_off_choices(s.footer_cost),
             on_off_choices(s.footer_account),
             on_off_choices(s.progress_bar),
+            match s.headroom_url.as_str() {
+                "" => vec![span("local", BRIGHT.bold()), span("   enter edit", MUTED)],
+                url => vec![span(url, BRIGHT.bold()), span("   enter edit", MUTED)],
+            },
+            vec![span(if s.headroom_token.is_empty() { "none" } else { "set" }, BRIGHT.bold()), span("   enter edit", MUTED)],
         ]
     }
 
@@ -3171,6 +3212,20 @@ impl App {
                     selected: *index,
                     empty: "No matching models.",
                     hint: "↑↓ navigate     ←→ change     tab providers/models     type to search     esc back",
+                };
+                view.render(width, PANEL_ROWS)
+            }
+            Panel::Headroom { row, input } => {
+                let token = *row == HEADROOM_TOKEN_ROW;
+                let view = panel::Panel {
+                    title: SETTING_NAMES[*row].into(),
+                    tabs: &[],
+                    tab: 0,
+                    search: Some(input.field(token.then_some('•'))),
+                    rows: &[],
+                    selected: 0,
+                    empty: if token { "The remote headroom's HEADROOM_PROXY_TOKEN, sent as x-headroom-proxy-token." } else { "Empty uses the local headroom." },
+                    hint: "enter save     esc back",
                 };
                 view.render(width, PANEL_ROWS)
             }
