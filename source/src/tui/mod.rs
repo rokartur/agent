@@ -673,9 +673,7 @@ pub fn run(agent: Agent, setup: Setup, model_lists: JoinHandle<Vec<String>>) -> 
     let mut out = std::io::stdout();
     enter(&mut out).map_err(|e| format!("Cannot set up the terminal: {e}"))?;
     report_cwd(&app.cwd);
-    if let Some(title) = app.saved_title(&app.session_id) {
-        set_terminal_title(&title);
-    }
+    set_terminal_title(&app.saved_title(&app.session_id).unwrap_or_else(|| unnamed_title(&app.cwd)));
     let previous_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         // `panic = "abort"` skips Drop, so ffmpeg and bg terminals in their own sessions would outlive the agent.
@@ -3820,8 +3818,7 @@ impl App {
                 self.session_path = path;
                 self.spent = Spent::default();
                 self.session_usage = Vec::new();
-                // An empty OSC 0 hands the title back to the terminal's default until the new session is named.
-                set_terminal_title("");
+                set_terminal_title(&unnamed_title(&self.cwd));
                 self.system("session", "Started a fresh conversation");
             }
             Event::Moved { id, path, cwd } => {
@@ -4406,6 +4403,11 @@ fn show_progress(busy: bool) {
         print!("{sequence}");
         let _ = std::io::stdout().flush();
     }
+}
+
+fn unnamed_title(cwd: &Path) -> String {
+    let project = cwd.file_name().map(|name| name.to_string_lossy()).unwrap_or_default();
+    format!("agent | {project}")
 }
 
 /// OSC 0 sets the terminal's window and tab title.
