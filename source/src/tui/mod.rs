@@ -4555,7 +4555,7 @@ fn render_item(item: &Item, width: usize, expanded: bool) -> Vec<Line> {
         Item::Subagent(run) => subagent_done_lines(run, width),
         Item::Error(text) => system_lines("✗", "error", text, ERROR, width),
         Item::User(text) => prompt_rows(text, BRIGHT, width),
-        Item::Images(tags) => tags.iter().map(|tag| vec![span("  └ ", MUTED), span(tag, PLAIN)]).collect(),
+        Item::Images(tags) => tags.iter().map(|tag| image_row(tag)).collect(),
         Item::Assistant { text, thinking } => {
             let mut lines = Vec::new();
             if expanded && !thinking.trim().is_empty() {
@@ -4579,6 +4579,11 @@ fn render_item(item: &Item, width: usize, expanded: bool) -> Vec<Line> {
             vec![vec![span(" ", PLAIN), star(usize::MAX), span(format!(" Cooked for {}", duration(*took)), Style::fg(245)), span(stats, MUTED)]]
         }
     }
+}
+
+fn image_row(tag: &str) -> Line {
+    let Some((name, path)) = tag.split_once("] ") else { return vec![span("  └ ", MUTED), span(tag, PLAIN)] };
+    vec![span("  └ ", MUTED), span(&format!("{name}]"), PLAIN), span(&format!(" {path}"), MUTED)]
 }
 
 fn system_lines(icon: &str, source: &str, text: &str, style: Style, width: usize) -> Vec<Line> {
