@@ -510,7 +510,7 @@ const HOTKEYS: [(&str, &[(&str, &str)]); 4] = [
         &[
             ("Ctrl+O", "expand tool output and thinking"),
             ("Shift+Tab", "cycle thinking level"),
-            ("Ctrl+P", "cycle models listed in cycle_models"),
+            ("Ctrl+P", "cycle the models pinned with Tab in /model"),
             ("PageUp, PageDown", "scroll the transcript"),
             (if cfg!(target_os = "macos") { "Option+Down" } else { "Alt+Down" }, "jump to the latest message"),
             ("Down", "walk the shells pill and running subagents, Enter opens one (empty editor)"),
@@ -1760,10 +1760,10 @@ impl App {
         self.hint = Some((format!("Thinking level: {}", self.settings.thinking), Instant::now()));
     }
 
-    /// Switches to the next `cycle_models` entry, skipping ids missing from the catalog.
+    /// Switches to the next pinned model, skipping pins missing from the catalog.
     fn cycle_model(&mut self) {
-        if self.settings.cycle_models.is_empty() {
-            self.hint = Some(("Set cycle_models in settings.json to switch models with Ctrl+P".into(), Instant::now()));
+        if self.settings.pinned_models.is_empty() {
+            self.hint = Some(("Pin models with Tab in /model to switch between them with Ctrl+P".into(), Instant::now()));
             return;
         }
         let catalog = self.client.catalog();
@@ -1771,7 +1771,15 @@ impl App {
             self.hint = Some((MODELS_STILL_LOADING.into(), Instant::now()));
             return;
         }
-        let (available, missing): (Vec<String>, Vec<String>) = self.settings.cycle_models.iter().cloned().partition(|id| catalog.iter().any(|m| m.id == *id));
+        let mut available = Vec::new();
+        let mut missing = Vec::new();
+        for key in &self.settings.pinned_models {
+            match catalog.iter().find(|m| model_key(m) == *key) {
+                Some(m) if !available.contains(&m.id) => available.push(m.id.clone()),
+                Some(_) => {}
+                None => missing.push(key.clone()),
+            }
+        }
         if !missing.is_empty() {
             self.system("models", format!("Not available, skipped: {}", missing.join(", ")));
         }
