@@ -1009,12 +1009,12 @@ fn spawn_input(events: Sender<Msg>) {
 
 fn event_loop(app: &mut App, inbox: &Receiver<Msg>, out: &mut Stdout) -> Result<(), String> {
     let mut screen = Screen::new();
-    let mut progress_shown = false;
+    let mut progress_sent: Option<Instant> = None;
     loop {
         let busy = app.working.is_some() && app.settings.progress_bar;
-        if busy != progress_shown {
-            progress_shown = busy;
-            show_progress(busy);
+        if let Some(show) = progress_due(busy, progress_sent, Instant::now()) {
+            progress_sent = show.then(Instant::now);
+            show_progress(show);
         }
         let (width, height) = terminal::size().map_err(|e| e.to_string())?;
         let (rows, cursor) = app.frame(width as usize, height as usize);
@@ -4469,6 +4469,18 @@ fn report_cwd(cwd: &Path) {
     let _ = std::io::stdout().flush();
 }
 
+/// Ghostty drops a progress bar that sees no update for 15 s, so a long turn resends it.
+const PROGRESS_REFRESH: Duration = Duration::from_secs(5);
+
+/// The progress state to send now, if any: `sent` is when "busy" last went out, None while the bar is cleared.
+fn progress_due(busy: bool, sent: Option<Instant>, now: Instant) -> Option<bool> {
+    match sent {
+        None => busy.then_some(true),
+        Some(_) if !busy => Some(false),
+        Some(at) => (now.duration_since(at) >= PROGRESS_REFRESH).then_some(true),
+    }
+}
+
 fn show_progress(busy: bool) {
     if let Some(sequence) = notify::progress(busy, |name| std::env::var(name).ok()) {
         print!("{sequence}");
@@ -5999,6 +6011,16 @@ mod tests {
         let done = lines.iter().position(|line| line.contains("Done.")).unwrap();
         assert!(lines[one..two].iter().all(|line| !line.trim().is_empty()), "{lines:#?}");
         assert!(lines[two..done].iter().any(|line| line.trim().is_empty()), "{lines:#?}");
+    }
+
+    #[test]
+    fn a_long_turn_resends_the_progress_bar_before_the_terminal_drops_it() {
+        let start = Instant::now();
+        assert_eq!(progress_due(false, None, start), None);
+        assert_eq!(progress_due(true, None, start), Some(true));
+        assert_eq!(progress_due(true, Some(start), start + Duration::from_secs(1)), None);
+        assert_eq!(progress_due(true, Some(start), start + PROGRESS_REFRESH), Some(true));
+        assert_eq!(progress_due(false, Some(start), start + Duration::from_secs(1)), Some(false));
     }
 
     #[test]
