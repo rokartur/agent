@@ -126,7 +126,7 @@ fn dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
 
 const SHRINK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// Scales the image so its longest side is `side` px, with `sips` on macOS, `magick` elsewhere. A JPEG stays JPEG,
+/// Scales the image so its longest side is `side` px, with `sips` on macOS, ImageMagick elsewhere. A JPEG stays JPEG,
 /// the rest become PNG: sips cannot write WebP, and a GIF keeps only its first frame.
 fn shrunk(bytes: &[u8], media_type: &'static str, side: u32) -> Result<(&'static str, Vec<u8>), String> {
     let (media_type, format) = if media_type == "image/jpeg" { ("image/jpeg", "jpeg") } else { ("image/png", "png") };
@@ -137,16 +137,23 @@ fn shrunk(bytes: &[u8], media_type: &'static str, side: u32) -> Result<(&'static
     let output = dir.join(format!("{nonce}-out.{format}"));
     std::fs::write(&input, bytes).map_err(|e| format!("Cannot write {}: {e}", input.display()))?;
     let side = side.to_string();
-    let (program, mut command) = if cfg!(target_os = "macos") {
-        let mut command = crate::process::command("sips");
-        command.args(["-s", "format", format, "-Z", &side]).arg(&input).arg("--out").arg(&output);
-        ("sips", command)
-    } else {
-        let mut command = crate::process::command("magick");
-        command.arg(format!("{}[0]", input.display())).args(["-resize", &format!("{side}x{side}")]).arg(&output);
-        ("magick", command)
-    };
-    let result = crate::process::output_within(&mut command, SHRINK_TIMEOUT);
+    // ImageMagick 6, as Ubuntu ships it, has `convert` and no `magick`.
+    let programs: &[&str] = if cfg!(target_os = "macos") { &["sips"] } else { &["magick", "convert"] };
+    let mut program = programs[0];
+    let mut result = Err(std::io::ErrorKind::NotFound.into());
+    for &candidate in programs {
+        program = candidate;
+        let mut command = crate::process::command(program);
+        if program == "sips" {
+            command.args(["-s", "format", format, "-Z", &side]).arg(&input).arg("--out").arg(&output);
+        } else {
+            command.arg(format!("{}[0]", input.display())).args(["-resize", &format!("{side}x{side}")]).arg(&output);
+        }
+        result = crate::process::output_within(&mut command, SHRINK_TIMEOUT);
+        if !result.as_ref().is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound) {
+            break;
+        }
+    }
     let shrunk = std::fs::read(&output);
     let _ = std::fs::remove_file(&input);
     let _ = std::fs::remove_file(&output);
@@ -316,7 +323,7 @@ mod tests {
             command.args(["-z", "1920", "3840"]).arg(&file);
             command
         } else {
-            let mut command = crate::process::command("magick");
+            let mut command = crate::process::command("convert");
             command.arg(&file).args(["-resize", "3840x1920!"]).arg(&file);
             command
         };

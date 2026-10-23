@@ -19,9 +19,9 @@ jobs:
         working-directory: source
     steps:
       - uses: actions/checkout@v7
-      # Tests run rg and fd; Ubuntu ships fd as fdfind.
+      # Tests run rg, fd and ImageMagick's convert; Ubuntu ships fd as fdfind.
       - if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y ripgrep fd-find && sudo ln -s "$(command -v fdfind)" /usr/local/bin/fd
+        run: sudo apt-get update && sudo apt-get install -y ripgrep fd-find imagemagick && sudo ln -s "$(command -v fdfind)" /usr/local/bin/fd
       - if: runner.os == 'macOS'
         run: brew install ripgrep fd
       - run: rustup update stable && rustup default stable && rustup component add clippy rustfmt
