@@ -127,6 +127,8 @@ enum Msg {
     McpChanged,
     Transcribed(Result<String, String>),
     RewindPoints(Vec<RewindPoint>),
+    /// The unanswered prompt Esc took back, now gone from the session.
+    Retracted(RewindPoint),
     /// `entry` is where the rewound prompt sits on screen; None redraws from `messages`.
     Rewound {
         messages: Vec<Value>,
@@ -353,6 +355,8 @@ enum Command {
     /// Starts a turn from follow-ups that arrived while idle.
     FollowUps,
     RewindPoints,
+    /// Drops the last prompt if the model has not answered it.
+    Retract,
     /// Drops the prompt at message `at` and everything after it; `entry` passes through to `Msg::Rewound`.
     Rewind {
         at: usize,
@@ -512,7 +516,7 @@ const HOTKEYS: [(&str, &[(&str, &str)]); 4] = [
             ("Down", "walk the shells pill and running subagents, Enter opens one (empty editor)"),
         ],
     ),
-    ("Stop", &[("Esc", "abort the running turn"), ("Esc Esc", "rewind to an earlier prompt and its files (idle)"), ("Ctrl+C Ctrl+C", "quit"), ("Ctrl+D", "quit on an empty editor")]),
+    ("Stop", &[("Esc", "abort the running turn; before any answer, take the prompt back into the editor"), ("Esc Esc", "rewind to an earlier prompt and its files (idle)"), ("Ctrl+C Ctrl+C", "quit"), ("Ctrl+D", "quit on an empty editor")]),
 ];
 
 enum Item {
@@ -569,6 +573,8 @@ struct App {
     editor: Editor,
     commands: Sender<Command>,
     working: Option<Instant>,
+    /// Esc came before any answer, so the turn's end puts the prompt back into the editor.
+    retract: bool,
     recording: Option<voice::Recording>,
     transcribing: Option<Instant>,
     /// None until the terminal reports focus or a key arrives; notifications go out unless it is Some(true).
@@ -844,6 +850,16 @@ fn spawn_worker(mut agent: Agent, mut settings: Settings, model_lists: JoinHandl
                     let _ = events.send(Msg::RewindPoints(agent::rewind_points(&agent.messages)));
                     continue;
                 }
+                Command::Retract => {
+                    let unanswered = agent::rewind_points(&agent.messages).pop().filter(|point| point.at + 1 == agent.messages.len());
+                    if let Some(point) = unanswered {
+                        match agent.rewind(point.at) {
+                            Ok(_) => _ = events.send(Msg::Retracted(point)),
+                            Err(error) => _ = events.send(Msg::Agent(Event::Notice(error))),
+                        }
+                    }
+                    continue;
+                }
                 Command::Rewind { at, entry } => match agent.rewind(at) {
                     Ok(files) => {
                         let _ = events.send(Msg::Rewound { messages: agent.messages.clone(), files, entry });
@@ -1086,6 +1102,7 @@ impl App {
             editor: Editor::with_history(recent_prompts),
             commands,
             working: None,
+            retract: false,
             recording: None,
             transcribing: None,
             focused: None,
@@ -1486,6 +1503,7 @@ impl App {
                 let window = self.context_window();
                 self.push(Item::Lines(context_lines(split, window, session, self.last_usage)));
             }
+            Msg::Retracted(point) => self.take_back(point),
             Msg::Rewound { messages, files, entry } => {
                 match entry {
                     Some(entry) => self.entries.truncate(entry),
@@ -1596,6 +1614,10 @@ impl App {
                 self.submit(text);
             }
             KeyCode::Esc if self.viewed.is_some() => self.view_run(None),
+            KeyCode::Esc if self.working.is_some() && self.editor.is_empty() && !answered(&self.entries) => {
+                self.retract = true;
+                self.abort.store(true, Ordering::Relaxed);
+            }
             KeyCode::Esc if self.working.is_some() => {
                 if !self.abort.swap(true, Ordering::Relaxed) {
                     self.system("agent", "Interrupting...");
@@ -1675,6 +1697,14 @@ impl App {
             self.push(Item::Images(tags));
         }
         kept
+    }
+
+    /// Drops the last prompt from the transcript and puts it back in the editor.
+    fn take_back(&mut self, point: RewindPoint) {
+        if let Some(prompt) = self.entries.iter().rposition(|entry| matches!(entry.item, Item::User(_))) {
+            self.entries.truncate(prompt);
+        }
+        self.restore_draft(point);
     }
 
     /// Puts a rewound prompt back in an empty editor, with its images under their `[Image #n]` numbers again.
@@ -3962,6 +3992,18 @@ impl App {
             Ok(answer) => self.notify(answer),
             Err(error) => self.notify(&format!("Failed: {error}")),
         }
+        if std::mem::take(&mut self.retract) {
+            match &result {
+                Ok(_) => _ = self.commands.send(Command::Retract),
+                // prompt() already dropped a prompt that got no reply; its pasted images went with it.
+                Err(_) => {
+                    if let Some(Item::User(text)) = self.entries.iter().rev().map(|entry| &entry.item).find(|item| matches!(item, Item::User(_))) {
+                        let point = RewindPoint { at: 0, text: text.clone(), images: Vec::new() };
+                        self.take_back(point);
+                    }
+                }
+            }
+        }
         if let Err(error) = result {
             self.push(Item::Error(error));
         }
@@ -4990,6 +5032,12 @@ fn image_slots(text: &str, images: Vec<Value>) -> Vec<Value> {
 }
 
 /// The entry of the prompt chosen in the rewind panel: match the points to user entries from the end.
+/// Whether anything but notices came after the last prompt on screen.
+fn answered(entries: &[Entry]) -> bool {
+    let mut since_prompt = entries.iter().rev().take_while(|entry| !matches!(entry.item, Item::User(_)));
+    !since_prompt.all(|entry| matches!(entry.item, Item::System { .. } | Item::Images(_)))
+}
+
 fn rewind_entry(entries: &[Entry], points: &[RewindPoint], chosen: usize) -> Option<usize> {
     let mut next = points.len();
     for (position, entry) in entries.iter().enumerate().rev() {
@@ -5956,6 +6004,17 @@ mod tests {
         let points = [point(0, "go"), point(2, "go"), point(4, "done?")];
         assert_eq!(rewind_entry(&entries, &points, 0), Some(0));
         assert_eq!(rewind_entry(&entries, &points, 1), Some(3));
+    }
+
+    #[test]
+    fn only_notices_after_the_prompt_leave_it_unanswered() {
+        let entry = |item: Item| Entry { item, cache: None };
+        let prompt = entry(Item::User("go".into()));
+        let notice = entry(Item::System { source: "models".into(), text: "retrying".into(), failed: false });
+        let thinking = entry(Item::Assistant { text: String::new(), thinking: "hm".into() });
+        assert!(!answered(&[prompt, entry(Item::Images(Vec::new())), notice]));
+        let prompt = entry(Item::User("go".into()));
+        assert!(answered(&[prompt, thinking]));
     }
 
     #[test]
