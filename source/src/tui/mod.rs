@@ -1582,6 +1582,10 @@ impl App {
                     let path = &matches[self.menu_index.min(menu_len - 1)].0;
                     self.accept_path(path);
                 }
+                KeyCode::Tab | KeyCode::Enter if self.skill_query().is_some() => {
+                    let name = &matches[self.menu_index.min(menu_len - 1)].0;
+                    self.accept_skill(name);
+                }
                 KeyCode::Tab => self.accept_slash(false),
                 KeyCode::Enter => self.accept_slash(true),
                 _ => self.edit(key, ctrl, alt, shift, screen),
@@ -3799,8 +3803,13 @@ impl App {
             None => {
                 // A closed menu forgets its listing, so typing `@` again sees files created since.
                 self.path_matches.take();
+                let skills = self.enabled_skills().map(|skill| (format!("skill:{}", skill.name), skill.description.split_whitespace().collect::<Vec<_>>().join(" ")));
+                if let Some(word) = self.skill_query() {
+                    let query = format!("/skill:{}", word.trim_start_matches('/').trim_start_matches("skill:"));
+                    return matching_commands(&skills.collect::<Vec<_>>(), &query);
+                }
                 let mut commands = self.slash_commands.clone();
-                commands.extend(self.enabled_skills().map(|skill| (format!("skill:{}", skill.name), skill.description.split_whitespace().collect::<Vec<_>>().join(" "))));
+                commands.extend(skills);
                 commands.extend(self.templates.iter().map(|template| (format!("prompt:{}", template.name), template.description.clone())));
                 commands.extend(self.plugins.commands());
                 commands.extend(self.saved_workflows.iter().map(|saved| (saved.meta.name.clone(), saved.meta.description.clone())));
@@ -3812,6 +3821,24 @@ impl App {
     /// The `@` token right before the cursor, without the `@`.
     fn file_query(&self) -> Option<&str> {
         self.editor.before_cursor().rsplit(char::is_whitespace).next()?.strip_prefix('@')
+    }
+
+    /// A `/` word right before the cursor with text in front of it: there the menu offers only skills.
+    fn skill_query(&self) -> Option<&str> {
+        let before = self.editor.before_cursor();
+        let word = before.rsplit(char::is_whitespace).next()?;
+        (word.starts_with('/') && word.len() < before.len()).then_some(word)
+    }
+
+    fn accept_skill(&mut self, name: &str) {
+        let typed = self.skill_query().map_or(0, |word| word.chars().count());
+        for _ in 0..typed {
+            self.editor.backspace();
+        }
+        // Only a leading `/skill:` expands on submit, so the pick moves to the front.
+        let text = self.editor.text();
+        self.editor.set(&format!("/{name} {}", text.trim_start()));
+        self.menu_index = 0;
     }
 
     /// Swaps the typed query for the path; a directory keeps the menu open for its entries.
