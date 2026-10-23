@@ -4570,7 +4570,7 @@ fn render_tool(name: &str, input: &Value, result: Option<&(String, bool)>, width
     let header = match skill_name(name, input) {
         Some(skill) => {
             let hint = if expanded { "" } else { " (ctrl+o to expand)" };
-            vec![span(icon, icon_style), span(" [skill] ", TOOL_NAME), span(skill, TOOL_ARGS), span(hint, MUTED)]
+            vec![span(icon, icon_style), span(" Skill ", TOOL_NAME), span(skill, TOOL_ARGS), span(hint, MUTED)]
         }
         None => {
             vec![span(icon, icon_style), span(" ", PLAIN), span(name, TOOL_NAME), span(" ", PLAIN), span(tool_args(name, input), TOOL_ARGS)]
@@ -5699,7 +5699,7 @@ mod tests {
     fn reading_a_skill_file_shows_the_skill_name() {
         let result = ("body".to_string(), false);
         let lines = render_tool("Read", &json!({"file_path": "/x/skills/verify-web-app/SKILL.md"}), Some(&result), 80, false);
-        assert_eq!(text(&lines[0]), "✓ [skill] verify-web-app (ctrl+o to expand)");
+        assert_eq!(text(&lines[0]), "✓ Skill verify-web-app (ctrl+o to expand)");
     }
 
     #[test]
