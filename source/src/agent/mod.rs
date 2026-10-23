@@ -1673,6 +1673,7 @@ impl Agent {
         self.grants = Grants::default();
         self.next_ref = condense::next_ref(&history.condensed);
         self.messages = history.messages;
+        crate::image::fit_history(&mut self.messages);
         self.condensed = history.condensed;
         *self.todos.lock().unwrap() = history.todos;
         *self.goal.lock().unwrap() = history.goal;
