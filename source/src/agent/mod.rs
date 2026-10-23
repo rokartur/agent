@@ -15,12 +15,14 @@ pub mod context;
 pub mod edit_hooks;
 pub mod lsp;
 pub mod modes;
+pub mod peers;
 pub mod permissions;
 pub mod prompt;
 pub mod skill_usage;
 pub mod snapshots;
 pub mod subagent;
 pub mod usage;
+pub mod workflow;
 
 use crate::api::models::Model;
 use crate::api::{self, Client, Delta, Usage};
@@ -88,7 +90,7 @@ const REFUSED: &str = "Stopped: the model refused this request, and every retry 
 const TOOL_RESULT_SUMMARY_CHARS: usize = 2000;
 const COMPACT_MAX_TOKENS: u64 = 128_000;
 const SNAPSHOT_FAILED: &str = "File snapshot failed, a rewind will not restore files from this tool call";
-const BG_WAIT_SUBAGENTS_ONLY: &str = "TaskWait waits for subagents only. A background Bash task (bt-N) reports its exit as a message: keep working or end the turn, or peek with TaskOutput.";
+const BG_WAIT_SUBAGENTS_ONLY: &str = "Monitor waits for subagents only. A background Bash task (bt-N) reports its exit as a message: keep working or end the turn, or peek with TaskOutput.";
 const NAMING_SYSTEM: &str =
     "Name a coding session from the user's first message. Reply with the name only: 3 to 6 words naming the concrete task, in the language of the message, one line, no quotes, no markdown.";
 const NAMING_PROMPT_CHARS: usize = 2000;
@@ -112,6 +114,11 @@ pub enum Event {
         is_error: bool,
     },
     Steered(String),
+    /// A subagent's SendMessage, which the parent reads from the headless JSONL and routes.
+    Outbox {
+        to: String,
+        text: String,
+    },
     /// PushNotification: a desktop notification the model asked for.
     Push(String),
     /// Finished background work handed to the model.
@@ -238,6 +245,16 @@ pub struct Agent {
     pub terminals: Arc<Mutex<Terminals>>,
     /// Shared with the UI for /tasks.
     pub subagents: Arc<Mutex<Runs>>,
+    /// Shared with the UI for /workflows and the task panel.
+    pub workflows: Arc<Mutex<Vec<Arc<workflow::Workflow>>>>,
+    /// The parent session's id when this agent is a subagent.
+    pub parent: Option<String>,
+    /// Interactive sessions listen for cross-session messages here.
+    pub inbox: Option<peers::Inbox>,
+    /// The session's `project｜topic` name, shown to other sessions by ListAgents.
+    pub title: String,
+    /// The run each subagent label reached in SendMessage, so a newer run reusing the label is not messaged by mistake.
+    pub addressed: HashMap<String, String>,
     pub subagent_concurrency: usize,
     pub subagent_effort: String,
     /// --tools: the only tools offered, MCP and plugin tools included.
@@ -366,6 +383,7 @@ impl Agent {
     pub fn prompt(&mut self, text: &str, emit: &mut dyn FnMut(Event)) -> Result<String, String> {
         let text = &self.plugins.input(text, &self.plugin_context())?;
         self.abort.store(false, Ordering::Relaxed);
+        self.describe_to_peers(true);
         if self.interactive && self.messages.is_empty() {
             self.start_naming(text);
         }
@@ -395,7 +413,12 @@ impl Agent {
         if let Some(naming) = self.pending_title.take_if(|naming| naming.is_finished())
             && let Ok(Ok(title)) = naming.join()
         {
+            self.title = title.clone();
             emit(Event::Titled(title));
+        }
+        self.describe_to_peers(false);
+        if let Some(inbox) = &self.inbox {
+            inbox.went_idle(&self.session.id, &self.cwd);
         }
         self.plugins.event(json!({"type": "prompt_end", "error": result.as_ref().err(), "context": self.plugin_context()}));
         result
@@ -640,12 +663,12 @@ impl Agent {
             "Goal" => self.goal_tool(input),
             "Bash" if input["run_in_background"] == true => self.terminals.lock().unwrap().start(input, &self.cwd, &self.follow_ups),
             "TaskOutput" => self.terminals.lock().unwrap().status_of(input, &self.follow_ups),
-            "TaskStop" => {
-                let targets = self.terminals.lock().unwrap().for_kill(input);
-                targets.map(|targets| bg::kill(&targets, &self.follow_ups, &self.abort))
-            }
+            "TaskStop" => self.task_stop(input),
+            "SendMessage" => self.send_message(input, emit),
+            "ListAgents" => Ok(self.list_agents()),
             "Agent" => self.subagent(input, emit),
-            "TaskWait" => self.bg_wait(input),
+            "Workflow" => self.workflow(input),
+            "Monitor" => self.bg_wait(input),
             "CronCreate" if self.interactive => tools::cron::create(&self.crons, input, &self.follow_ups),
             "ScheduleWakeup" if self.interactive => tools::cron::wakeup(&self.crons, input, &self.follow_ups),
             "CronCreate" | "ScheduleWakeup" => Err("Scheduling needs the interactive UI; this process ends with its prompt.".into()),
@@ -728,6 +751,13 @@ impl Agent {
         blocks
     }
 
+    /// Work whose result has yet to reach the model. Follow-ups are read last: a run queues its own while it flips to done.
+    pub fn has_background_work(&self) -> bool {
+        self.workflows.lock().unwrap().iter().any(|run| run.is_running())
+            || self.subagents.lock().unwrap().list.iter().any(|run| run.background && run.is_running())
+            || !self.follow_ups.lock().unwrap().is_empty()
+    }
+
     /// Starts a turn from queued follow-ups while idle; Ok("") when another turn already took them.
     pub fn run_follow_ups(&mut self, emit: &mut dyn FnMut(Event)) -> Result<String, String> {
         let blocks = self.take_queued(emit);
@@ -736,6 +766,90 @@ impl Agent {
             return Ok(String::new());
         }
         self.pursue(&texts.join("\n\n"), emit)
+    }
+
+    pub fn describe_to_peers(&self, busy: bool) {
+        if let Some(inbox) = &self.inbox {
+            inbox.describe(&self.session.id, &self.title, &self.cwd, busy);
+        }
+    }
+
+    /// TaskStop: `sa-N` stops a subagent, `wf-N` a workflow, anything else names a background terminal.
+    fn task_stop(&self, input: &Value) -> Result<String, String> {
+        let ids: Vec<&str> = input["task_ids"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+        let (workflows, ids): (Vec<&str>, Vec<&str>) = ids.iter().partition(|id| id.starts_with("wf-"));
+        let (agents, terminals): (Vec<&str>, Vec<&str>) = ids.iter().partition(|id| id.starts_with("sa-"));
+        let mut lines = Vec::new();
+        for id in workflows {
+            let run = self.workflows.lock().unwrap().iter().find(|run| run.id == id).cloned().ok_or_else(|| format!("No workflow {id}."))?;
+            run.stop();
+            lines.push(format!("Stopped {} ({}) and its agents. Relaunch with resumeFromRunId {} to reuse its finished agents.", run.id, run.name, run.run_id));
+        }
+        for id in agents {
+            let run = self.subagents.lock().unwrap().named(id).ok_or_else(|| format!("No subagent {id}."))?;
+            run.stop();
+            lines.push(format!("Stopped {} ({}). SendMessage resumes it once it has exited.", run.id, run.label));
+        }
+        if !terminals.is_empty() || lines.is_empty() {
+            let targets = self.terminals.lock().unwrap().for_kill(&json!({"task_ids": terminals}))?;
+            lines.push(bg::kill(&targets, &self.follow_ups, &self.abort));
+        }
+        Ok(lines.join("\n"))
+    }
+
+    fn send_message(&mut self, input: &Value, emit: &mut dyn FnMut(Event)) -> Result<String, String> {
+        let to = input["to"].as_str().map(|to| to.trim().trim_start_matches('@')).filter(|to| !to.is_empty()).ok_or("SendMessage needs `to`.")?;
+        let text = input["message"].as_str().unwrap_or_default();
+        let notify_when_idle = input["notify_when_idle"] == true;
+        if text.is_empty() && !notify_when_idle {
+            return Err("SendMessage needs a message.".into());
+        }
+        if self.parent.is_some() {
+            emit(Event::Outbox { to: to.to_string(), text: text.to_string() });
+            return Ok(format!("Sent to {to}."));
+        }
+        if to == "main" {
+            return Err("You are main, the agent the user talks to.".into());
+        }
+        let run = self.subagents.lock().unwrap().named(to);
+        if let Some(run) = run {
+            if text.is_empty() {
+                return Err("SendMessage needs a message; notify_when_idle is for other sessions.".into());
+            }
+            if run.id != to {
+                if let Some(earlier) = self.addressed.get(to).filter(|earlier| **earlier != run.id) {
+                    return Err(format!(
+                        "{to} now reaches {}, a newer agent than {earlier}, which you messaged before. Send to {earlier} for the earlier one or to {} for the newer one.",
+                        run.id, run.id
+                    ));
+                }
+                self.addressed.insert(to.to_string(), run.id.clone());
+            }
+            return subagent::send(&self.subagents, &run.id, text, None, &self.follow_ups);
+        }
+        let peer = peers::find(&self.home, to)?.ok_or_else(|| format!("No subagent or session named {to}. ListAgents lists the ones you can message."))?;
+        let reply_to = self.inbox.as_ref().map(peers::Inbox::socket);
+        if notify_when_idle && reply_to.is_none() {
+            return Err("Only an interactive session can get idle notices.".into());
+        }
+        peers::send(&peer, &self.session.id, &self.cwd, text, reply_to.as_deref().filter(|_| notify_when_idle))
+    }
+
+    fn list_agents(&self) -> String {
+        let mut sections = Vec::new();
+        let runs = self.subagents.lock().unwrap();
+        let subagents: Vec<String> = runs.list.iter().filter(|run| run.workflow.is_none()).map(|run| format!("- {} ({}), {}", run.id, run.label, run.status())).collect();
+        if !subagents.is_empty() {
+            sections.push(format!("Subagents (`to`: id or label; a finished one resumes in the background):\n{}", subagents.join("\n")));
+        }
+        let sessions: Vec<String> = peers::list(&self.home).iter().map(peers::Peer::line).collect();
+        if !sessions.is_empty() {
+            sections.push(format!("Other sessions on this machine (`to`: session id or its prefix, title, or pid):\n{}", sessions.join("\n")));
+        }
+        if sections.is_empty() {
+            return "No other agents. Subagents you start with Agent and other interactive sessions on this machine show here.".into();
+        }
+        sections.join("\n\n")
     }
 
     fn bg_wait(&self, input: &Value) -> Result<String, String> {
@@ -794,9 +908,10 @@ impl Agent {
                     account,
                     extra_dirs: self.extra_dirs.clone(),
                     trusted: prompt::is_trusted(&self.trusted_projects, &cwd),
+                    web: false,
                 };
                 // The tool reports failure, so this chunk's runs must not keep going; earlier chunks have finished.
-                match self.subagents.lock().unwrap().spawn(launch, background, &self.follow_ups) {
+                match subagent::spawn(&self.subagents, launch, background, None, &self.follow_ups) {
                     Ok(run) => started.push(run),
                     Err(error) => return Err(stop_after_failed_spawn(error, &started, &runs)),
                 }
@@ -814,12 +929,86 @@ impl Agent {
         }
         if background {
             let names: Vec<String> = runs.iter().map(|r| format!("{} ({})", r.id, r.label)).collect();
-            return Ok(format!("Started {} in the background. Each answer arrives as a message when it finishes, or TaskWait waits for them; /tasks shows progress.", names.join(", ")));
+            return Ok(format!("Started {} in the background. Each answer arrives as a message when it finishes, or Monitor waits for them; /tasks shows progress.", names.join(", ")));
         }
         if let [run] = runs.as_slice() {
             return Ok(run.result_text());
         }
         Ok(result_sections(&runs))
+    }
+
+    /// Workflow: resolves the script (scriptPath, then script, then a saved or bundled name) and starts it in the background.
+    fn workflow(&mut self, input: &Value) -> Result<String, String> {
+        let script = match (input["scriptPath"].as_str(), input["script"].as_str(), input["name"].as_str()) {
+            (Some(path), _, _) => {
+                let path = self.cwd.join(path);
+                std::fs::read_to_string(&path).map_err(|e| format!("Cannot read {}: {e}", path.display()))?
+            }
+            (None, Some(script), _) => script.to_string(),
+            (None, None, Some(name)) => {
+                let name = name.trim_start_matches('/');
+                self.saved_workflow(name).ok_or_else(|| format!("No workflow named {name}."))?.script
+            }
+            (None, None, None) => match input["resumeFromRunId"].as_str() {
+                Some(run_id) => {
+                    let path = workflow::run_dir(&self.workflow_runs_dir(), run_id)?.join("script.js");
+                    std::fs::read_to_string(&path).map_err(|_| format!("Run {run_id}: nothing to resume. Start the workflow over as a new run."))?
+                }
+                None => return Err("Workflow needs `script`, `name`, `scriptPath` or `resumeFromRunId`.".into()),
+            },
+        };
+        let mode = *self.permission_mode.lock().unwrap();
+        let default_model = if self.subagent_model.is_empty() { &self.model } else { &self.subagent_model };
+        let models: Vec<(String, Option<String>)> =
+            self.client.catalog().iter().map(|model| (model.id.clone(), self.client.account(&model.provider).map(|account| format!("{}={}", model.provider, account.0)))).collect();
+        let account = models.iter().find(|(id, _)| id == default_model).and_then(|(_, account)| account.clone());
+        let base = Launch {
+            label: String::new(),
+            task: String::new(),
+            cwd: self.cwd.clone(),
+            model: default_model.clone(),
+            thinking: self.effort.clone(),
+            mode,
+            parent_session: self.session.id.clone(),
+            explore: false,
+            account,
+            extra_dirs: self.extra_dirs.clone(),
+            trusted: prompt::is_trusted(&self.trusted_projects, &self.cwd),
+            web: true,
+        };
+        let host = workflow::Host { runs: self.subagents.clone(), follow_ups: self.follow_ups.clone(), base, models };
+        let runs_dir = self.workflow_runs_dir();
+        let run = workflow::launch(&self.workflows, script, input["args"].clone(), input["resumeFromRunId"].as_str(), &runs_dir, host)?;
+        Ok(json!({
+            "status": "async_launched",
+            "taskId": run.id,
+            "taskType": "local_workflow",
+            "workflowName": run.name,
+            "runId": run.run_id,
+            "summary": run.description,
+            "transcriptDir": run.script_path.parent(),
+            "scriptPath": run.script_path,
+            "note": "The run's result arrives as a message when it finishes. /workflows shows its progress; TaskStop stops it."
+        })
+        .to_string())
+    }
+
+    /// Saved workflows this session can run by name: the project's when it is trusted, the personal ones, the bundled ones.
+    pub fn saved_workflows(&self) -> Vec<workflow::Saved> {
+        let trusted = prompt::is_trusted(&self.trusted_projects, &self.cwd);
+        workflow::saved(&prompt::project_agents_dirs(&self.cwd, trusted), &self.agent_dir)
+    }
+
+    fn saved_workflow(&self, name: &str) -> Option<workflow::Saved> {
+        self.saved_workflows().into_iter().find(|saved| saved.meta.name == name)
+    }
+
+    /// One directory per run next to the session file, so a resumed session can still relaunch its runs.
+    fn workflow_runs_dir(&self) -> PathBuf {
+        match &self.session.path {
+            Some(path) => path.with_extension("").join("workflows"),
+            None => std::env::temp_dir().join("agent-workflows").join(&self.session.id),
+        }
     }
 
     fn complete_plan(&mut self, input: &Value) -> Result<String, String> {
@@ -1094,7 +1283,13 @@ impl Agent {
     /// None when the call may run; otherwise the tool result that explains the refusal.
     /// A user's "No" also stops the turn, like Esc.
     fn check_permission(&mut self, tool: &str, input: &Value, edited_files: &[PathBuf], user_request: &str, emit: &mut dyn FnMut(Event)) -> Option<String> {
-        let request = permissions::request_for(tool, input, edited_files)?;
+        // A saved workflow is granted by its file, so a project workflow that later shadows the same name asks again.
+        let saved_file: Vec<PathBuf> = match (tool, input["name"].as_str()) {
+            ("Workflow", Some(name)) => self.saved_workflow(name.trim_start_matches('/')).and_then(|saved| saved.path).into_iter().collect(),
+            _ => Vec::new(),
+        };
+        let files = if tool == "Workflow" { &saved_file } else { edited_files };
+        let request = permissions::request_for(tool, input, files)?;
         let mode = *self.permission_mode.lock().unwrap();
         if mode == Mode::FullAccess || self.grants.allows(&request) {
             return None;

@@ -112,6 +112,13 @@ fn read_in_background(pipe: Option<impl std::io::Read + Send + 'static>) -> std:
     })
 }
 
+/// Signal 0 checks the process exists; EPERM means it does, under another user.
+pub fn alive(pid: u32) -> bool {
+    // SAFETY: kill with signal 0 sends nothing.
+    let sent = unsafe { kill(pid as i32, 0) == 0 };
+    sent || std::io::Error::last_os_error().raw_os_error() == Some(1)
+}
+
 /// Sends `signal` to every process in group `group`; a group that is already gone needs no handling.
 pub fn signal_group(group: u32, signal: i32) {
     let Ok(group) = i32::try_from(group) else { return };

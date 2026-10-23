@@ -46,11 +46,18 @@ pub struct Run {
     pub model: String,
     pub thinking: String,
     pub background: bool,
+    /// The Workflow run this agent belongs to; its answer goes to the script, not to the model.
+    pub workflow: Option<String>,
     started: Instant,
     child: Mutex<Option<Child>>,
     /// One JSON string per line: the task, then what the user types to the run.
     stdin: Mutex<Option<ChildStdin>>,
     pub state: Mutex<RunState>,
+    launch: Launch,
+    /// SendMessage resumed the finished run, so its next answer arrives as a message.
+    resumed: AtomicBool,
+    /// The subagent whose SendMessage resumed this run; the answer goes to it instead of to main.
+    reply_to: Mutex<Option<String>>,
 }
 
 #[derive(Default)]
@@ -120,6 +127,7 @@ impl Run {
 }
 
 /// What a child needs from its parent.
+#[derive(Clone)]
 pub struct Launch {
     pub label: String,
     pub task: String,
@@ -136,6 +144,8 @@ pub struct Launch {
     pub extra_dirs: Vec<PathBuf>,
     /// The parent trusts the project, so the child loads its files too.
     pub trusted: bool,
+    /// Keeps WebSearch, WebFetch and GetSearchContent, which Workflow agents get.
+    pub web: bool,
 }
 
 #[derive(Default)]
@@ -144,70 +154,10 @@ pub struct Runs {
 }
 
 impl Runs {
-    /// Starts the child and a thread reading its JSONL; a background run queues its answer as a follow-up.
-    pub fn spawn(&mut self, launch: Launch, background: bool, follow_ups: &Arc<Mutex<Vec<FollowUp>>>) -> Result<Arc<Run>, String> {
-        let running = self.running();
-        if running >= MAX_RUNNING {
-            return Err(format!("{MAX_RUNNING} subagents are already running, the limit. Wait for one to finish."));
-        }
-        let exe = std::env::current_exe().map_err(|e| format!("Cannot find the agent binary: {e}"))?;
-        // A child has no UI to ask in, so ask becomes auto.
-        let mode = match launch.mode {
-            Mode::FullAccess => "--full-access",
-            Mode::Ask | Mode::Auto => "--auto",
-        };
-        let mut args = vec!["--headless", "--model", &launch.model, "--thinking", &launch.thinking, mode, "--parent", &launch.parent_session];
-        if let Some(account) = &launch.account {
-            args.extend(["--account", account]);
-        }
-        if launch.explore {
-            args.push("--explore");
-        }
-        if launch.trusted {
-            args.push("--trust");
-        }
-        let mut child = crate::process::command(exe)
-            .args(args)
-            .args(launch.extra_dirs.iter().flat_map(|dir| [std::ffi::OsStr::new("--add-dir"), dir.as_os_str()]))
-            .current_dir(&launch.cwd)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|e| format!("Cannot start subagent: {e}"))?;
-        let mut stdin = child.stdin.take().expect("stdin is piped");
-        let message = format!("{CHILD_BRIEF}\n\n<task>\n{}\n</task>", launch.task);
-        if let Err(e) = writeln!(stdin, "{}", Value::from(message)) {
-            // The child leads its own process group, out of reach of stop_all once dropped.
-            crate::process::signal_group(child.id(), crate::process::SIGTERM);
-            let _ = child.wait();
-            return Err(format!("Cannot send the task: {e}"));
-        }
-        let stdout = child.stdout.take().expect("stdout is piped");
-        let run = Arc::new(Run {
-            id: format!("sa-{}", self.list.len() + 1),
-            label: launch.label,
-            task: launch.task,
-            model: launch.model,
-            thinking: launch.thinking,
-            background,
-            started: Instant::now(),
-            child: Mutex::new(Some(child)),
-            stdin: Mutex::new(Some(stdin)),
-            state: Mutex::default(),
-        });
-        self.list.push(run.clone());
-        let (watched, follow_ups) = (run.clone(), follow_ups.clone());
-        std::thread::spawn(move || {
-            let result = read_events(BufReader::new(stdout), &watched);
-            // Taken out first: holding the lock through `wait` would block `Run::stop` until the child exits.
-            let child = watched.child.lock().unwrap().take();
-            if let Some(mut child) = child {
-                let _ = child.wait();
-            }
-            finish(&watched, result, &follow_ups);
-        });
-        Ok(run)
+    /// By id, or the newest run with that label.
+    pub fn named(&self, name: &str) -> Option<Arc<Run>> {
+        let by_id = self.list.iter().find(|run| run.id == name);
+        by_id.or_else(|| self.list.iter().filter(|run| run.label == name).max_by_key(|run| run.started)).cloned()
     }
 
     /// Children belong to the session, so quitting stops them.
@@ -225,14 +175,181 @@ impl Runs {
     pub fn running_first(&mut self) {
         self.list.sort_by_key(|run| (!run.is_running(), std::cmp::Reverse(run.started)));
     }
+
+    /// The SendMessage addresses a new child gets in its brief.
+    fn roster(&self) -> String {
+        let mut names = vec!["`main` (the agent that spawned you)".to_string()];
+        names.extend(self.list.iter().filter(|run| run.workflow.is_none()).map(|run| format!("`{}` ({})", run.id, run.label)));
+        format!("Agents you can reach with SendMessage: {}.\n\n", names.join(", "))
+    }
+}
+
+/// Starts a child and a thread reading its JSONL; a background run queues its answer as a follow-up.
+pub fn spawn(runs: &Arc<Mutex<Runs>>, launch: Launch, background: bool, workflow: Option<String>, follow_ups: &Arc<Mutex<Vec<FollowUp>>>) -> Result<Arc<Run>, String> {
+    let (run, roster) = {
+        let mut runs = runs.lock().unwrap();
+        if runs.running() >= MAX_RUNNING {
+            return Err(format!("{MAX_RUNNING} subagents are already running, the limit. Wait for one to finish."));
+        }
+        let roster = runs.roster();
+        let run = Arc::new(Run {
+            id: format!("sa-{}", runs.list.len() + 1),
+            label: launch.label.clone(),
+            task: launch.task.clone(),
+            model: launch.model.clone(),
+            thinking: launch.thinking.clone(),
+            background,
+            workflow,
+            started: Instant::now(),
+            child: Mutex::default(),
+            stdin: Mutex::default(),
+            state: Mutex::default(),
+            launch,
+            resumed: AtomicBool::new(false),
+            reply_to: Mutex::default(),
+        });
+        // Listed before the child starts, so a parallel spawn cannot take the same id.
+        runs.list.push(run.clone());
+        (run, roster)
+    };
+    let message = format!("{CHILD_BRIEF}\n\n{roster}<task>\n{}\n</task>", run.task);
+    if let Err(error) = start(&run, &message, None, runs, follow_ups) {
+        runs.lock().unwrap().list.retain(|listed| !Arc::ptr_eq(listed, &run));
+        return Err(error);
+    }
+    Ok(run)
+}
+
+/// SendMessage to a subagent: steers it while it runs, resumes it in the background once it finished.
+/// `from` is the subagent that sent it, which then gets the resumed run's answer; None is main.
+pub fn send(runs: &Arc<Mutex<Runs>>, to: &str, text: &str, from: Option<&str>, follow_ups: &Arc<Mutex<Vec<FollowUp>>>) -> Result<String, String> {
+    let target = runs.lock().unwrap().named(to).ok_or_else(|| format!("No agent named {to}. ListAgents lists the agents you can message."))?;
+    if target.workflow.is_some() {
+        return Err(format!(
+            "{} belongs to workflow {}, whose script takes its answer; message the workflow's agents through the script instead.",
+            target.id,
+            target.workflow.as_deref().unwrap_or_default()
+        ));
+    }
+    let signed = format!("Message from {}, another agent, not the user:\n\n{text}", from.unwrap_or("main"));
+    if target.is_running() && target.message(&signed).is_ok() {
+        return Ok(format!("Delivered to {} ({}); it reads the message after its current tool batch.", target.id, target.label));
+    }
+    resume(&target, &signed, from, runs, follow_ups)?;
+    Ok(format!("{} ({}) resumed in the background with your message; its answer arrives as a message.", target.id, target.label))
+}
+
+/// Restarts a finished child on its own session, so it keeps its whole conversation.
+pub fn resume(run: &Arc<Run>, text: &str, reply_to: Option<&str>, runs: &Arc<Mutex<Runs>>, follow_ups: &Arc<Mutex<Vec<FollowUp>>>) -> Result<(), String> {
+    if run.child.lock().unwrap().is_some() {
+        return Err(format!("{} was stopped and has not exited yet. Send again in a moment.", run.id));
+    }
+    let session = run.state.lock().unwrap().session.clone().ok_or_else(|| format!("{} kept no session, so it cannot be resumed.", run.id))?;
+    let session = Path::new(&session).file_stem().unwrap_or_default().to_string_lossy().into_owned();
+    {
+        let mut state = run.state.lock().unwrap();
+        state.result = None;
+        state.elapsed = None;
+    }
+    run.resumed.store(true, Ordering::Relaxed);
+    *run.reply_to.lock().unwrap() = reply_to.map(String::from);
+    if let Err(error) = start(run, text, Some(&session), runs, follow_ups) {
+        run.state.lock().unwrap().result = Some(Err(error.clone()));
+        return Err(error);
+    }
+    Ok(())
+}
+
+/// Runs the child process for `run`, sends `message` as its task, and follows its JSONL on a thread.
+fn start(run: &Arc<Run>, message: &str, resume: Option<&str>, runs: &Arc<Mutex<Runs>>, follow_ups: &Arc<Mutex<Vec<FollowUp>>>) -> Result<(), String> {
+    let launch = &run.launch;
+    let exe = std::env::current_exe().map_err(|e| format!("Cannot find the agent binary: {e}"))?;
+    // A child has no UI to ask in, so ask becomes auto.
+    let mode = match launch.mode {
+        Mode::FullAccess => "--full-access",
+        Mode::Ask | Mode::Auto => "--auto",
+    };
+    let mut args = vec!["--headless", "--model", &launch.model, "--thinking", &launch.thinking, mode, "--parent", &launch.parent_session];
+    if let Some(account) = &launch.account {
+        args.extend(["--account", account]);
+    }
+    if launch.explore {
+        args.push("--explore");
+    }
+    if launch.trusted {
+        args.push("--trust");
+    }
+    if launch.web {
+        args.push("--web");
+    }
+    if let Some(session) = resume {
+        args.extend(["--resume", session]);
+    }
+    let mut child = crate::process::command(exe)
+        .args(args)
+        .args(launch.extra_dirs.iter().flat_map(|dir| [std::ffi::OsStr::new("--add-dir"), dir.as_os_str()]))
+        .current_dir(&launch.cwd)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| format!("Cannot start subagent: {e}"))?;
+    let mut stdin = child.stdin.take().expect("stdin is piped");
+    if let Err(e) = writeln!(stdin, "{}", Value::from(message)) {
+        // The child leads its own process group, out of reach of stop_all once dropped.
+        crate::process::signal_group(child.id(), crate::process::SIGTERM);
+        let _ = child.wait();
+        return Err(format!("Cannot send the task: {e}"));
+    }
+    let stdout = child.stdout.take().expect("stdout is piped");
+    *run.child.lock().unwrap() = Some(child);
+    *run.stdin.lock().unwrap() = Some(stdin);
+    let (watched, runs, follow_ups) = (run.clone(), runs.clone(), follow_ups.clone());
+    std::thread::spawn(move || {
+        let result = read_events(BufReader::new(stdout), &watched, &mut |to, text| route(&watched, to, text, &runs, &follow_ups));
+        // Taken out first: holding the lock through `wait` would block `Run::stop` until the child exits.
+        let child = watched.child.lock().unwrap().take();
+        if let Some(mut child) = child {
+            let _ = child.wait();
+        }
+        finish(&watched, result, &follow_ups);
+        if let Some(sender) = watched.reply_to.lock().unwrap().take() {
+            let answer = format!("Answer from {} ({}) to your message:\n\n{}", watched.id, watched.label, watched.result_text());
+            let delivered = runs.lock().unwrap().named(&sender).filter(|run| run.is_running()).is_some_and(|run| run.message(&answer).is_ok());
+            if !delivered {
+                follow_ups.lock().unwrap().push(FollowUp { source: format!("{}:message", watched.id), text: answer });
+            }
+        }
+    });
+    Ok(())
+}
+
+/// A child's SendMessage: `main` gets it as a message, a sibling through `send`.
+fn route(from: &Run, to: &str, text: &str, runs: &Arc<Mutex<Runs>>, follow_ups: &Arc<Mutex<Vec<FollowUp>>>) {
+    // Not the run's own id: Monitor on that run withdraws its follow-ups.
+    let source = format!("{}:message", from.id);
+    if to == "main" {
+        let text = format!("Message from subagent {} ({}), another agent, not the user:\n\n{text}", from.id, from.label);
+        follow_ups.lock().unwrap().push(FollowUp { source, text });
+        return;
+    }
+    if let Err(error) = send(runs, to, text, Some(&from.id), follow_ups) {
+        let text = format!("Subagent {} ({}) could not message {to}: {error}", from.id, from.label);
+        follow_ups.lock().unwrap().push(FollowUp { source, text });
+    }
 }
 
 /// Follows the child's JSONL into `run` until stdout closes; returns its answer or error.
-fn read_events(stdout: impl BufRead, run: &Run) -> Result<String, String> {
+fn read_events(stdout: impl BufRead, run: &Run, on_message: &mut dyn FnMut(&str, &str)) -> Result<String, String> {
     let mut result = Err("The subagent exited without an answer.".to_string());
     // Raw lines: a non-UTF-8 line would end `lines()` and leave the child blocked on a full pipe.
     for line in stdout.split(b'\n').map_while(Result::ok) {
         let Ok(event) = serde_json::from_slice::<Value>(&line) else { continue };
+        if event["type"] == "message" {
+            // Outside the state lock: a message to this run itself reads its state.
+            on_message(event["to"].as_str().unwrap_or("main"), event["text"].as_str().unwrap_or_default());
+            continue;
+        }
         let mut state = run.state.lock().unwrap();
         match event["type"].as_str() {
             Some("tool") => {
@@ -264,8 +381,8 @@ pub fn wait(runs: &[Arc<Run>], abort: &AtomicBool) {
     }
 }
 
-/// Records a run's answer; a background run also queues it as a follow-up for the next turn.
-/// Holding `follow_ups` while the status flips lets TaskWait, which sees the run done, find its follow-up to withdraw.
+/// Records a run's answer; a background or resumed run also queues it as a follow-up for the next turn.
+/// Holding `follow_ups` while the status flips lets Monitor, which sees the run done, find its follow-up to withdraw.
 fn finish(run: &Run, result: Result<String, String>, follow_ups: &Mutex<Vec<FollowUp>>) {
     let mut queued = follow_ups.lock().unwrap();
     {
@@ -274,13 +391,14 @@ fn finish(run: &Run, result: Result<String, String>, follow_ups: &Mutex<Vec<Foll
         state.elapsed = Some(run.started.elapsed());
         state.result = Some(result);
     }
-    if run.background {
+    let answers_main = run.workflow.is_none() && run.reply_to.lock().unwrap().is_none();
+    if answers_main && (run.background || run.resumed.load(Ordering::Relaxed)) {
         let text = format!("Subagent {} ({}) finished.\n\n{}", run.id, run.label, run.result_text());
         queued.push(FollowUp { source: run.id.clone(), text });
     }
 }
 
-/// TaskWait: the answers of `runs` once they finish or `timeout` passes, withdrawing the follow-ups they queued.
+/// Monitor: the answers of `runs` once they finish or `timeout` passes, withdrawing the follow-ups they queued.
 /// Esc ends the wait but leaves the runs going, so their answers still arrive as follow-ups.
 pub fn wait_background(runs: &[Arc<Run>], timeout: Duration, abort: &AtomicBool, follow_ups: &Mutex<Vec<FollowUp>>) -> Result<String, String> {
     let deadline = Instant::now() + timeout;
@@ -336,10 +454,32 @@ pub(crate) fn scan_run() -> Run {
         model: "opus".into(),
         thinking: "high".into(),
         background: true,
+        workflow: None,
         started: Instant::now(),
         child: Mutex::new(None),
         stdin: Mutex::new(None),
         state: Mutex::default(),
+        launch: test_launch(),
+        resumed: AtomicBool::new(false),
+        reply_to: Mutex::default(),
+    }
+}
+
+#[cfg(test)]
+pub fn test_launch() -> Launch {
+    Launch {
+        label: "next".into(),
+        task: "look".into(),
+        cwd: PathBuf::from("/nonexistent/agent-subagent-test"),
+        model: "opus".into(),
+        thinking: "low".into(),
+        mode: Mode::Auto,
+        parent_session: "parent".into(),
+        explore: false,
+        account: None,
+        extra_dirs: Vec::new(),
+        trusted: false,
+        web: false,
     }
 }
 
@@ -396,7 +536,7 @@ mod tests {
         let run = scan_run();
         let usage = Usage { input: 1200, output: 300, cache_read: 40_000, cache_write: 0 };
         let stdout: String = [json!({"type": "tool", "name": "Read"}), usage::entry("opus", usage, 0), json!({"type": "done", "answer": "ok"})].iter().map(|event| format!("{event}\n")).collect();
-        assert_eq!(read_events(stdout.as_bytes(), &run), Ok("ok".into()));
+        assert_eq!(read_events(stdout.as_bytes(), &run, &mut |_, _| {}), Ok("ok".into()));
         assert_eq!(run.summary(), "sa-1 scan running: 1 tool calls, last Read, 0s, ↑1k ↓300 cache 40k");
     }
 
@@ -404,7 +544,7 @@ mod tests {
     fn a_non_utf8_line_does_not_hide_the_answer() {
         let mut stdout = b"\xff\xfe not text\n".to_vec();
         stdout.extend(format!("{}\n", json!({"type": "done", "answer": "ok"})).as_bytes());
-        assert_eq!(read_events(stdout.as_slice(), &scan_run()), Ok("ok".into()));
+        assert_eq!(read_events(stdout.as_slice(), &scan_run(), &mut |_, _| {}), Ok("ok".into()));
     }
 
     #[test]
@@ -415,20 +555,8 @@ mod tests {
             run.state.lock().unwrap().result = Some(Ok("done".into()));
             runs.list.push(Arc::new(run));
         }
-        let launch = Launch {
-            label: "next".into(),
-            task: "look".into(),
-            cwd: PathBuf::from("/nonexistent/agent-subagent-test"),
-            model: "opus".into(),
-            thinking: "low".into(),
-            mode: Mode::Auto,
-            parent_session: "parent".into(),
-            explore: false,
-            account: None,
-            extra_dirs: Vec::new(),
-            trusted: false,
-        };
-        let error = runs.spawn(launch, true, &Arc::default()).err().unwrap();
+        let runs = Arc::new(Mutex::new(runs));
+        let error = spawn(&runs, test_launch(), true, None, &Arc::default()).err().unwrap();
         assert!(error.starts_with("Cannot start subagent"), "{error}");
     }
 
@@ -446,5 +574,21 @@ mod tests {
         runs.running_first();
         let ids: Vec<&str> = runs.list.iter().map(|run| run.id.as_str()).collect();
         assert_eq!(ids, ["sa-4", "sa-2", "sa-3", "sa-1"]);
+    }
+
+    #[test]
+    fn send_refuses_workflow_agents_and_resolves_a_label_to_the_newest_run() {
+        let start = Instant::now();
+        let older = Run { id: "sa-1".into(), started: start, ..scan_run() };
+        let newer = Run { id: "sa-2".into(), started: start + Duration::from_secs(1), ..scan_run() };
+        let owned = Run { id: "sa-3".into(), label: "step".into(), workflow: Some("wf-1".into()), ..scan_run() };
+        for run in [&older, &newer] {
+            run.state.lock().unwrap().result = Some(Ok("done".into()));
+        }
+        let runs = Arc::new(Mutex::new(Runs { list: vec![Arc::new(older), Arc::new(newer), Arc::new(owned)] }));
+        let follow_ups = Arc::default();
+        assert!(send(&runs, "step", "hi", None, &follow_ups).unwrap_err().starts_with("sa-3 belongs to workflow wf-1"));
+        assert_eq!(send(&runs, "scan", "hi", None, &follow_ups).unwrap_err(), "sa-2 kept no session, so it cannot be resumed.");
+        assert!(send(&runs, "nobody", "hi", None, &follow_ups).unwrap_err().starts_with("No agent named nobody."));
     }
 }

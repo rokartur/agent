@@ -86,7 +86,7 @@ pub fn is_trusted(trusted_projects: &[String], dir: &Path) -> bool {
 
 /// What an untrusted project would add from its `.agents` dirs, listed in the trust question.
 pub fn untrusted_files(agent_dir: &Path, cwd: &Path) -> Vec<PathBuf> {
-    let names = ["SYSTEM.md", "APPEND_SYSTEM.md", "skills", "prompts", "swarm-prompt.md", "edit-hooks.json"];
+    let names = ["SYSTEM.md", "APPEND_SYSTEM.md", "skills", "prompts", "swarm-prompt.md", "edit-hooks.json", "workflows"];
     let dirs = project_agents_dirs(cwd, true).into_iter().filter(|dir| dir != agent_dir);
     dirs.flat_map(|dir| names.map(|name| dir.join(name))).filter(|path| path.exists()).collect()
 }

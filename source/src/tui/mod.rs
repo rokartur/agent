@@ -33,6 +33,7 @@ use crate::agent::prompt::{Skill, Template};
 use crate::agent::skill_usage;
 use crate::agent::subagent::{Run, Runs};
 use crate::agent::usage::{self, ModelTotal, tokens};
+use crate::agent::workflow::{self, StepStatus, Workflow};
 use crate::agent::{self, Agent, Event, FileChange, RestoredFiles, RewindPoint, Session, SessionInfo, Spent};
 use crate::api::accounts::Policy;
 use crate::api::models::{self, Model};
@@ -217,6 +218,21 @@ enum Panel {
     Tasks {
         index: usize,
     },
+    /// /workflows with more than one run.
+    Workflows {
+        index: usize,
+    },
+    /// One run's progress view: `phase` None lists its phases, Some lists that phase's agents.
+    WorkflowRun {
+        id: String,
+        phase: Option<usize>,
+        index: usize,
+    },
+    /// `s` in the progress view: Tab picks the personal workflows dir over the project's.
+    WorkflowSave {
+        id: String,
+        personal: bool,
+    },
     /// One shell from /tasks, full screen and read-only. `loaded` is the (log size, width) `lines` were built for.
     Terminal {
         index: usize,
@@ -388,6 +404,7 @@ const BUILTIN_COMMANDS: &[(&str, MidTurn, &str)] = &[
     ("skill-usage", MidTurn::Runs, "Show how often each skill was used, least used first"),
     ("rtk", MidTurn::Runs, "Show rtk token savings"),
     ("tasks", MidTurn::Runs, "Show background shells and subagent runs"),
+    ("workflows", MidTurn::Runs, "Show workflow runs: progress, pause, stop, save as a command"),
     ("goal", MidTurn::Runs, "[objective | pause | resume | stop | done]: Set a goal the agent keeps working toward, or manage it"),
     ("btw", MidTurn::Runs, "<question>: Ask a side question without touching the session"),
     ("worktree", MidTurn::Runs, "[name]: Move this session to a git worktree or remove one: pick one, or name a branch to open or create"),
@@ -569,6 +586,8 @@ struct App {
     quit: bool,
     skills: Vec<Skill>,
     templates: Vec<Template>,
+    /// Saved and bundled workflows, each run as `/<name>`.
+    saved_workflows: Vec<workflow::Saved>,
     /// (name, description) shown under the editor while a slash command is typed.
     slash_commands: Vec<(String, String)>,
     menu_index: usize,
@@ -601,6 +620,7 @@ struct App {
     follow_ups: Arc<Mutex<Vec<FollowUp>>>,
     terminals: Arc<Mutex<Terminals>>,
     subagents: Arc<Mutex<Runs>>,
+    workflows: Arc<Mutex<Vec<Arc<Workflow>>>>,
     viewed: Option<RunView>,
     client: Client,
     events: Sender<Msg>,
@@ -985,8 +1005,8 @@ fn event_loop(app: &mut App, inbox: &Receiver<Msg>, out: &mut Stdout) -> Result<
             ANIMATION_TICK
         } else if app.recording.is_some() {
             Duration::from_secs(1)
-        } else if app.terminals.lock().unwrap().running() > 0 || app.subagents.lock().unwrap().running() > 0 {
-            // A terminal or background subagent that ends while idle queues a follow-up that must start a turn.
+        } else if app.terminals.lock().unwrap().running() > 0 || app.subagents.lock().unwrap().running() > 0 || app.workflows.lock().unwrap().iter().any(|run| run.is_running()) {
+            // A terminal, background subagent or workflow that ends while idle queues a follow-up that must start a turn.
             Duration::from_secs(1)
         } else {
             Duration::from_secs(3600)
@@ -1070,6 +1090,7 @@ impl App {
             quit: false,
             skills: Vec::new(),
             templates: Vec::new(),
+            saved_workflows: Vec::new(),
             slash_commands,
             menu_index: 0,
             header_len: 0,
@@ -1093,6 +1114,7 @@ impl App {
             follow_ups: agent.follow_ups.clone(),
             terminals: agent.terminals.clone(),
             subagents: agent.subagents.clone(),
+            workflows: agent.workflows.clone(),
             viewed: None,
             client: agent.client.clone(),
             events,
@@ -1589,7 +1611,10 @@ impl App {
             KeyCode::PageUp => self.scroll += self.transcript_view.0.max(1),
             KeyCode::PageDown => self.scroll = self.scroll.saturating_sub(self.transcript_view.0.max(1)),
             KeyCode::Up => self.editor.up(self.editor_width),
-            KeyCode::Down if self.editor.is_empty() && (self.subagents.lock().unwrap().running() > 0 || self.terminals.lock().unwrap().running() > 0 || self.viewed.is_some()) => {
+            KeyCode::Down
+                if self.editor.is_empty()
+                    && (self.subagents.lock().unwrap().running() > 0 || self.terminals.lock().unwrap().running() > 0 || self.viewed.is_some() || !footer_workflows(&self.workflows).is_empty()) =>
+            {
                 self.panel = Some(Panel::Agents { row: 1 });
             }
             KeyCode::Down => self.editor.down(self.editor_width),
@@ -1805,6 +1830,7 @@ impl App {
         let trusted = self.settings.trusts(&self.cwd);
         self.skills = crate::agent::prompt::load_skills(&agent_dir, &self.cwd, trusted, &[], self.settings.prefer_global());
         self.templates = crate::agent::prompt::load_templates(&agent_dir, &self.cwd, trusted, self.settings.prefer_global());
+        self.saved_workflows = workflow::saved(&crate::agent::prompt::project_agents_dirs(&self.cwd, trusted), &agent_dir);
     }
 
     /// Asks whether to trust a project with `.agents` files to load; another open panel gets a notice instead.
@@ -2017,6 +2043,7 @@ impl App {
                 self.system("tasks", "No background tasks yet. The agent starts them with Bash run_in_background or Agent.");
             }
             "tasks" => self.open_tasks(),
+            "workflows" => self.open_workflows(),
             "login" => self.panel = Some(Panel::Login(login::Login::Kind { index: 0 })),
             "voice" => match voice::start(&self.home) {
                 Ok(recording) => self.recording = Some(recording),
@@ -2105,10 +2132,15 @@ impl App {
                 }
                 Err(error) => self.push(Item::Error(error)),
             },
+            name if self.saved_workflows.iter().any(|saved| saved.meta.name == name) => {
+                self.push(Item::User(text.clone()));
+                self.start(Command::Prompt(workflow_command_prompt(name, args), Vec::new()));
+            }
             _ => {
                 self.push(Item::User(text.clone()));
                 let images = self.take_images(&text);
-                self.start(Command::Prompt(text, images));
+                let prompt = if mentions_ultracode(&text) { format!("{text}\n\n{ULTRACODE_NOTE}") } else { text };
+                self.start(Command::Prompt(prompt, images));
             }
         }
     }
@@ -2215,6 +2247,7 @@ impl App {
             Some(Panel::ProviderOrder { .. }) => return self.provider_order_key(key),
             Some(Panel::Diff { .. }) => return self.diff_key(code),
             Some(Panel::Terminal { .. }) => return self.terminal_key(code),
+            Some(Panel::Workflows { .. } | Panel::WorkflowRun { .. } | Panel::WorkflowSave { .. }) => return self.workflow_key(code),
             Some(Panel::PluginSettings { .. }) => return self.plugin_settings_key(key),
             _ => {}
         }
@@ -2416,19 +2449,23 @@ impl App {
             }
             Some(Panel::Agents { row }) => {
                 let runs = listed_runs(&self.subagents.lock().unwrap(), self.viewed.as_ref());
+                let workflows = footer_workflows(&self.workflows);
                 let pill = self.terminals.lock().unwrap().running() > 0;
                 let first_run = 1 + usize::from(pill);
-                let selected = (*row).min(usize::from(pill) + runs.len());
-                let run = selected.checked_sub(first_run).map(|offset| runs[offset].clone());
+                let last = usize::from(pill) + runs.len() + workflows.len();
+                let selected = (*row).min(last);
+                let workflow = selected.checked_sub(first_run + runs.len()).map(|offset| workflows[offset].clone());
+                let run = selected.checked_sub(first_run).and_then(|offset| runs.get(offset).cloned());
                 match code {
                     KeyCode::Up if selected > 0 => *row = selected - 1,
-                    KeyCode::Down => *row = (selected + 1).min(usize::from(pill) + runs.len()),
-                    KeyCode::Char('x') => {
-                        if let Some(run) = run {
-                            run.stop();
-                        }
-                    }
+                    KeyCode::Down => *row = (selected + 1).min(last),
+                    KeyCode::Char('x') => match (workflow, run) {
+                        (Some(workflow), _) => workflow.stop(),
+                        (None, Some(run)) => run.stop(),
+                        (None, None) => {}
+                    },
                     KeyCode::Enter if pill && selected == 1 => self.open_tasks(),
+                    KeyCode::Enter if workflow.is_some() => self.panel = workflow.map(|workflow| Panel::WorkflowRun { id: workflow.id.clone(), phase: None, index: 0 }),
                     KeyCode::Enter => self.view_run(run),
                     KeyCode::Up | KeyCode::Esc => self.panel = None,
                     _ => {}
@@ -2548,6 +2585,9 @@ impl App {
                 | Panel::ContextWindows { .. }
                 | Panel::ProviderOrder { .. }
                 | Panel::Terminal { .. }
+                | Panel::Workflows { .. }
+                | Panel::WorkflowRun { .. }
+                | Panel::WorkflowSave { .. }
                 | Panel::Diff { .. }
                 | Panel::Plan { .. }
                 | Panel::PlanFresh { .. }
@@ -3174,6 +3214,7 @@ impl App {
             }
             Panel::Ask(ask) => ask.render(width),
             Panel::Agents { .. } => Vec::new(),
+            Panel::Workflows { .. } | Panel::WorkflowRun { .. } | Panel::WorkflowSave { .. } => self.workflow_panel(width),
             Panel::Tasks { index } => tasks_panel(&self.terminals.lock().unwrap().list, &self.subagents.lock().unwrap().list, &self.client.catalog(), *index, width),
             Panel::Todos { index } => {
                 let todos = self.todos.lock().unwrap();
@@ -3459,6 +3500,144 @@ impl App {
         self.panel = Some(Panel::Tasks { index: 0 });
     }
 
+    /// A single run opens its progress view directly, as in Claude Code.
+    fn open_workflows(&mut self) {
+        let runs = self.workflows.lock().unwrap().clone();
+        match runs.as_slice() {
+            [] => self.system("workflows", "No workflows yet. Ask for one, or run a saved one such as /deep-research."),
+            [run] => self.panel = Some(Panel::WorkflowRun { id: run.id.clone(), phase: None, index: 0 }),
+            _ => self.panel = Some(Panel::Workflows { index: runs.len() - 1 }),
+        }
+    }
+
+    fn workflow_key(&mut self, code: KeyCode) {
+        let runs = self.workflows.lock().unwrap().clone();
+        match self.panel.as_mut() {
+            Some(Panel::Workflows { index }) => match code {
+                KeyCode::Up => *index = index.saturating_sub(1),
+                KeyCode::Down => *index = (*index + 1).min(runs.len() - 1),
+                KeyCode::Char('x') => runs[*index].stop(),
+                KeyCode::Enter | KeyCode::Right => self.panel = Some(Panel::WorkflowRun { id: runs[*index].id.clone(), phase: None, index: 0 }),
+                KeyCode::Esc | KeyCode::Left => self.panel = None,
+                _ => {}
+            },
+            Some(Panel::WorkflowRun { id, phase, index }) => {
+                let Some(position) = runs.iter().position(|run| run.id == *id) else { return self.panel = None };
+                let run = &runs[position];
+                let (len, agent) = {
+                    let state = run.state.lock().unwrap();
+                    match *phase {
+                        None => (state.phases.len(), None),
+                        Some(shown) => (state.phases[shown].steps.len(), state.phases[shown].steps.get(*index).and_then(|step| step.run.clone())),
+                    }
+                };
+                match code {
+                    KeyCode::Up => *index = index.saturating_sub(1),
+                    KeyCode::Down => *index = (*index + 1).min(len.saturating_sub(1)),
+                    KeyCode::Enter | KeyCode::Right if phase.is_none() && len > 0 => (*phase, *index) = (Some(*index), 0),
+                    KeyCode::Enter | KeyCode::Right if agent.is_some() => self.view_run(agent),
+                    KeyCode::Esc | KeyCode::Left => match *phase {
+                        Some(shown) => (*phase, *index) = (None, shown),
+                        None if runs.len() > 1 => self.panel = Some(Panel::Workflows { index: position }),
+                        None => self.panel = None,
+                    },
+                    KeyCode::Char('p') => _ = run.paused.fetch_xor(true, std::sync::atomic::Ordering::Relaxed),
+                    KeyCode::Char('x') => match (phase, agent) {
+                        (Some(_), Some(agent)) => agent.stop(),
+                        (Some(_), None) => {}
+                        (None, _) => run.stop(),
+                    },
+                    KeyCode::Char('s') => self.panel = Some(Panel::WorkflowSave { id: id.clone(), personal: false }),
+                    _ => {}
+                }
+            }
+            Some(Panel::WorkflowSave { id, personal }) => match code {
+                KeyCode::Tab | KeyCode::Up | KeyCode::Down => *personal = !*personal,
+                KeyCode::Esc => self.panel = Some(Panel::WorkflowRun { id: id.clone(), phase: None, index: 0 }),
+                KeyCode::Enter => {
+                    let Some(run) = runs.iter().find(|run| run.id == *id) else { return self.panel = None };
+                    let personal = *personal;
+                    let dir = if personal { self.home.join(".agents").join("workflows") } else { workflow::project_save_dir(&self.cwd) };
+                    match workflow::save(&run.script, &run.name, &dir, !personal) {
+                        Ok(path) => {
+                            self.panel = None;
+                            let runs_as = if personal || self.settings.trusts(&self.cwd) {
+                                format!("Run it as /{}.", run.name)
+                            } else {
+                                format!("It runs as /{} once /trust loads this project's files.", run.name)
+                            };
+                            self.system("workflows", format!("Saved {}. {runs_as}", path.display()));
+                            self.load_skills_and_prompts();
+                        }
+                        Err(error) => self.push(Item::Error(error)),
+                    }
+                }
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+
+    fn workflow_panel(&self, columns: usize) -> Vec<Line> {
+        let runs = self.workflows.lock().unwrap().clone();
+        match &self.panel {
+            Some(Panel::Workflows { index }) => {
+                let rows: Vec<panel::Row> = runs.iter().map(|run| panel::Row { left: format!("{} {}", run.id, run.name), right: vec![span(run.summary(), DIM)] }).collect();
+                let view = panel::Panel {
+                    title: format!("Workflows {}", runs.len()),
+                    tabs: &[],
+                    tab: 0,
+                    search: None,
+                    rows: &rows,
+                    selected: *index,
+                    empty: "",
+                    hint: "↑↓ select     enter open     x stop     esc close",
+                };
+                view.render(columns, PANEL_ROWS)
+            }
+            Some(Panel::WorkflowRun { id, phase, index }) => {
+                let Some(run) = runs.iter().find(|run| run.id == *id) else { return Vec::new() };
+                let mut head = vec![vec![span(&run.name, BRIGHT.bold()), span(format!("  {}", run.summary()), MUTED)], vec![span(&run.description, DIM)]];
+                let state = run.state.lock().unwrap();
+                head.extend(state.logs.iter().rev().take(3).rev().map(|log| vec![span(format!("log: {log}"), DIM)]));
+                let (rows, hint): (Vec<(String, String)>, _) = match *phase {
+                    None => {
+                        let rows = state.phases.iter().map(|shown| (if shown.title.is_empty() { "Agents".to_string() } else { shown.title.clone() }, step_counts(&shown.steps))).collect();
+                        (rows, "↑↓ select · Enter agents · p pause/resume · x stop run · s save as command · Esc back")
+                    }
+                    Some(shown) => {
+                        let rows = state.phases[shown].steps.iter().map(step_row).collect();
+                        (rows, "↑↓ select · Enter transcript · x stop agent · Esc back")
+                    }
+                };
+                let left_width = rows.iter().map(|(left, _)| width(left)).max().unwrap_or(0);
+                panel::frame(head, rows.len(), *index, hint, columns, PANEL_ROWS, |row| {
+                    let (left, right) = &rows[row];
+                    let style = if row == *index { BRIGHT.bold() } else { PLAIN };
+                    vec![span(format!("{left}{}    ", " ".repeat(left_width - width(left))), style), span(right, DIM)]
+                })
+            }
+            Some(Panel::WorkflowSave { id, personal }) => {
+                let Some(run) = runs.iter().find(|run| run.id == *id) else { return Vec::new() };
+                let places = [("Project", workflow::project_save_dir(&self.cwd)), ("Personal", self.home.join(".agents").join("workflows"))];
+                let rows: Vec<panel::Row> =
+                    places.iter().map(|(place, dir)| panel::Row { left: place.to_string(), right: vec![span(dir.join(format!("{}.js", run.name)).display().to_string(), DIM)] }).collect();
+                let view = panel::Panel {
+                    title: format!("Save as /{}", run.name),
+                    tabs: &[],
+                    tab: 0,
+                    search: None,
+                    rows: &rows,
+                    selected: usize::from(*personal),
+                    empty: "",
+                    hint: "tab switch location     enter save     esc back",
+                };
+                view.render(columns, PANEL_ROWS)
+            }
+            _ => Vec::new(),
+        }
+    }
+
     /// `None` for a session not saved yet, which has no prompt to name it by.
     fn saved_title(&self, id: &str) -> Option<String> {
         let session = Session::info(&self.sessions_dir.join(format!("{id}.jsonl")))?;
@@ -3490,6 +3669,7 @@ impl App {
                 commands.extend(self.enabled_skills().map(|skill| (format!("skill:{}", skill.name), skill.description.split_whitespace().collect::<Vec<_>>().join(" "))));
                 commands.extend(self.templates.iter().map(|template| (format!("prompt:{}", template.name), template.description.clone())));
                 commands.extend(self.plugins.commands());
+                commands.extend(self.saved_workflows.iter().map(|saved| (saved.meta.name.clone(), saved.meta.description.clone())));
                 matching_commands(&commands, slash_query(&self.editor.text(), self.editor.before_cursor()))
             }
         }
@@ -3518,7 +3698,10 @@ impl App {
     fn accept_slash(&mut self, run: bool) {
         let matches = self.menu_matches();
         let name = matches[self.menu_index.min(matches.len() - 1)].0.clone();
-        let takes_args = matches!(name.as_str(), "thinking" | "rename-title" | "btw" | "goal" | "import") || name.starts_with("skill:") || name.starts_with("prompt:");
+        let takes_args = matches!(name.as_str(), "thinking" | "rename-title" | "btw" | "goal" | "import")
+            || name.starts_with("skill:")
+            || name.starts_with("prompt:")
+            || self.saved_workflows.iter().any(|saved| saved.meta.name == name);
         let text = self.editor.text();
         let rest = text[slash_query(&text, self.editor.before_cursor()).len()..].trim().to_string();
         if takes_args {
@@ -3600,6 +3783,8 @@ impl App {
                 }
             }
             Event::Steered(text) => self.push(Item::User(text)),
+            // Only headless subagents emit it.
+            Event::Outbox { .. } => {}
             Event::Push(text) => self.notify(&text),
             // The output tail went to the model; /tasks shows it in full.
             Event::FollowUp { source, text } => self.system(&source, text.split_once('\n').map_or(text.as_str(), |(head, _)| head)),
@@ -3747,7 +3932,8 @@ impl App {
         bottom.extend(todo_lines(&self.todos.lock().unwrap()));
         let shells = self.terminals.lock().unwrap().running();
         let runs = listed_runs(&self.subagents.lock().unwrap(), self.viewed.as_ref());
-        if shells == 0 && runs.is_empty() && matches!(self.panel, Some(Panel::Agents { .. })) {
+        let workflows = footer_workflows(&self.workflows);
+        if shells == 0 && runs.is_empty() && workflows.is_empty() && matches!(self.panel, Some(Panel::Agents { .. })) {
             self.panel = None;
         }
         let mut panel_cursor = None;
@@ -3782,11 +3968,13 @@ impl App {
         bottom.push(Vec::new());
         bottom.extend(self.footer(width));
         let focus = match self.panel {
-            Some(Panel::Agents { row }) => Some(row.min(usize::from(shells > 0) + runs.len())),
+            Some(Panel::Agents { row }) => Some(row.min(usize::from(shells > 0) + runs.len() + workflows.len())),
             _ => None,
         };
         let viewed = self.viewed.as_ref().and_then(|view| runs.iter().position(|run| Arc::ptr_eq(run, &view.run)));
         bottom.extend(background_rows(shells, &runs, focus, viewed, width));
+        let workflow_focus = focus.and_then(|row| row.checked_sub(1 + usize::from(shells > 0) + runs.len()));
+        bottom.extend(workflow_rows(&workflows, workflow_focus, width));
 
         let room = height.saturating_sub(bottom.len());
         // The last column is kept for the scrollbar so text does not rewrap when it appears.
@@ -4458,6 +4646,22 @@ fn plain_json(value: &Value) -> String {
     }
 }
 
+const ULTRACODE_NOTE: &str = "The user typed the keyword `ultracode`, a direct request for a workflow: write a Workflow script for this task and run it with the Workflow tool.";
+
+/// Only a prompt the user typed counts; the keyword in a file or tool output starts nothing.
+fn mentions_ultracode(text: &str) -> bool {
+    text.split(|c: char| !c.is_alphanumeric()).any(|word| word.eq_ignore_ascii_case("ultracode"))
+}
+
+/// `/<workflow> [input]`: the model runs the saved workflow and shapes the input into the script's `args`.
+fn workflow_command_prompt(name: &str, input: &str) -> String {
+    let call = format!("Run the saved workflow `{name}` now: call the Workflow tool with name \"{name}\".");
+    if input.trim().is_empty() {
+        return call;
+    }
+    format!("{call} Pass this input as `args`, as structured data where it is a list or has fields:\n\n{}", input.trim())
+}
+
 /// What the slash menu completes: the `/word` up to the cursor when the cursor sits in the text's first word, else the whole text.
 fn slash_query<'a>(text: &'a str, before_cursor: &'a str) -> &'a str {
     if text.starts_with(before_cursor) && !before_cursor.contains(char::is_whitespace) { before_cursor } else { text }
@@ -4729,7 +4933,7 @@ fn log_lines(text: &str, width: usize) -> Vec<Line> {
 /// The rows under the footer list the running subagents, and the viewed one even after it finished.
 fn listed_runs(runs: &Runs, viewed: Option<&RunView>) -> Vec<Arc<Run>> {
     let is_viewed = |run: &Arc<Run>| viewed.is_some_and(|view| Arc::ptr_eq(&view.run, run));
-    runs.list.iter().filter(|run| run.is_running() || is_viewed(run)).cloned().collect()
+    runs.list.iter().filter(|run| (run.is_running() && run.workflow.is_none()) || is_viewed(run)).cloned().collect()
 }
 
 /// The subagent shown in place of the transcript. `loaded` is the (file size, width) `lines` were built for.
@@ -4908,9 +5112,54 @@ fn background_rows(shells: usize, runs: &[Arc<Run>], focus: Option<usize>, viewe
     rows
 }
 
+/// Workflows with a progress line under the footer: running ones, and stopped ones until their agents exit.
+fn footer_workflows(workflows: &Mutex<Vec<Arc<Workflow>>>) -> Vec<Arc<Workflow>> {
+    workflows.lock().unwrap().iter().filter(|run| run.is_running() || run.live_agents() > 0).cloned().collect()
+}
+
+/// One progress line per workflow under the agent rows; ↓ walks to them, `focus` indexes `workflows`.
+fn workflow_rows(workflows: &[Arc<Workflow>], focus: Option<usize>, columns: usize) -> Vec<Line> {
+    let mut rows = Vec::new();
+    for (index, run) in workflows.iter().enumerate() {
+        let focused = focus == Some(index);
+        let (glyph, style, hint) = if focused { ("● ", BRIGHT.bold(), " · Enter to open · x to stop") } else { ("○ ", PLAIN, "") };
+        rows.push(truncate(&vec![span(glyph, style), span(&run.name, style), span(format!("  {}{hint}", run.summary()), MUTED)], columns));
+    }
+    rows
+}
+
 /// The id until the model lists load, then the catalog name with its version: "opus 5.5".
 fn model_name(catalog: &[Model], id: &str) -> String {
     catalog.iter().find(|model| model.id == id).map_or(id.to_string(), models::short_name)
+}
+
+/// A phase row in the workflow progress view: "3 agents · 2 done · 1 running".
+fn step_counts(steps: &[workflow::Step]) -> String {
+    let mut parts = vec![format!("{} {}", steps.len(), if steps.len() == 1 { "agent" } else { "agents" })];
+    for status in [StepStatus::Running, StepStatus::Queued, StepStatus::Done, StepStatus::Cached, StepStatus::Failed] {
+        let count = steps.iter().filter(|step| step.status == status).count();
+        if count > 0 {
+            parts.push(format!("{count} {}", status.word()));
+        }
+    }
+    parts.join(" · ")
+}
+
+/// An agent row in a workflow phase: its label, then status, attempt and work done.
+fn step_row(step: &workflow::Step) -> (String, String) {
+    let mut right = step.status.word().to_string();
+    if step.attempt > 1 {
+        right.push_str(&format!(" · attempt {}", step.attempt));
+    }
+    if let Some(run) = &step.run {
+        let elapsed = duration(run.elapsed());
+        let state = run.state.lock().unwrap();
+        right.push_str(&format!(" · {elapsed} · {} tools", state.tool_calls));
+        if state.usage.output > 0 {
+            right.push_str(&format!(" · ↓ {} tokens", usage::tokens(state.usage.output)));
+        }
+    }
+    (step.label.clone(), right)
 }
 
 /// /tasks, as in Claude Code: a "Shells" and a "Local agents" section, each row with its status.
@@ -5454,6 +5703,19 @@ mod tests {
         assert_eq!(names("/"), ["compact", "skill:code-review", "copy"]);
         assert!(names("/copy now").is_empty());
         assert!(names("copy").is_empty());
+    }
+
+    #[test]
+    fn ultracode_counts_only_as_a_whole_word() {
+        assert!(super::mentions_ultracode("ultracode: audit src/routes"));
+        assert!(super::mentions_ultracode("please UltraCode this"));
+        assert!(!super::mentions_ultracode("ultracoder notes"));
+    }
+
+    #[test]
+    fn a_workflow_command_passes_its_input_as_args() {
+        assert!(!super::workflow_command_prompt("deep-research", " ").contains("args"));
+        assert!(super::workflow_command_prompt("deep-research", "rust async").ends_with("\n\nrust async"));
     }
 
     #[test]

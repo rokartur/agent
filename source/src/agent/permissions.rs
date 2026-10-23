@@ -53,6 +53,7 @@ pub enum Kind {
     Mcp,
     Plugin,
     Web,
+    Workflow,
 }
 
 impl Kind {
@@ -65,6 +66,7 @@ impl Kind {
             Kind::Mcp => "MCP",
             Kind::Plugin => "Plugin",
             Kind::Web => "Web",
+            Kind::Workflow => "Workflow",
         }
     }
 
@@ -76,6 +78,7 @@ impl Kind {
             Kind::Subagent => "Yes, and don't ask again for these exact subagents",
             Kind::Mcp | Kind::Plugin => "Yes, and don't ask again for any call to this tool",
             Kind::Web => "Yes, and don't ask again for these exact URLs",
+            Kind::Workflow => "Yes, and don't ask again for this workflow in this project",
         }
     }
 }
@@ -91,8 +94,9 @@ pub struct Request {
     pub grant: String,
 }
 
-/// None for tools that run without asking in every mode. `edited_files` are the files an edit call changes, from `edit_hooks::edited_files`.
-pub fn request_for(tool: &str, input: &Value, edited_files: &[PathBuf]) -> Option<Request> {
+/// None for tools that run without asking in every mode. `files` are the files an edit call changes, from `edit_hooks::edited_files`,
+/// or the file of the saved workflow a Workflow call runs by name.
+pub fn request_for(tool: &str, input: &Value, files: &[PathBuf]) -> Option<Request> {
     match tool {
         "Bash" => {
             let command = input["command"].as_str().unwrap_or("<missing command>").to_string();
@@ -100,7 +104,7 @@ pub fn request_for(tool: &str, input: &Value, edited_files: &[PathBuf]) -> Optio
         }
         "Write" | "ReplaceLines" | "Edit" | "InsertLines" => {
             // One per line: a file named `a, b` must not share a grant with the files `a` and `b`.
-            let files = edited_files.iter().map(|path| path.display().to_string()).collect::<Vec<_>>().join("\n");
+            let files = files.iter().map(|path| path.display().to_string()).collect::<Vec<_>>().join("\n");
             // Unresolved anchors get a grant for this exact call, so one "don't ask again" cannot cover every later bad anchor.
             let files = if files.is_empty() { format!("unresolved {input}") } else { files };
             Some(Request { kind: Kind::Edit, question: "Would you like to make the following edit?", detail: format!("{tool} in {files}"), grant: format!("edit:{files}") })
@@ -111,6 +115,21 @@ pub fn request_for(tool: &str, input: &Value, edited_files: &[PathBuf]) -> Optio
             detail: input.to_string(),
             grant: format!("subagent:{input}"),
         }),
+        // A saved workflow is granted by its file (a bundled one by name); a script the model wrote only for this exact script.
+        "Workflow" => {
+            let (detail, grant) = match (input["scriptPath"].as_str(), input["script"].as_str(), input["name"].as_str()) {
+                (Some(path), _, _) => (format!("Workflow script {path}"), format!("workflow-script:{path}")),
+                (None, Some(script), _) => (script.to_string(), format!("workflow-script:{script}")),
+                (None, None, name) => {
+                    let name = name.unwrap_or_default();
+                    match files.first() {
+                        Some(file) => (format!("Workflow /{name} {} from {}", input["args"], file.display()), format!("workflow-file:{}", file.display())),
+                        None => (format!("Workflow /{name} {}", input["args"]), format!("workflow:{name}")),
+                    }
+                }
+            };
+            Some(Request { kind: Kind::Workflow, question: "Would you like to run this workflow? It starts subagents in the background.", detail, grant })
+        }
         // A fetched URL can carry file contents to any server, so prompt injection could leak local files through it.
         "WebFetch" => {
             let urls: Vec<&str> = input["urls"].as_array().into_iter().flatten().chain([&input["url"]]).filter_map(Value::as_str).collect();
@@ -165,7 +184,7 @@ pub const REVIEW_DETAIL_CHARS: usize = 16_000;
 pub fn review_prompt(user_request: &str, cwd: &Path, request: &Request, input: &Value) -> Option<String> {
     // A command's detail is the whole call; subagent, MCP and plugin details hold the whole input.
     let input = match request.kind {
-        Kind::Edit | Kind::Web => format!("\n{input}"),
+        Kind::Edit | Kind::Web | Kind::Workflow => format!("\n{input}"),
         Kind::Command | Kind::Subagent | Kind::Mcp | Kind::Plugin => String::new(),
     };
     if request.detail.chars().count() + input.chars().count() > REVIEW_DETAIL_CHARS {
@@ -277,6 +296,16 @@ mod tests {
         let mut grants = Grants::default();
         grants.add(&request_for("InsertLines", &json!({"anchor": "bogus1"}), &[]).unwrap());
         assert!(!grants.allows(&request_for("InsertLines", &json!({"anchor": "bogus2"}), &[]).unwrap()));
+    }
+
+    #[test]
+    fn a_saved_workflow_grant_covers_its_file_not_its_name() {
+        let call = json!({"name": "sweep"});
+        let mut grants = Grants::default();
+        grants.add(&request_for("Workflow", &call, &[PathBuf::from("/home/.agents/workflows/sweep.js")]).unwrap());
+        assert!(grants.allows(&request_for("Workflow", &call, &[PathBuf::from("/home/.agents/workflows/sweep.js")]).unwrap()));
+        assert!(!grants.allows(&request_for("Workflow", &call, &[PathBuf::from("/p/.agents/workflows/sweep.js")]).unwrap()));
+        assert!(!grants.allows(&request_for("Workflow", &call, &[]).unwrap()));
     }
 
     #[test]

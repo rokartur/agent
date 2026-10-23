@@ -63,6 +63,7 @@ Flags:
   --parent <id>               Run as a subagent of that session: linked to it, no Agent, Task*, web, AskUserQuestion, plan or worktree tools;
                               with --headless, stdin takes the task and later messages as JSON string lines
   --explore                   With --parent: only read and rg, no modes prompt
+  --web                       With --parent: keep WebSearch, WebFetch and GetSearchContent
   --trust                     Trust this project for this run: load its .agents files and run its edit hooks
   --tools <a,b,...>           With acp, -p, --json or --headless: offer only these tools
   --account <p>=<name>        Use that saved account first for provider p, like a pin in /account
@@ -98,6 +99,8 @@ struct Options {
     headless: bool,
     parent: Option<String>,
     explore: bool,
+    /// With --parent: keep the web tools, which Workflow agents get.
+    web: bool,
     /// --trust: load this project's `.agents` files and run its edit hooks for this run only.
     trust: bool,
     /// Provider and account name the parent uses, pinned for this run only.
@@ -253,6 +256,7 @@ fn parse_args(args: Vec<String>) -> Result<Options, String> {
             "--parent" => options.parent = Some(value("--parent")?),
             "--add-dir" => options.add_dirs.push(value("--add-dir")?),
             "--explore" => options.explore = true,
+            "--web" => options.web = true,
             "--trust" => options.trust = true,
             "--account" => {
                 let account = value("--account")?;
@@ -395,7 +399,7 @@ fn run(options: Options) -> Result<(), String> {
     if let Some(max_age) = settings.prune_sessions_after() {
         Session::prune(&sessions_dir, max_age);
     }
-    if let Some(parent) = &options.parent {
+    if let Some(parent) = options.parent.as_ref().filter(|_| options.resume.is_none()) {
         session.append(&serde_json::json!({"type": "parent", "session": parent}))?;
     }
     // Before agent.plugins.sync starts the processes, so they run the updated code.
@@ -447,6 +451,11 @@ fn run(options: Options) -> Result<(), String> {
         terminals: Arc::default(),
         web: tools::web::Web::new(&home, tools::web::store_dir()),
         subagents: Arc::default(),
+        workflows: Arc::default(),
+        parent: options.parent.clone(),
+        inbox: None,
+        title: String::new(),
+        addressed: std::collections::HashMap::new(),
         subagent_concurrency: settings.subagent_concurrency,
         subagent_effort: settings.subagent_effort.clone(),
         subagent_model: settings.subagent_model.clone(),
@@ -519,9 +528,11 @@ fn run(options: Options) -> Result<(), String> {
         agent.announce_session();
         // After settle_model, which resets the tools. Only the root spawns, runs terminals and searches the web, and a child has no UI to ask in.
         if options.parent.is_some() {
-            const ROOT_ONLY: [&str; 16] = [
+            const ROOT_ONLY: [&str; 18] = [
                 "Agent",
-                "TaskWait",
+                "Workflow",
+                "ListAgents",
+                "Monitor",
                 "TaskOutput",
                 "TaskStop",
                 "WebSearch",
@@ -537,7 +548,8 @@ fn run(options: Options) -> Result<(), String> {
                 "EnterWorktree",
                 "ExitWorktree",
             ];
-            let keep = |name: &str| if options.explore { matches!(name, "Read" | "Grep") } else { !ROOT_ONLY.contains(&name) };
+            let web = |name: &str| options.web && matches!(name, "WebSearch" | "WebFetch" | "GetSearchContent");
+            let keep = |name: &str| if options.explore { matches!(name, "Read" | "Grep") } else { !ROOT_ONLY.contains(&name) || web(name) };
             if let Some(tools) = agent.tools.as_array_mut() {
                 tools.retain(|tool| keep(tool["name"].as_str().unwrap_or_default()));
                 for tool in tools.iter_mut().filter(|tool| tool["name"] == "Bash") {
@@ -567,6 +579,14 @@ fn run(options: Options) -> Result<(), String> {
         return result;
     }
     agent.interactive = true;
+    // Without an inbox the session still works; it only cannot be messaged.
+    match agent::peers::open(&home, &agent.follow_ups) {
+        Ok(inbox) => {
+            agent.inbox = Some(inbox);
+            agent.describe_to_peers(false);
+        }
+        Err(error) => eprintln!("Cross-session messages are off: {error}"),
+    }
     agent.snapshots = snapshots::Snapshots::open(&home, &agent.cwd);
     tui::run(agent, tui::Setup { home, settings, prompt, pick_session: matches!(options.resume, Some(Resume::Pick)), modes_error, plugin_updates }, model_lists)
 }
@@ -580,9 +600,11 @@ fn clean_up_on_signal() {
     }
 }
 
+const PRINT_BACKGROUND_CEILING: std::time::Duration = std::time::Duration::from_secs(600);
+
 /// Non-interactive run: streams text to stdout (or nothing with --json) and progress to stderr.
 fn print_mode(agent: &mut Agent, prompt: &str, json: bool) -> Result<(), String> {
-    let answer = agent.prompt(prompt, &mut |event| match event {
+    let mut on_event = |event| match event {
         Event::Text(text) if !json => {
             print!("{}", terminal_safe(&text));
             let _ = std::io::stdout().flush();
@@ -597,7 +619,21 @@ fn print_mode(agent: &mut Agent, prompt: &str, json: bool) -> Result<(), String>
         Event::Reviewed { allowed, detail, reason } => eprintln!("auto: {} {}: {}", if allowed { "allowed" } else { "denied" }, terminal_safe(&detail), terminal_safe(&reason)),
         Event::TurnEnd { .. } if !json => println!(),
         _ => {}
-    });
+    };
+    let mut answer = agent.prompt(prompt, &mut on_event);
+    // Background subagents and workflows report back as follow-ups; each handled one restarts the idle ceiling.
+    let mut idle_since = std::time::Instant::now();
+    while answer.is_ok() && agent.has_background_work() && idle_since.elapsed() < PRINT_BACKGROUND_CEILING {
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        if agent.follow_ups.lock().unwrap().is_empty() {
+            continue;
+        }
+        match agent.run_follow_ups(&mut on_event) {
+            Ok(text) if text.is_empty() => {}
+            result => answer = result,
+        }
+        idle_since = std::time::Instant::now();
+    }
     if json {
         // A script reading stdout gets a JSON line on failure too, not an empty string.
         match &answer {
@@ -624,6 +660,7 @@ fn headless_mode(agent: &mut Agent, prompt: &str) -> Result<(), String> {
     }
     let result = agent.prompt(prompt, &mut |event| match event {
         Event::ToolStart { name, .. } => line(serde_json::json!({"type": "tool", "name": name})),
+        Event::Outbox { to, text } => line(serde_json::json!({"type": "message", "to": to, "text": text})),
         Event::Permission { reply, .. } => _ = reply.send(Decision::Deny),
         _ => {}
     });
