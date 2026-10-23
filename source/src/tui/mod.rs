@@ -511,6 +511,8 @@ enum Item {
     Subagent(Arc<Run>),
     Error(String),
     User(String),
+    /// The `[Image #n]` tags of the prompt above, drawn right under it without a blank line.
+    Images(Vec<String>),
     Assistant {
         text: String,
         thinking: String,
@@ -1644,12 +1646,16 @@ impl App {
     /// The pasted images whose `[Image #n]` is still in `text`, each shown as a row under the prompt; the rest are dropped.
     fn take_images(&mut self, text: &str) -> Vec<Value> {
         let mut kept = Vec::new();
+        let mut tags = Vec::new();
         for (index, block) in std::mem::take(&mut self.images).into_iter().enumerate() {
             let tag = format!("[Image #{}]", index + 1);
             if text.contains(&tag) {
-                self.push(Item::Lines(vec![vec![span("  └ ", MUTED), span(tag, PLAIN)]]));
+                tags.push(tag);
                 kept.push(block);
             }
+        }
+        if !tags.is_empty() {
+            self.push(Item::Images(tags));
         }
         kept
     }
@@ -4124,16 +4130,16 @@ impl App {
         let mut chunks: Vec<Vec<Line>> = Vec::new();
         let mut count = 0;
         let mut prompts = Vec::new();
-        // Run of the nearest rendered entry below; empty ones (collapsed thinking) must not split tool or log runs.
-        let mut below_run = None;
+        // Nearest rendered entry below; empty ones (collapsed thinking) must not split tool or log runs.
+        let mut below = None;
         for index in (0..self.entries.len()).rev() {
-            let run = transcript_run(&self.entries[index].item);
+            let gap = below.is_some_and(|below: usize| blank_between(&self.entries[index].item, &self.entries[below].item));
             let is_prompt = matches!(self.entries[index].item, Item::User(_));
             let lines = self.entries[index].lines(width, expanded);
             if lines.is_empty() {
                 continue;
             }
-            if below_run.is_some_and(|below| run.is_none() || below != run) {
+            if gap {
                 if count < needed {
                     chunks.push(vec![Vec::new()]);
                 }
@@ -4146,7 +4152,7 @@ impl App {
             if is_prompt {
                 prompts.push((count - 1, index));
             }
-            below_run = Some(run);
+            below = Some(index);
         }
         (chunks.into_iter().rev().flatten().collect(), count, prompts)
     }
@@ -4486,6 +4492,7 @@ fn render_item(item: &Item, width: usize, expanded: bool) -> Vec<Line> {
         Item::Subagent(run) => subagent_done_lines(run, width),
         Item::Error(text) => system_lines("✗", "error", text, ERROR, width),
         Item::User(text) => prompt_rows(text, BRIGHT, width),
+        Item::Images(tags) => tags.iter().map(|tag| vec![span("  └ ", MUTED), span(tag, PLAIN)]).collect(),
         Item::Assistant { text, thinking } => {
             let mut lines = Vec::new();
             if expanded && !thinking.trim().is_empty() {
@@ -4996,7 +5003,12 @@ fn subagent_lines(path: &Path, width: usize) -> Result<Vec<Line>, String> {
     Ok(lines)
 }
 
-/// Consecutive items of the same run render without a blank line between them.
+/// Consecutive items of the same run render without a blank line between them, and image tags stay under their prompt.
+fn blank_between(item: &Item, below: &Item) -> bool {
+    let run = transcript_run(item);
+    !matches!(below, Item::Images(_)) && (run.is_none() || run != transcript_run(below))
+}
+
 fn transcript_run(item: &Item) -> Option<&'static str> {
     match item {
         Item::Tool { .. } | Item::Todos(_) => Some("tool"),
@@ -5849,6 +5861,15 @@ mod tests {
         let (two, three) = (json!("png2"), json!("png3"));
         let slots = image_slots("see [Image #2] and [Image #3]", vec![two.clone(), three.clone()]);
         assert_eq!(slots, [Value::Null, two, three]);
+    }
+
+    #[test]
+    fn image_tags_sit_right_under_their_prompt() {
+        let prompt = Item::User("see [Image #1]".into());
+        let images = Item::Images(vec!["[Image #1]".into()]);
+        assert!(!blank_between(&prompt, &images));
+        assert!(blank_between(&images, &Item::User("next".into())));
+        assert!(blank_between(&prompt, &Item::User("next".into())));
     }
 
     #[test]
