@@ -166,7 +166,10 @@ enum Panel {
         index: usize,
     },
     /// `headroom_url` or `headroom_token` (by settings `row`) being typed; Enter saves it, Esc goes back to the row.
-    Headroom { row: usize, input: Editor },
+    Headroom {
+        row: usize,
+        input: Editor,
+    },
     /// Manual provider order, tab 0 model providers, tab 1 web search providers.
     ProviderOrder {
         tab: usize,
