@@ -27,7 +27,7 @@ pub struct Settings {
     pub reserve_tokens: u64,
     pub keep_recent_tokens: u64,
     pub expand_tools: bool,
-    /// The session's estimated cost after the context tokens in the footer.
+    /// The session's cost after the context tokens in the footer.
     pub footer_cost: bool,
     /// The name of the account the current model's provider uses, before the model in the footer.
     pub footer_account: bool,

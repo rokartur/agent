@@ -97,6 +97,7 @@ pub fn parse_stream(reader: &mut dyn BufRead, abort: &AtomicBool, on_delta: &mut
     // (id, name, arguments) by the chunk's `index`; arguments arrive in pieces.
     let mut calls: Vec<(String, String, String)> = Vec::new();
     let mut usage = Usage::default();
+    let mut billed = None;
     let mut stop_reason = String::new();
     let mut id = String::new();
     let mut line = String::new();
@@ -136,6 +137,7 @@ pub fn parse_stream(reader: &mut dyn BufRead, abort: &AtomicBool, on_delta: &mut
             usage.input = chunk["usage"]["prompt_tokens"].as_u64().unwrap_or(0).saturating_sub(cached);
             usage.cache_read = cached;
             usage.output = chunk["usage"]["completion_tokens"].as_u64().unwrap_or(0);
+            billed = openrouter_billed(&chunk["usage"]);
         }
         let Some(choice) = chunk["choices"].get(0) else { continue };
         let delta = &choice["delta"];
@@ -178,7 +180,21 @@ pub fn parse_stream(reader: &mut dyn BufRead, abort: &AtomicBool, on_delta: &mut
         stop_reason = "tool_use".into();
     }
     let context_tokens = usage.context_tokens();
-    Ok(Reply { message: json!({"role": "assistant", "content": blocks}), stop_reason, usage, context_tokens, id, bad_tool_inputs, ..Reply::default() })
+    Ok(Reply { message: json!({"role": "assistant", "content": blocks}), stop_reason, usage, context_tokens, id, billed, bad_tool_inputs, ..Reply::default() })
+}
+
+/// OpenRouter's charge; with the user's own provider key (BYOK) `cost` is only OpenRouter's fee, so the upstream cost is added.
+fn openrouter_billed(usage: &Value) -> Option<f64> {
+    let cost = usage["cost"].as_f64()?;
+    if usage["is_byok"] != true {
+        return Some(cost);
+    }
+    let details = &usage["cost_details"];
+    let upstream = match details["upstream_inference_cost"].as_f64() {
+        Some(upstream) => upstream,
+        None => details["upstream_inference_prompt_cost"].as_f64()? + details["upstream_inference_completions_cost"].as_f64()?,
+    };
+    Some(cost + upstream)
 }
 
 #[cfg(test)]
@@ -225,7 +241,7 @@ mod tests {
             r#"data: {"id":"c1","choices":[{"index":0,"delta":{"content":"Let me look."}}]}"#,
             r#"data: {"id":"c1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_9","type":"function","function":{"name":"read","arguments":"{\"pa"}}]}}]}"#,
             r#"data: {"id":"c1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"th\":\"a.rs\"}"}}]},"finish_reason":"tool_calls"}]}"#,
-            r#"data: {"id":"c1","choices":[],"usage":{"prompt_tokens":120,"completion_tokens":30,"prompt_tokens_details":{"cached_tokens":100}}}"#,
+            r#"data: {"id":"c1","choices":[],"usage":{"prompt_tokens":120,"completion_tokens":30,"prompt_tokens_details":{"cached_tokens":100},"cost":0.0123}}"#,
             "data: [DONE]",
         ]
         .join("\n\n");
@@ -241,5 +257,15 @@ mod tests {
         assert_eq!(reply.message["content"], json!([{"type": "text", "text": "Let me look."}, {"type": "tool_use", "id": "call_9", "name": "read", "input": {"path": "a.rs"}}]));
         assert_eq!(reply.usage, Usage { input: 20, output: 30, cache_read: 100, cache_write: 0 });
         assert_eq!(reply.context_tokens, 150);
+        assert_eq!(reply.billed, Some(0.0123));
+    }
+
+    #[test]
+    fn byok_billed_cost_adds_the_upstream_provider_cost() {
+        let byok = |details: Value| openrouter_billed(&json!({"cost": 0.001, "is_byok": true, "cost_details": details}));
+        assert_eq!(byok(json!({"upstream_inference_cost": 0.02})), Some(0.021));
+        assert_eq!(byok(json!({"upstream_inference_cost": null, "upstream_inference_prompt_cost": 0.01, "upstream_inference_completions_cost": 0.005})), Some(0.016));
+        assert_eq!(byok(json!(null)), None);
+        assert_eq!(openrouter_billed(&json!({"prompt_tokens": 5})), None);
     }
 }

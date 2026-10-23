@@ -71,6 +71,8 @@ pub struct Reply {
     pub usage: Usage,
     /// The part of `usage.cache_write` cached for 1h, which bills 2x input against 1.25x for 5m; None when the API gave no split.
     pub cache_write_1h: Option<u64>,
+    /// Dollars the provider says it billed (OpenRouter's `usage.cost`); None when it does not say.
+    pub billed: Option<f64>,
     /// Tokens the next request starts from. Differs from `usage`, which sums the iterations of a server tool loop.
     pub context_tokens: u64,
     /// The API's id for this response: Anthropic's `msg_…`, Codex's `resp_…`.

@@ -409,7 +409,7 @@ const BUILTIN_COMMANDS: &[(&str, MidTurn, &str)] = &[
     ("trust", MidTurn::Runs, "Load this project's .agents files and run its edit hooks"),
     ("untrust", MidTurn::Runs, "Stop loading this project's .agents files and running its edit hooks"),
     ("mcp", MidTurn::Waits, "Show MCP servers: reconnect, log in, enable and disable"),
-    ("usage", MidTurn::Runs, "Show token usage, estimated cost and subscription limits"),
+    ("usage", MidTurn::Runs, "Show token usage, cost and subscription limits"),
     ("history", MidTurn::Runs, "Search previous prompts"),
     ("changes", MidTurn::Waits, "List files changed in this session and show their diffs"),
     ("skill-usage", MidTurn::Runs, "Show how often each skill was used, least used first"),
@@ -3378,7 +3378,7 @@ impl App {
                     rows: &rows,
                     selected,
                     empty: if *tab < usage::SCOPES.len() { "No usage recorded yet." } else { "No subscription accounts." },
-                    hint: "tab scope     ~$ at OpenRouter list prices, not billed on subscriptions     esc close",
+                    hint: "tab scope     $ billed by OpenRouter, else at list prices; subscriptions do not bill     esc close",
                 };
                 view.render(width, PANEL_ROWS)
             }
