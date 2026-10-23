@@ -41,7 +41,7 @@ use crate::api::oauth::Tokens;
 use crate::api::{AccountView, Client, Delta, Usage};
 use crate::image;
 use crate::settings::THINKING_LEVELS;
-use crate::settings::{self, CACHE_TTLS, CONFLICT_PRIORITIES, PROVIDER_SORTS, PRUNE_SESSIONS, SPEEDS, Settings, model_key};
+use crate::settings::{self, CACHE_TTLS, CONFLICT_PRIORITIES, MID_TURN, PROVIDER_SORTS, PRUNE_SESSIONS, SPEEDS, Settings, model_key};
 use crate::tools::bg::{Status as TerminalStatus, Terminal, Terminals};
 use crate::tools::goal::{Goal, Status as GoalStatus};
 use crate::tools::plan::Plan;
@@ -431,7 +431,7 @@ const PLAN_OPTIONS: [&str; 3] = ["Start fresh and implement", "Export to a _PLAN
 const PLAN_FRESH_ROWS: [&str; 3] = ["Model", "Effort", "Start"];
 const EDITOR_ROWS: usize = 10;
 const SCROLL_LINES: [usize; 5] = [1, 2, 3, 5, 10];
-const SETTING_NAMES: [&str; 36] = [
+const SETTING_NAMES: [&str; 37] = [
     "Model",
     "Thinking level",
     "Permission mode",
@@ -468,6 +468,7 @@ const SETTING_NAMES: [&str; 36] = [
     "Progress bar",
     "Headroom URL",
     "Headroom token",
+    "Messages while working",
 ];
 /// The settings panel's tabs with their rows of `SETTING_NAMES`, in the order it lists them.
 const SETTING_SECTIONS: [(&str, &[usize]); 5] = [
@@ -475,7 +476,7 @@ const SETTING_SECTIONS: [(&str, &[usize]); 5] = [
     ("Context", &[3, 4, 5, 7, 8, 9, 28]),
     ("Accounts", &[10, 11, 12, 25]),
     ("Modes", &[14, 15, 16, 17, 34, 35, 26]),
-    ("Interface", &[6, 31, 32, 19, 33, 20, 23, 21, 22, 24]),
+    ("Interface", &[6, 31, 32, 19, 33, 20, 23, 21, 22, 24, 36]),
 ];
 const MODEL_ROWS: [usize; 5] = [0, 8, 12, 29, 30];
 const CONTEXT_WINDOW_ROW: usize = 13;
@@ -496,8 +497,9 @@ const HOTKEYS: [(&str, &[(&str, &str)]); 4] = [
     (
         "Send",
         &[
-            ("Enter", "send; while working, steers the turn (commands and images wait for it to end)"),
-            ("Shift+Enter", "new line (also Ctrl+J and Alt+Enter)"),
+            ("Enter", "send; while working, steers the turn or waits for it to end, per Messages while working"),
+            (if cfg!(target_os = "macos") { "Option+Enter" } else { "Alt+Enter" }, "while working, send the other way; otherwise a new line"),
+            ("Shift+Enter", "new line (also Ctrl+J)"),
             ("Tab", "complete a slash command or an @path"),
             ("Up, Down", "history, menu selection"),
             ("Ctrl+R", "search previous prompts"),
@@ -606,7 +608,7 @@ struct App {
     git: Git,
     plugins: crate::plugins::Plugins,
     mcp: crate::mcp::Mcp,
-    steering: Arc<Mutex<Vec<String>>>,
+    steering: crate::agent::Steering,
     /// Slash commands, `!bash` and prompts with pasted images typed while the agent works, with those images; they run one by one once it is idle.
     queued_commands: VecDeque<(String, Vec<Value>)>,
     /// Worker commands picked mid-turn, like a worktree or session from a panel; the worker is busy until the turn ends.
@@ -711,7 +713,7 @@ pub fn run(agent: Agent, setup: Setup, model_lists: JoinHandle<Vec<String>>) -> 
         previous_hook(info);
     }));
     if let Some(prompt) = prompt {
-        app.submit(prompt);
+        app.submit(prompt, false);
     }
     if pick_session {
         app.open_resume();
@@ -1090,7 +1092,7 @@ fn event_loop(app: &mut App, inbox: &Receiver<Msg>, out: &mut Stdout) -> Result<
             let (text, images) = app.queued_commands.pop_front().expect("checked non-empty above");
             // Images pasted into the editor meanwhile belong to the next prompt, so they sit out this one.
             let pasted = std::mem::replace(&mut app.images, images);
-            app.submit(text);
+            app.submit(text, false);
             app.images = pasted;
         }
         if app.quit {
@@ -1606,7 +1608,7 @@ impl App {
 
     fn edit_key(&mut self, key: KeyEvent, ctrl: bool, alt: bool, shift: bool, screen: &mut Screen) {
         match key.code {
-            KeyCode::Enter if shift || alt => self.editor.newline(),
+            KeyCode::Enter if shift || (alt && self.working.is_none()) => self.editor.newline(),
             KeyCode::Char('j') if ctrl => self.editor.newline(),
             KeyCode::Enter => {
                 if self.editor.text().trim().is_empty() {
@@ -1623,7 +1625,7 @@ impl App {
                 if let Err(error) = history::append(&self.home.join(".agents"), history::Entry { prompt: text.clone(), cwd: self.cwd.clone(), session: self.session_id.clone() }) {
                     self.push(Item::Error(error));
                 }
-                self.submit(text);
+                self.submit(text, alt);
             }
             KeyCode::Esc if self.viewed.is_some() => self.view_run(None),
             KeyCode::Esc if self.working.is_some() && self.editor.is_empty() && !answered(&self.entries) => {
@@ -1650,8 +1652,9 @@ impl App {
             KeyCode::BackTab => self.cycle_thinking(),
             KeyCode::Char('p') if ctrl => self.cycle_model(),
             KeyCode::Up if alt => {
-                let mut queued = std::mem::take(&mut *self.steering.lock().unwrap());
-                for (mut text, images) in std::mem::take(&mut self.queued_commands) {
+                let steering = std::mem::take(&mut *self.steering.lock().unwrap());
+                let mut queued = Vec::new();
+                for (mut text, images) in steering.into_iter().chain(std::mem::take(&mut self.queued_commands)) {
                     let offset = self.images.len();
                     // Highest first: with offset 1, #1 becomes #2 only after the old #2 became #3.
                     for number in (1..=images.len()).rev() {
@@ -1980,7 +1983,8 @@ impl App {
         self.panel = Some(Panel::Resume { all: false, index: 0, sessions });
     }
 
-    fn submit(&mut self, text: String) {
+    /// `flip` sends a mid-turn message the other way than `mid_turn` says.
+    fn submit(&mut self, text: String, flip: bool) {
         self.scroll = 0;
         // A side question and /goal pause work mid-turn, so they skip the steering queue.
         if let Some(question) = command_args(&text, "/btw") {
@@ -2001,16 +2005,23 @@ impl App {
         // Plugin commands can carry secrets such as tokens, so they never become steering text.
         let plugin = self.plugins.commands().iter().any(|(name, _)| command_args(&text, &format!("/{name}")).is_some());
         if self.working.is_some() && !local && !plugin {
-            // Steering reaches the model as plain text, so commands and prompts with pasted images wait for the turn to end and run then.
+            // Steering reaches the model as plain text and images, so commands wait for the turn to end and run then.
             let command = text.starts_with('!')
                 || text.trim().starts_with("/skill:")
                 || text.trim().starts_with("/prompt:")
                 || self.slash_commands.iter().any(|(name, _)| command_args(&text, &format!("/{name}")).is_some());
-            if command || !self.images.is_empty() {
+            // Text typed after a waiting prompt waits behind it, or steering would reach the model first.
+            let queued = (self.settings.mid_turn == "queued") != flip;
+            if command || queued || !self.queued_commands.is_empty() {
                 // The images travel with their text, so an image pasted for the next prompt starts again at #1.
                 self.queued_commands.push_back((text, std::mem::take(&mut self.images)));
             } else {
-                self.steering.lock().unwrap().push(text);
+                // All of them, in order: Alt+Up maps image n back to `[Image #n]`. The API rejects the dropped file's path key.
+                let mut images = std::mem::take(&mut self.images);
+                for image in &mut images {
+                    image.as_object_mut().unwrap().remove(DROPPED_PATH);
+                }
+                self.steering.lock().unwrap().push((text, images));
             }
             return;
         }
@@ -3157,11 +3168,12 @@ impl App {
             31 => s.footer_cost = !s.footer_cost,
             32 => s.footer_account = !s.footer_account,
             33 => s.progress_bar = !s.progress_bar,
+            36 => s.mid_turn = step(&MID_TURN, &s.mid_turn.as_str(), forward).to_string(),
             _ => unreachable!("rows 0, 8, 12, 13, 29 and 30 open their own panels"),
         });
     }
 
-    fn setting_values(&self) -> [Line; 36] {
+    fn setting_values(&self) -> [Line; 37] {
         let s = &self.settings;
         let condense_model = if s.condense_model.is_empty() { "auto" } else { &s.condense_model };
         let fallback_model = if s.fallback_model.is_empty() { "auto" } else { &s.fallback_model };
@@ -3212,6 +3224,7 @@ impl App {
                 url => vec![span(url, BRIGHT.bold()), span("   enter edit", MUTED)],
             },
             vec![span(if s.headroom_token.is_empty() { "none" } else { "set" }, BRIGHT.bold()), span("   enter edit", MUTED)],
+            choices(MID_TURN.map(String::from), &s.mid_turn),
         ]
     }
 
@@ -3869,7 +3882,7 @@ impl App {
             self.editor.set(&format!("/{name} {rest}"));
         } else if run || !rest.is_empty() {
             self.editor.set(&rest);
-            self.submit(format!("/{name}"));
+            self.submit(format!("/{name}"), false);
         } else {
             self.editor.set(&format!("/{name}"));
         }
@@ -4086,7 +4099,7 @@ impl App {
             bottom.push(line);
         }
         let steering = self.steering.lock().unwrap().clone();
-        let queued: Vec<&String> = steering.iter().chain(self.queued_commands.iter().map(|(text, _)| text)).collect();
+        let queued: Vec<&String> = steering.iter().chain(&self.queued_commands).map(|(text, _)| text).collect();
         if !queued.is_empty() {
             bottom.push(Vec::new());
             for text in queued {

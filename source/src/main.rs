@@ -673,14 +673,14 @@ fn headless_mode(agent: &mut Agent, prompt: &str) -> Result<(), String> {
 }
 
 /// A subagent's stdin, one JSON string per line: its task, then messages the user sends while it runs, which steer it.
-fn read_subagent_stdin(steering: Arc<Mutex<Vec<String>>>) -> Result<String, String> {
+fn read_subagent_stdin(steering: agent::Steering) -> Result<String, String> {
     let mut lines = BufReader::new(std::io::stdin()).lines();
     let task = lines.next().ok_or("No task on stdin.")?.map_err(|e| format!("Cannot read stdin: {e}"))?;
     let task = serde_json::from_str(&task).map_err(|e| format!("The task is not a JSON string: {e}"))?;
     std::thread::spawn(move || {
         for line in lines.map_while(Result::ok) {
             if let Ok(text) = serde_json::from_str(&line) {
-                steering.lock().unwrap().push(text);
+                steering.lock().unwrap().push((text, Vec::new()));
             }
         }
     });

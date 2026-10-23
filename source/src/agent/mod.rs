@@ -163,6 +163,9 @@ pub enum Event {
     },
 }
 
+/// Messages typed mid-turn with their pasted images, read after each tool batch.
+pub type Steering = Arc<Mutex<Vec<(String, Vec<Value>)>>>;
+
 /// Work that finished in the background; it reaches the model after the current tool batch or turn, or starts a turn when idle.
 pub struct FollowUp {
     /// What produced it, e.g. a terminal id; bg_status on that id withdraws it.
@@ -229,7 +232,7 @@ pub struct Agent {
     /// Set from the UI thread to stop the stream and kill a running bash command.
     pub abort: Arc<AtomicBool>,
     /// Messages typed while the agent works; delivered with the next tool results.
-    pub steering: Arc<Mutex<Vec<String>>>,
+    pub steering: Steering,
     /// Shared with the UI so a mode change applies to the next tool call.
     pub permission_mode: Arc<Mutex<Mode>>,
     pub grants: Grants,
@@ -745,8 +748,9 @@ impl Agent {
         let steering = std::mem::take(&mut *self.steering.lock().unwrap());
         let follow_ups = std::mem::take(&mut *self.follow_ups.lock().unwrap());
         let mut blocks = Vec::new();
-        for text in steering {
+        for (text, images) in steering {
             emit(Event::Steered(text.clone()));
+            blocks.extend(images);
             blocks.push(json!({"type": "text", "text": text}));
         }
         for FollowUp { source, text } in follow_ups {
@@ -765,8 +769,13 @@ impl Agent {
 
     /// Starts a turn from queued follow-ups while idle; Ok("") when another turn already took them.
     pub fn run_follow_ups(&mut self, emit: &mut dyn FnMut(Event)) -> Result<String, String> {
-        let blocks = self.take_queued(emit);
-        let texts: Vec<&str> = blocks.iter().filter_map(|b| b["text"].as_str()).collect();
+        let mut texts = Vec::new();
+        for block in self.take_queued(emit) {
+            match block["text"].as_str() {
+                Some(text) => texts.push(text.to_string()),
+                None => self.images.push(block),
+            }
+        }
         if texts.is_empty() {
             return Ok(String::new());
         }

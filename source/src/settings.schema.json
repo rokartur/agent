@@ -55,6 +55,7 @@
     "copy_on_select": { "type": "boolean", "default": true },
     "update_channel": { "enum": ["latest", "pre-release", "off"], "default": "latest" },
     "prune_sessions": { "enum": ["never", "24h", "3d", "7d", "14d", "30d"], "default": "never", "description": "Delete saved sessions untouched this long, at start." },
+    "mid_turn": { "enum": ["steering", "queued"], "default": "steering", "description": "A message sent while the agent works: steering reaches the model at its next tool call, queued waits for the turn to end and runs as the next prompt." },
     "on_start": { "type": "array", "items": { "type": "string" }, "default": [], "description": "Shell commands the TUI runs in the background at start." },
     "custom_providers": {
       "type": "array",

@@ -95,6 +95,8 @@ pub struct Settings {
     pub update_channel: String,
     /// One of `PRUNE_SESSIONS`: sessions untouched this long are deleted at start.
     pub prune_sessions: String,
+    /// One of `MID_TURN`: a message sent while the agent works reaches it at the next tool call, or waits for the turn to end.
+    pub mid_turn: String,
     /// Shell commands the TUI runs in the background at start, e.g. a global tool update.
     pub on_start: Vec<String>,
     /// Language name to the server that checks a file after each edit; an empty command turns the language off.
@@ -143,6 +145,7 @@ pub const SPEEDS: [&str; 3] = ["standard", "fast", "ultrafast"];
 pub const PRUNE_SESSIONS: [&str; 6] = ["never", "24h", "3d", "7d", "14d", "30d"];
 pub const PROVIDER_SORTS: [&str; 3] = ["default", "alphabetical", "manual"];
 pub const CONFLICT_PRIORITIES: [&str; 2] = ["project", "global"];
+pub const MID_TURN: [&str; 2] = ["steering", "queued"];
 /// Below this a condensed batch costs more in cache rewrites than its summary saves on later cache reads.
 pub const CONDENSE_MIN_BATCH_CHARS: u64 = 10_000;
 
@@ -322,6 +325,7 @@ fn from_json(own: &Value) -> Settings {
         copy_on_select: own["copy_on_select"].as_bool().unwrap_or(true),
         update_channel: level(&own["update_channel"], &crate::update::CHANNELS, "latest"),
         prune_sessions: own["prune_sessions"].as_str().unwrap_or("never").to_string(),
+        mid_turn: level(&own["mid_turn"], &MID_TURN, "steering"),
         on_start: string_list(&own["on_start"]),
         lsp: lsp_servers(&own["lsp"]),
         custom_providers: custom_providers(&own["custom_providers"]),
@@ -443,6 +447,7 @@ fn to_json(settings: &Settings) -> Value {
         "copy_on_select": settings.copy_on_select,
         "update_channel": settings.update_channel,
         "prune_sessions": settings.prune_sessions,
+        "mid_turn": settings.mid_turn,
         "on_start": settings.on_start,
         "custom_providers": settings.custom_providers.iter().map(|p| json!({
             "name": p.name,
@@ -590,6 +595,7 @@ mod tests {
         settings.copy_on_select = false;
         settings.update_channel = "pre-release".into();
         settings.prune_sessions = "7d".into();
+        settings.mid_turn = "queued".into();
         settings.on_start = vec!["echo started".into()];
         settings.lsp.get_mut("rust").unwrap().command = "ra-multiplex".into();
         save(&home, &settings).unwrap();
@@ -618,6 +624,7 @@ mod tests {
         assert_eq!(properties["caveman"]["enum"], json!(crate::agent::modes::CAVEMAN_LEVELS));
         assert_eq!(properties["update_channel"]["enum"], json!(crate::update::CHANNELS));
         assert_eq!(properties["prune_sessions"]["enum"], json!(PRUNE_SESSIONS));
+        assert_eq!(properties["mid_turn"]["enum"], json!(MID_TURN));
         assert_eq!(properties["provider_sort"]["enum"], json!(PROVIDER_SORTS));
         assert_eq!(properties["conflict_priority"]["enum"], json!(CONFLICT_PRIORITIES));
     }
