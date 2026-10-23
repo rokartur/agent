@@ -3909,7 +3909,7 @@ impl App {
                 let Some(index) = self.entries.iter().rposition(|e| matches!(&e.item, Item::Tool { id: tool_id, .. } if *tool_id == id)) else { return };
                 let entry = &mut self.entries[index];
                 let Item::Tool { name, input, result, .. } = &mut entry.item else { return };
-                let edits_todos = name == "Todo" && !is_error && !matches!(input["action"].as_str(), Some("list" | "get"));
+                let edits_todos = !is_error && edits_todos(name, input);
                 *result = Some((output, is_error));
                 entry.cache = None;
                 if edits_todos {
@@ -4602,6 +4602,10 @@ fn update_todos_lines(tasks: &[Task], width: usize) -> Vec<Line> {
     lines
 }
 
+fn edits_todos(name: &str, input: &Value) -> bool {
+    name == "Todo" && !matches!(input["action"].as_str(), Some("list" | "get"))
+}
+
 /// `✔` done and struck through, `◼` in progress and bold, `◻` pending.
 fn todo_span(status: Status, text: &str) -> Span {
     match status {
@@ -4713,6 +4717,10 @@ fn subagent_done_lines(run: &Run, width: usize) -> Vec<Line> {
 }
 
 fn render_tool(name: &str, input: &Value, result: Option<&(String, bool)>, width: usize, expanded: bool) -> Vec<Line> {
+    // The list itself replaces this row once the call ends; see show_todos.
+    if result.is_none() && edits_todos(name, input) {
+        return vec![vec![span("●", MUTED), span(" Update Todos", TOOL_NAME)]];
+    }
     let (icon, icon_style) = match result {
         None => ("•", MUTED),
         Some((_, false)) => ("✓", OK),
@@ -5858,6 +5866,8 @@ mod tests {
         let lines = update_todos_lines(&[task("review", Status::Completed), task("fix", Status::InProgress), task("test", Status::Pending)], 40);
         let rows: Vec<String> = lines.iter().map(text).collect();
         assert_eq!(rows, ["● Update Todos", "  ⎿  ✔ review", "     ◼ fix", "     ◻ test"]);
+        let running: Vec<String> = render_tool("Todo", &json!({"action": "create", "subject": "x"}), None, 40, false).iter().map(text).collect();
+        assert_eq!(running, ["● Update Todos"]);
         assert!(lines[1][1].style.strikethrough && lines[2][1].style.bold && lines[3][1].style == PLAIN);
     }
 
