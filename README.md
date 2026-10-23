@@ -33,6 +33,8 @@ Known names fill in the URL and the key variable: `ollama`, `lmstudio`, `groq`, 
 
 **It checks its own work.** After each edit, your language server reports new errors and the checks in `.agents/edit-hooks.json` run. The agent fixes what they find.
 
+**Fewer tokens through headroom.** Turn on `headroom` in `/settings` and model requests go through a `headroom proxy`. The agent installs and syncs a local one, or set `headroom_url` and `headroom_token` to use your own server.
+
 **Rewind anything.** Press Esc twice to go back to an earlier prompt. Your files go back with it.
 
 **Subagents.** It splits big work into parallel child agents. You tune how in a plain Markdown prompt, `.agents/swarm-prompt.md`.
