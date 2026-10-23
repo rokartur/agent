@@ -13,6 +13,28 @@ pub fn sequence(title: &str, body: &str, env: impl Fn(&str) -> Option<String>) -
         // Terminal.app and the rest have no notification sequence; the bell bounces the Dock icon or marks the tab.
         return "\x07".to_string();
     };
+    through_tmux(raw, &env)
+}
+
+/// OSC 9;4 indeterminate progress while `busy`, cleared otherwise; None where the terminal would misread it.
+/// WezTerm and iTerm2 before 3.6.6 take any OSC 9 as a notification, so the allowlist stays narrow.
+pub fn progress(busy: bool, env: impl Fn(&str) -> Option<String>) -> Option<String> {
+    let is = |name: &str, value: &str| env(name).is_some_and(|found| found == value);
+    let iterm_version = env("LC_TERMINAL_VERSION").or_else(|| env("TERM_PROGRAM_VERSION")).unwrap_or_default();
+    let iterm_supports = (is("LC_TERMINAL", "iTerm2") || is("TERM_PROGRAM", "iTerm.app")) && version(&iterm_version) >= vec![3, 6, 6];
+    let supported = env("GHOSTTY_RESOURCES_DIR").is_some() || env("WT_SESSION").is_some() || env("ConEmuANSI").is_some() || iterm_supports;
+    if !supported {
+        return None;
+    }
+    let state = if busy { 3 } else { 0 };
+    Some(through_tmux(format!("\x1b]9;4;{state}\x07"), &env))
+}
+
+fn version(text: &str) -> Vec<u32> {
+    text.split('.').map_while(|part| part.parse().ok()).collect()
+}
+
+fn through_tmux(raw: String, env: impl Fn(&str) -> Option<String>) -> String {
     if env("TMUX").is_none() {
         return raw;
     }
@@ -46,6 +68,16 @@ mod tests {
     fn tmux_wraps_the_sequence_in_passthrough() {
         let vars = env(&[("TMUX", "/tmp/tmux"), ("LC_TERMINAL", "iTerm2")]);
         assert_eq!(sequence("agent", "Done", vars), "\x1bPtmux;\x1b\x1b]9;agent: Done\x07\x1b\\");
+    }
+
+    #[test]
+    fn progress_goes_only_to_terminals_that_draw_it() {
+        assert_eq!(progress(true, env(&[("GHOSTTY_RESOURCES_DIR", "/g")])).as_deref(), Some("\x1b]9;4;3\x07"));
+        assert_eq!(progress(false, env(&[("GHOSTTY_RESOURCES_DIR", "/g")])).as_deref(), Some("\x1b]9;4;0\x07"));
+        assert_eq!(progress(true, env(&[("LC_TERMINAL", "iTerm2"), ("LC_TERMINAL_VERSION", "3.6.6")])).as_deref(), Some("\x1b]9;4;3\x07"));
+        assert_eq!(progress(true, env(&[("LC_TERMINAL", "iTerm2"), ("LC_TERMINAL_VERSION", "3.5.14")])), None);
+        assert_eq!(progress(true, env(&[("WEZTERM_EXECUTABLE", "/w")])), None);
+        assert_eq!(progress(true, env(&[("GHOSTTY_RESOURCES_DIR", "/g"), ("TMUX", "/t")])).as_deref(), Some("\x1bPtmux;\x1b\x1b]9;4;3\x07\x1b\\"));
     }
 
     #[test]

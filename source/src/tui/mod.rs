@@ -420,7 +420,7 @@ const PLAN_OPTIONS: [&str; 3] = ["Start fresh and implement", "Export to a _PLAN
 const PLAN_FRESH_ROWS: [&str; 3] = ["Model", "Effort", "Start"];
 const EDITOR_ROWS: usize = 10;
 const SCROLL_LINES: [usize; 5] = [1, 2, 3, 5, 10];
-const SETTING_NAMES: [&str; 33] = [
+const SETTING_NAMES: [&str; 34] = [
     "Model",
     "Thinking level",
     "Permission mode",
@@ -454,9 +454,10 @@ const SETTING_NAMES: [&str; 33] = [
     "Subagent model",
     "Cost in footer",
     "Account in footer",
+    "Progress bar",
 ];
 /// Rows of `SETTING_NAMES` in the order the settings panel lists them.
-const SETTING_ORDER: [usize; 33] = [0, 1, 27, 18, 30, 13, 2, 29, 3, 4, 5, 6, 31, 32, 7, 8, 9, 10, 11, 12, 25, 28, 14, 15, 16, 17, 26, 19, 20, 23, 21, 22, 24];
+const SETTING_ORDER: [usize; 34] = [0, 1, 27, 18, 30, 13, 2, 29, 3, 4, 5, 6, 31, 32, 7, 8, 9, 10, 11, 12, 25, 28, 14, 15, 16, 17, 26, 19, 33, 20, 23, 21, 22, 24];
 const MODEL_ROWS: [usize; 5] = [0, 8, 12, 29, 30];
 const CONTEXT_WINDOW_ROW: usize = 13;
 const PROVIDER_ORDER_ROW: usize = 25;
@@ -687,6 +688,7 @@ pub fn run(agent: Agent, setup: Setup, model_lists: JoinHandle<Vec<String>>) -> 
     }
     app.offer_trust();
     let result = event_loop(&mut app, &inbox, &mut out);
+    show_progress(false);
     app.terminals.lock().unwrap().kill_all();
     app.subagents.lock().unwrap().stop_all();
     crate::tools::remove_spills();
@@ -991,7 +993,13 @@ fn spawn_input(events: Sender<Msg>) {
 
 fn event_loop(app: &mut App, inbox: &Receiver<Msg>, out: &mut Stdout) -> Result<(), String> {
     let mut screen = Screen::new();
+    let mut progress_shown = false;
     loop {
+        let busy = app.working.is_some() && app.settings.progress_bar;
+        if busy != progress_shown {
+            progress_shown = busy;
+            show_progress(busy);
+        }
         let (width, height) = terminal::size().map_err(|e| e.to_string())?;
         let (rows, cursor) = app.frame(width as usize, height as usize);
         screen.draw(out, rows, Some(cursor)).map_err(|e| e.to_string())?;
@@ -3039,11 +3047,12 @@ impl App {
             28 => s.cache_ttl = step(&CACHE_TTLS, &s.cache_ttl.as_str(), forward).to_string(),
             31 => s.footer_cost = !s.footer_cost,
             32 => s.footer_account = !s.footer_account,
+            33 => s.progress_bar = !s.progress_bar,
             _ => unreachable!("rows 0, 8, 12, 13, 29 and 30 open their own panels"),
         });
     }
 
-    fn setting_values(&self) -> [Line; 33] {
+    fn setting_values(&self) -> [Line; 34] {
         let s = &self.settings;
         let condense_model = if s.condense_model.is_empty() { "auto" } else { &s.condense_model };
         let fallback_model = if s.fallback_model.is_empty() { "auto" } else { &s.fallback_model };
@@ -3088,6 +3097,7 @@ impl App {
             vec![span(subagent_model, BRIGHT.bold())],
             on_off_choices(s.footer_cost),
             on_off_choices(s.footer_account),
+            on_off_choices(s.progress_bar),
         ]
     }
 
@@ -4380,6 +4390,13 @@ fn report_cwd(cwd: &Path) {
     }
     print!("\x1b]7;file://{url}\x1b\\");
     let _ = std::io::stdout().flush();
+}
+
+fn show_progress(busy: bool) {
+    if let Some(sequence) = notify::progress(busy, |name| std::env::var(name).ok()) {
+        print!("{sequence}");
+        let _ = std::io::stdout().flush();
+    }
 }
 
 /// OSC 0 sets the terminal's window and tab title.

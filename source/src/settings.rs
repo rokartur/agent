@@ -81,6 +81,8 @@ pub struct Settings {
     pub headroom_env: BTreeMap<String, String>,
     /// Desktop notification when a task ends or the agent waits for an answer while the terminal is in the background.
     pub notifications: bool,
+    /// OSC 9;4 busy indicator while a turn runs; Ghostty draws it as a bar at the top, others in the tab or Dock icon.
+    pub progress_bar: bool,
     /// Transcript lines moved per mouse wheel step.
     pub scroll_lines: usize,
     /// Slash menu entries shown before it scrolls.
@@ -311,6 +313,7 @@ fn from_json(own: &Value) -> Settings {
         headroom: own["headroom"].as_bool().unwrap_or(false),
         headroom_env: own["headroom_env"].as_object().into_iter().flatten().filter_map(|(key, value)| Some((key.clone(), value.as_str()?.to_string()))).collect(),
         notifications: own["notifications"].as_bool().unwrap_or(true),
+        progress_bar: own["progress_bar"].as_bool().unwrap_or(true),
         scroll_lines: own["scroll_lines"].as_u64().unwrap_or(3).max(1) as usize,
         menu_rows: own["menu_rows"].as_u64().unwrap_or(6).max(1) as usize,
         copy_on_select: own["copy_on_select"].as_bool().unwrap_or(true),
@@ -430,6 +433,7 @@ fn to_json(settings: &Settings) -> Value {
         "headroom": settings.headroom,
         "headroom_env": settings.headroom_env,
         "notifications": settings.notifications,
+        "progress_bar": settings.progress_bar,
         "scroll_lines": settings.scroll_lines,
         "menu_rows": settings.menu_rows,
         "copy_on_select": settings.copy_on_select,
@@ -574,6 +578,7 @@ mod tests {
         settings.headroom = true;
         settings.headroom_env = BTreeMap::from([("HEADROOM_DISABLE_KOMPRESS".into(), "1".into())]);
         settings.notifications = false;
+        settings.progress_bar = false;
         settings.scroll_lines = 10;
         settings.menu_rows = 10;
         settings.copy_on_select = false;
