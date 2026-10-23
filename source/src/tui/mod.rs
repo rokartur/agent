@@ -592,6 +592,8 @@ struct App {
     prompt_usage: Usage,
     /// Answer and thinking chars streamed since the last request's usage arrived, for the live token estimate.
     streamed_chars: usize,
+    /// The token count the working line shows, counting up to the estimate a step per frame.
+    shown_output: u64,
     spent: Spent,
     expanded: bool,
     scroll: usize,
@@ -1118,6 +1120,7 @@ impl App {
             focused: None,
             prompt_usage: Usage::default(),
             streamed_chars: 0,
+            shown_output: 0,
             spent: agent.spent,
             expanded: settings.expand_tools,
             scroll: 0,
@@ -3926,6 +3929,7 @@ impl App {
             return;
         }
         self.streamed_chars = 0;
+        self.shown_output = 0;
         self.working = Some(Instant::now());
     }
 
@@ -4095,7 +4099,8 @@ impl App {
             let mut line = shimmer_line(working_label(self.entries.last().map(|e| &e.item)), tick);
             // shortcut: about 4 chars per token for the request still streaming; tool inputs are not counted until its usage arrives.
             let output = self.prompt_usage.output + self.streamed_chars as u64 / 4;
-            line.push(span(format!(" ({} · ↓ {} tokens)", duration(started.elapsed()), tokens(output)), DIM));
+            self.shown_output = count_toward(self.shown_output, output);
+            line.push(span(format!(" ({} · ↓ {} tokens)", duration(started.elapsed()), self.shown_output), DIM));
             bottom.push(line);
         }
         let steering = self.steering.lock().unwrap().clone();
@@ -5483,6 +5488,14 @@ fn tasks_panel(terminals: &[Arc<Terminal>], runs: &[Arc<Run>], catalog: &[Model]
     lines
 }
 
+/// One frame of the token counter: a quarter of the gap, at least 1, so a jump plays as a quick count.
+fn count_toward(shown: u64, target: u64) -> u64 {
+    if shown >= target {
+        return target;
+    }
+    shown + ((target - shown) / 4).max(1)
+}
+
 fn duration(d: Duration) -> String {
     let secs = d.as_secs();
     match (secs / 3600, secs / 60 % 60, secs % 60) {
@@ -5714,6 +5727,18 @@ mod tests {
     fn plan_file_name_comes_from_the_first_heading() {
         assert_eq!(plan_file_name("intro\n# Add /plan export, v2!\n## Steps"), "ADD_PLAN_EXPORT_V2_PLAN.md");
         assert_eq!(plan_file_name("no heading"), "PLAN.md");
+    }
+
+    #[test]
+    fn token_counter_counts_up_through_a_jump_and_drops_with_the_estimate() {
+        let mut shown = 0;
+        let mut frames = Vec::new();
+        while shown < 10 {
+            shown = count_toward(shown, 10);
+            frames.push(shown);
+        }
+        assert_eq!(frames, [2, 4, 5, 6, 7, 8, 9, 10]);
+        assert_eq!(count_toward(500, 300), 300);
     }
 
     #[test]
