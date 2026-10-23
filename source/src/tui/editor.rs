@@ -1,4 +1,4 @@
-use super::render::{CURSOR, Line, PLAIN, Style, span, split_link};
+use super::render::{CURSOR, Line, PLAIN, Style, select, span, split_link};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use unicode_width::UnicodeWidthChar;
 
@@ -381,6 +381,15 @@ impl Editor {
             line.extend(spans);
             lines.push(line);
         }
+        let tag_end = self.col + self.step_forward();
+        if tag_end > self.col + 1 {
+            let end = spots.iter().find(|spot| spot.line == self.row && spot.col == tag_end).expect("a tag ends inside the text");
+            for (row, line) in lines.iter_mut().enumerate().take(end.row + 1).skip(cursor.row) {
+                let from = if row == cursor.row { cursor.x } else { 2 };
+                let to = if row == end.row { end.x } else { usize::MAX };
+                *line = select(line, from, to);
+            }
+        }
         (lines, (cursor.x, cursor.row))
     }
 
@@ -501,6 +510,21 @@ mod tests {
         let mut editor = Editor::from_text("x]");
         editor.backspace();
         assert_eq!(editor.text(), "x");
+    }
+
+    #[test]
+    fn the_cursor_on_an_image_tag_selects_the_whole_tag() {
+        let mut editor = Editor::from_text("a [Image #1] b");
+        editor.end();
+        let selected = |editor: &Editor| -> String {
+            let (lines, _) = editor.render(40);
+            lines[0].iter().filter(|span| span.style.selected).map(|span| span.text.as_str()).collect()
+        };
+        assert_eq!(selected(&editor), "");
+        editor.left();
+        editor.left();
+        editor.left();
+        assert_eq!(selected(&editor), "[Image #1]");
     }
 
     #[test]
