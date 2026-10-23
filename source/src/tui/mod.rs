@@ -4583,7 +4583,7 @@ fn render_item(item: &Item, width: usize, expanded: bool) -> Vec<Line> {
 
 fn image_row(tag: &str) -> Line {
     let Some((name, path)) = tag.split_once("] ") else { return vec![span("  └ ", MUTED), span(tag, PLAIN)] };
-    vec![span("  └ ", MUTED), span(&format!("{name}]"), PLAIN), span(&format!(" {path}"), MUTED)]
+    vec![span("  └ ", MUTED), span(format!("{name}]"), PLAIN), span(format!(" {path}"), MUTED)]
 }
 
 fn system_lines(icon: &str, source: &str, text: &str, style: Style, width: usize) -> Vec<Line> {
