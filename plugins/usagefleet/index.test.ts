@@ -18,13 +18,11 @@ describe("usagefleet", () => {
 		expect(tones(79.4, 79.5)).toEqual([undefined, "warn", undefined, "error"]);
 	});
 
-	test("shows the group budget unless it repeats the account's, named only when asked", () => {
+	test("shows the group budget, named only when asked", () => {
 		const view = { group: "Artur", sessionPct: 30, weeklyPct: 17 };
-		const account = formatLimits({ limits: { fiveHourPct: 5, sevenDayPct: 41, at: "2026-10-15T11:58:00Z" } }, now);
-		expect(formatGroupLimits(view, account, true)?.map((part) => part.text).join("")).toBe("Artur: 5h 30% · 7d 17%");
-		expect(formatGroupLimits(view, account, false)?.map((part) => part.text).join("")).toBe("5h 30% · 7d 17%");
-		const same = formatLimits({ limits: { fiveHourPct: 30, sevenDayPct: 17, at: "2026-10-15T11:58:00Z" } }, now);
-		expect(formatGroupLimits(view, same, true)).toBeNull();
+		expect(formatGroupLimits(view, true)?.map((part) => part.text).join("")).toBe("Artur: 5h 30% · 7d 17%");
+		expect(formatGroupLimits(view, false)?.map((part) => part.text).join("")).toBe("5h 30% · 7d 17%");
+		expect(formatGroupLimits({ group: null }, true)).toBeNull();
 	});
 
 	test("picks the session account's token before the shared one", () => {

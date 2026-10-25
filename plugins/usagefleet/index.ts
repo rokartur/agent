@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * Shows this device's usagefleet limits (5h + weekly) and its group's budget in the footer,
+ * Shows this device's group budget in the footer, or its usagefleet limits (5h + weekly) outside a group,
  * and refuses prompts while that budget is blocked.
  *
  * usagefleet's watcher writes the device's last limits report into its config file every minute.
@@ -52,14 +52,12 @@ export function formatLimits(config: unknown, now: number): StatusPart[] | null 
 	return formatWindows(fiveHourPct, sevenDayPct);
 }
 
-/** "Artur: 5h 30% · 7d 17%", or null when the device is in no group or the group repeats the account's numbers. */
-export function formatGroupLimits(view: unknown, accountLimits: StatusPart[] | null, showName: boolean): StatusPart[] | null {
+/** "Artur: 5h 30% · 7d 17%", or null when the device is in no group. */
+export function formatGroupLimits(view: unknown, showName: boolean): StatusPart[] | null {
 	if (!isRecord(view)) return null;
 	const { group, sessionPct, weeklyPct } = view;
 	if (typeof group !== "string" || typeof sessionPct !== "number" || typeof weeklyPct !== "number") return null;
 	const windows = formatWindows(sessionPct, weeklyPct);
-	// The server does not say how many groups there are; a sole group's budget slice is the whole account.
-	if (Bun.deepEquals(windows, accountLimits)) return null;
 	return showName ? [{ text: `${group}: ` }, ...windows] : windows;
 }
 
@@ -210,14 +208,14 @@ async function status(context: Context): Promise<StatusPart[] | null> {
 	const account = claudeAccount(context);
 	if (!account) return null;
 	const config = await readJson(CONFIG_PATH);
-	// The watcher reads limits for one account; a session on another account would show the wrong numbers.
-	const limits = account === (await collectorAccount()) ? formatLimits(config, Date.now()) : null;
 	const token = resolveToken(config, account);
 	// Offline or rejected hides the group numbers rather than freezing old ones.
 	const view = token ? await fetchServerLimits(token).catch(() => null) : null;
-	const group = formatGroupLimits(view, limits, context.settings.showGroupName);
-	if (limits && group) return [...limits, { text: "  " }, ...group];
-	return limits ?? group;
+	// The group budget is what blocks prompts, so it replaces the account's own numbers.
+	const group = formatGroupLimits(view, context.settings.showGroupName);
+	if (group) return group;
+	// The watcher reads limits for one account; a session on another account would show the wrong numbers.
+	return account === (await collectorAccount()) ? formatLimits(config, Date.now()) : null;
 }
 
 /** Fails open on every error, the same guarantee `usagefleet guard` makes. */
