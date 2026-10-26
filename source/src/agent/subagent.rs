@@ -326,7 +326,7 @@ fn start(run: &Arc<Run>, message: &str, resume: Option<&str>, runs: &Arc<Mutex<R
 
 /// A child's SendMessage: `main` gets it as a message, a sibling through `send`.
 fn route(from: &Run, to: &str, text: &str, runs: &Arc<Mutex<Runs>>, follow_ups: &Arc<Mutex<Vec<FollowUp>>>) {
-    // Not the run's own id: Monitor on that run withdraws its follow-ups.
+    // Not the run's own id: WaitForAgents on that run withdraws its follow-ups.
     let source = format!("{}:message", from.id);
     if to == "main" {
         let text = format!("Message from subagent {} ({}), another agent, not the user:\n\n{text}", from.id, from.label);
@@ -382,7 +382,7 @@ pub fn wait(runs: &[Arc<Run>], abort: &AtomicBool) {
 }
 
 /// Records a run's answer; a background or resumed run also queues it as a follow-up for the next turn.
-/// Holding `follow_ups` while the status flips lets Monitor, which sees the run done, find its follow-up to withdraw.
+/// Holding `follow_ups` while the status flips lets WaitForAgents, which sees the run done, find its follow-up to withdraw.
 fn finish(run: &Run, result: Result<String, String>, follow_ups: &Mutex<Vec<FollowUp>>) {
     let mut queued = follow_ups.lock().unwrap();
     {
@@ -398,7 +398,7 @@ fn finish(run: &Run, result: Result<String, String>, follow_ups: &Mutex<Vec<Foll
     }
 }
 
-/// Monitor: the answers of `runs` once they finish or `timeout` passes, withdrawing the follow-ups they queued.
+/// WaitForAgents: the answers of `runs` once they finish or `timeout` passes, withdrawing the follow-ups they queued.
 /// Esc ends the wait but leaves the runs going, so their answers still arrive as follow-ups.
 pub fn wait_background(runs: &[Arc<Run>], timeout: Duration, abort: &AtomicBool, follow_ups: &Mutex<Vec<FollowUp>>) -> Result<String, String> {
     let deadline = Instant::now() + timeout;

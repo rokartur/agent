@@ -14,9 +14,9 @@
 
 ## Subagents
 
-`Agent`, `Workflow` and `Monitor` run child processes of the same binary with `--parent <id> --headless`, the task as JSON string lines on stdin (`agent/subagent.rs`). A child has no `Agent`, `Task*`, web, `AskUserQuestion`, plan or worktree tools; `--explore` leaves only read and `rg`, `--web` keeps the web tools. The swarm prompt (`.agents/swarm-prompt.md` up to the git root, then `~/.agents/swarm-prompt.md`, then the built-in) goes ahead of every task. A child's session file carries a `parent` entry, so `/resume` hides it and `/tasks` opens it.
+`Agent` and `Workflow` run child processes of the same binary with `--parent <id> --headless`, the task as JSON string lines on stdin (`agent/subagent.rs`). A child has no `Agent`, `Task*`, web, `AskUserQuestion`, plan or worktree tools; `--explore` leaves only read and `rg`, `--web` keeps the web tools. The swarm prompt (`.agents/swarm-prompt.md` up to the git root, then `~/.agents/swarm-prompt.md`, then the built-in) goes ahead of every task. A child's session file carries a `parent` entry, so `/resume` hides it and `/tasks` opens it.
 
-A background run's answer queues as a `FollowUp` for the next turn; `Monitor` withdraws the ones it waited for. `SendMessage` to a finished run restarts it on its own session file.
+A background run's answer queues as a `FollowUp` for the next turn; `WaitForAgents` withdraws the ones it waited for. `SendMessage` to a finished run restarts it on its own session file.
 
 ## Workflows
 

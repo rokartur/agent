@@ -6,7 +6,7 @@ Built-in tools are defined in `tools/mod.rs` (`schemas` gives the JSON schema li
 |---|---|---|
 | Files | `Read`, `Write`, `Edit`, `ReplaceLines`, `InsertLines`, `Grep` | `tools/mod.rs`, anchors in `tools/hashline.rs` |
 | Shell | `Bash`, `TaskOutput`, `TaskStop` | `tools/bg.rs`, `tools/rtk.rs`, `tools/guard.rs` |
-| Agents | `Agent`, `Monitor`, `SendMessage`, `ListAgents`, `Workflow` | `agent/subagent.rs`, `agent/workflow.rs`, `agent/peers.rs` |
+| Agents | `Agent`, `WaitForAgents`, `SendMessage`, `ListAgents`, `Workflow` | `agent/subagent.rs`, `agent/workflow.rs`, `agent/peers.rs` |
 | Planning | `Todo`, `Goal`, `EnterPlanMode`, `ExitPlanMode`, `Skill` | `tools/todo.rs`, `tools/goal.rs`, `tools/plan.rs` |
 | User | `AskUserQuestion`, `PushNotification` | `tools/ask.rs`, `tui/notify.rs` |
 | Time | `ScheduleWakeup`, `CronCreate`, `CronDelete`, `CronList` | `tools/cron.rs` |

@@ -532,7 +532,7 @@ fn run(options: Options) -> Result<(), String> {
                 "Agent",
                 "Workflow",
                 "ListAgents",
-                "Monitor",
+                "WaitForAgents",
                 "TaskOutput",
                 "TaskStop",
                 "WebSearch",

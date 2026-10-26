@@ -353,7 +353,7 @@
     }
   },
   {
-    "name": "Monitor",
+    "name": "WaitForAgents",
     "description": "Wait for background Agent tasks (default: all running) and return their answers, which then do not arrive again as messages.",
     "input_schema": {
       "type": "object",

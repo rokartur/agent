@@ -90,7 +90,7 @@ const REFUSED: &str = "Stopped: the model refused this request, and every retry 
 const TOOL_RESULT_SUMMARY_CHARS: usize = 2000;
 const COMPACT_MAX_TOKENS: u64 = 128_000;
 const SNAPSHOT_FAILED: &str = "File snapshot failed, a rewind will not restore files from this tool call";
-const BG_WAIT_SUBAGENTS_ONLY: &str = "Monitor waits for subagents only. A background Bash task (bt-N) reports its exit as a message: keep working or end the turn, or peek with TaskOutput.";
+const BG_WAIT_SUBAGENTS_ONLY: &str = "WaitForAgents waits for subagents only. A background Bash task (bt-N) reports its exit as a message: keep working or end the turn, or peek with TaskOutput.";
 const NAMING_SYSTEM: &str =
     "Name a coding session from the user's first message. Reply with the name only: 3 to 6 words naming the concrete task, in the language of the message, one line, no quotes, no markdown.";
 const NAMING_PROMPT_CHARS: usize = 2000;
@@ -676,7 +676,7 @@ impl Agent {
             "ListAgents" => Ok(self.list_agents()),
             "Agent" => self.subagent(input, emit),
             "Workflow" => self.workflow(input),
-            "Monitor" => self.bg_wait(input),
+            "WaitForAgents" => self.bg_wait(input),
             "CronCreate" if self.interactive => tools::cron::create(&self.crons, input, &self.follow_ups),
             "ScheduleWakeup" if self.interactive => tools::cron::wakeup(&self.crons, input, &self.follow_ups),
             "CronCreate" | "ScheduleWakeup" => Err("Scheduling needs the interactive UI; this process ends with its prompt.".into()),
@@ -943,7 +943,7 @@ impl Agent {
         }
         if background {
             let names: Vec<String> = runs.iter().map(|r| format!("{} ({})", r.id, r.label)).collect();
-            return Ok(format!("Started {} in the background. Each answer arrives as a message when it finishes, or Monitor waits for them; /tasks shows progress.", names.join(", ")));
+            return Ok(format!("Started {} in the background. Each answer arrives as a message when it finishes, or WaitForAgents waits for them; /tasks shows progress.", names.join(", ")));
         }
         if let [run] = runs.as_slice() {
             return Ok(run.result_text());
