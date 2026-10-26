@@ -362,6 +362,82 @@ impl Spent {
 }
 
 impl Agent {
+    /// The agent before plugins, MCP servers and the session's history are loaded into it.
+    pub fn new(client: Client, settings: &Settings, home: PathBuf, cwd: PathBuf, session: Session, sessions_dir: PathBuf, parent: Option<String>) -> Agent {
+        let agent_dir = home.join(".agents");
+        Agent {
+            client,
+            system: prompt::system_prompt(&agent_dir, &cwd, settings.trusts(&cwd), &settings.disabled_skills, settings.prefer_global()),
+            trusted_projects: settings.trusted_projects.clone(),
+            modes: modes::prompt(&home, &settings.ponytail, &settings.caveman),
+            // agent.load fills it, with the session's swarm prompt.
+            tools: Value::Null,
+            anchors: Anchors::new(&session.id),
+            rtk: if settings.rtk { Rtk::ON } else { Rtk::OFF },
+            nested_instructions: HashSet::new(),
+            worktree_session: None,
+            extra_dirs: Vec::new(),
+            shell_context: Vec::new(),
+            images: Vec::new(),
+            model: settings.model.clone(),
+            effort: settings.thinking.clone(),
+            // settle_model fills these four and condense once the model lists arrive.
+            context_window: 0,
+            max_tokens: 0,
+            cheap_model: String::new(),
+            reviewer_model: String::new(),
+            speed: settings.speed.clone(),
+            cache_ttl: settings.cache_ttl.clone(),
+            auto_compact: settings.auto_compact,
+            reserve_tokens: settings.reserve_tokens,
+            keep_recent_tokens: settings.keep_recent_tokens,
+            last_context_tokens: 0,
+            condense: condense::Config::new(settings, ""),
+            condensed: Vec::new(),
+            next_ref: 1,
+            pending_condense: Vec::new(),
+            pending_title: None,
+            usage: Usage::default(),
+            turns: 0,
+            tool_calls: 0,
+            abort: Arc::default(),
+            steering: Arc::new(Mutex::new(Vec::new())),
+            permission_mode: Arc::new(Mutex::new(settings.permission_mode)),
+            grants: Grants::default(),
+            todos: Arc::default(),
+            goal: Arc::default(),
+            plan: Arc::default(),
+            follow_ups: Arc::default(),
+            crons: Arc::default(),
+            terminals: Arc::default(),
+            web: tools::web::Web::new(&home, tools::web::store_dir()),
+            subagents: Arc::default(),
+            workflows: Arc::default(),
+            parent,
+            inbox: None,
+            title: String::new(),
+            addressed: HashMap::new(),
+            subagent_concurrency: settings.subagent_concurrency,
+            subagent_effort: settings.subagent_effort.clone(),
+            subagent_model: settings.subagent_model.clone(),
+            only_tools: None,
+            spent: Spent::default(),
+            interactive: false,
+            plugins: crate::plugins::Plugins::new(&home),
+            mcp: crate::mcp::Mcp::new(&home, &cwd),
+            snapshots: None,
+            lsp: lsp::Lsp::new(settings.lsp.clone()),
+            checkpoints: Vec::new(),
+            compactions: Vec::new(),
+            agent_dir,
+            home,
+            cwd,
+            messages: Vec::new(),
+            session,
+            sessions_dir,
+        }
+    }
+
     /// Runs a `!cmd` the user typed, without asking; with `keep`, pi's "Ran `cmd`" block goes into the next prompt.
     /// shortcut: output kept before a /new, /resume or quit without a prompt is dropped; save it to the session if that matters.
     pub fn run_bash(&mut self, command: &str, keep: bool, emit: &mut dyn FnMut(Event)) {
@@ -1522,9 +1598,9 @@ impl Agent {
         Ok((messages, accounts))
     }
 
-    /// --add-dir and /workspace add: `path` is relative to cwd; saved so a resume restores it. Returns the notice to show.
+    /// --add-dir and /workspace add: `path` is relative to cwd or starts with `~`; saved so a resume restores it. Returns the notice to show.
     pub fn add_dir(&mut self, path: &str) -> Result<String, String> {
-        let dir = self.cwd.join(path).canonicalize().map_err(|e| format!("Cannot open {path}: {e}"))?;
+        let dir = tools::hashline::resolve(&self.cwd, path).canonicalize().map_err(|e| format!("Cannot open {path}: {e}"))?;
         if !dir.is_dir() {
             return Err(format!("{} is not a directory.", dir.display()));
         }
@@ -1543,7 +1619,7 @@ impl Agent {
 
     /// /workspace remove: takes the path as listed or as typed relative to cwd. Returns the notice to show.
     pub fn remove_dir(&mut self, path: &str) -> Result<String, String> {
-        let typed = self.cwd.join(path);
+        let typed = tools::hashline::resolve(&self.cwd, path);
         let dir = typed.canonicalize().unwrap_or(typed);
         let index = self.extra_dirs.iter().position(|known| *known == dir).ok_or(format!("{} is not an extra directory.", dir.display()))?;
         let dir = self.extra_dirs.remove(index);
@@ -2474,6 +2550,21 @@ mod tests {
         let history = Session::history(session.path.as_ref().unwrap()).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
         assert_eq!(history.extra_dirs, [PathBuf::from("/api")]);
+    }
+
+    #[test]
+    fn workspace_add_expands_a_tilde_to_the_home_directory() {
+        let home = std::env::temp_dir().join(format!("agent-add-tilde-{}", std::process::id()));
+        let cwd = home.join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let settings = crate::settings::load(&home).unwrap();
+        let session = Session::start(&home.join("sessions"), false, &cwd, "m").unwrap();
+        let mut agent = Agent::new(Client::new(&home).unwrap(), &settings, home.clone(), cwd, session, home.join("sessions"), None);
+        let added = agent.add_dir("~");
+        std::fs::remove_dir_all(&home).unwrap();
+        let real_home = PathBuf::from(std::env::var("HOME").unwrap()).canonicalize().unwrap();
+        assert_eq!(added, Ok(format!("Added {}.", real_home.display())));
+        assert_eq!(agent.extra_dirs, [real_home]);
     }
 
     #[test]

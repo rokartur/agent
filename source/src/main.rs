@@ -16,16 +16,12 @@ mod update;
 mod worktree;
 
 use serde_json::Value;
-use std::collections::HashSet;
 use std::io::{BufRead, BufReader, IsTerminal, Read, Write};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
 
-use agent::permissions::{Decision, Grants, Mode};
-use agent::{Agent, Event, History, Session, Spent, condense, modes, prompt, snapshots, usage};
-use api::{Client, Usage};
-use tools::hashline::Anchors;
-use tools::rtk;
+use agent::permissions::{Decision, Mode};
+use agent::{Agent, Event, History, Session, modes, prompt, snapshots, usage};
+use api::Client;
 
 const USAGE: &str = concat!(
     "agent v",
@@ -353,7 +349,6 @@ fn run(options: Options) -> Result<(), String> {
         return Err("--resume without an id opens the session list, so it needs a terminal.".into());
     }
     let home = home()?;
-    let agent_dir = home.join(".agents");
     // The flags below apply to this run only; /settings saves only the keys it changes.
     let mut settings = settings::load(&home)?;
     settings.reset_to_defaults();
@@ -404,77 +399,7 @@ fn run(options: Options) -> Result<(), String> {
     }
     // Before agent.plugins.sync starts the processes, so they run the updated code.
     let plugin_updates = plugins::update_bundled(&home);
-    let mut agent = Agent {
-        client,
-        system: prompt::system_prompt(&agent_dir, &cwd, settings.trusts(&cwd), &settings.disabled_skills, settings.prefer_global()),
-        trusted_projects: settings.trusted_projects.clone(),
-        modes: modes::prompt(&home, &settings.ponytail, &settings.caveman),
-        // agent.load below fills it, with the session's swarm prompt.
-        tools: Value::Null,
-        anchors: Anchors::new(&session.id),
-        rtk: if settings.rtk { rtk::Rtk::ON } else { rtk::Rtk::OFF },
-        nested_instructions: HashSet::new(),
-        worktree_session: None,
-        extra_dirs: Vec::new(),
-        shell_context: Vec::new(),
-        images: Vec::new(),
-        model: settings.model.clone(),
-        effort: settings.thinking.clone(),
-        // settle_model fills these four and condense once the model lists arrive.
-        context_window: 0,
-        max_tokens: 0,
-        cheap_model: String::new(),
-        reviewer_model: String::new(),
-        speed: settings.speed.clone(),
-        cache_ttl: settings.cache_ttl.clone(),
-        auto_compact: settings.auto_compact,
-        reserve_tokens: settings.reserve_tokens,
-        keep_recent_tokens: settings.keep_recent_tokens,
-        last_context_tokens: 0,
-        condense: condense::Config::new(&settings, ""),
-        condensed: Vec::new(),
-        next_ref: 1,
-        pending_condense: Vec::new(),
-        pending_title: None,
-        usage: Usage::default(),
-        turns: 0,
-        tool_calls: 0,
-        abort: Arc::default(),
-        steering: Arc::new(Mutex::new(Vec::new())),
-        permission_mode: Arc::new(Mutex::new(settings.permission_mode)),
-        grants: Grants::default(),
-        todos: Arc::default(),
-        goal: Arc::default(),
-        plan: Arc::default(),
-        follow_ups: Arc::default(),
-        crons: Arc::default(),
-        terminals: Arc::default(),
-        web: tools::web::Web::new(&home, tools::web::store_dir()),
-        subagents: Arc::default(),
-        workflows: Arc::default(),
-        parent: options.parent.clone(),
-        inbox: None,
-        title: String::new(),
-        addressed: std::collections::HashMap::new(),
-        subagent_concurrency: settings.subagent_concurrency,
-        subagent_effort: settings.subagent_effort.clone(),
-        subagent_model: settings.subagent_model.clone(),
-        only_tools: None,
-        spent: Spent::default(),
-        interactive: false,
-        agent_dir: agent_dir.clone(),
-        home: home.clone(),
-        plugins: plugins::Plugins::new(&home),
-        mcp: mcp::Mcp::new(&home, &cwd),
-        snapshots: None,
-        lsp: agent::lsp::Lsp::new(settings.lsp.clone()),
-        checkpoints: Vec::new(),
-        compactions: Vec::new(),
-        cwd,
-        messages: Vec::new(),
-        session,
-        sessions_dir,
-    };
+    let mut agent = Agent::new(client, &settings, home.clone(), cwd, session, sessions_dir, options.parent.clone());
     agent.plugins.sync(&settings.disabled_plugins, &settings.plugin_settings);
     agent.mcp.sync(&settings.disabled_mcp, &settings.approved_mcp);
     agent.load(history);
