@@ -553,6 +553,8 @@ impl Agent {
                 let bad_input = reply.bad_tool_inputs.iter().find(|bad| bad.id == id);
                 let (mut output, is_error, image) = if let Some(bad) = bad_input {
                     (format!("{} The call did not run; send it again with valid JSON.", bad.error), true, None)
+                } else if let Some(error) = tools::undeclared_params(&self.tools, &name, &input) {
+                    (format!("{error} The call did not run; send it again with only the parameters its schema lists."), true, None)
                 } else if let Some(path) = self.requested_image(&name, &input) {
                     match crate::image::block(&path) {
                         Ok(block) => (format!("[{} is attached as an image.]", path.display()), false, Some(block)),

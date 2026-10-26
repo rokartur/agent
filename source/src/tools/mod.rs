@@ -1,4 +1,5 @@
 use serde_json::Value;
+use std::collections::BTreeSet;
 use std::fs::File;
 use std::io::{Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
@@ -42,6 +43,41 @@ pub fn schemas(swarm_prompt: &str, context_tree_query: bool) -> Value {
         tool["description"] = format!("{base}\n\nSwarm prompt (user-tunable via ~/.agents/swarm-prompt.md):\n{swarm_prompt}").into();
     }
     Value::Array(tools)
+}
+
+/// The error for a call naming parameters its built-in tool does not declare. Each tool reads only its own keys, so a
+/// Claude Code habit like Grep's `head_limit` or Agent's `subagent_type` would otherwise do nothing, silently.
+pub fn undeclared_params(schemas: &Value, name: &str, input: &Value) -> Option<String> {
+    let tool = schemas.as_array()?.iter().find(|tool| tool["name"] == name)?;
+    let mut undeclared = BTreeSet::new();
+    collect_undeclared(input, &tool["input_schema"], "", &mut undeclared);
+    if undeclared.is_empty() {
+        return None;
+    }
+    let listed: Vec<String> = undeclared.iter().map(|path| format!("`{path}`")).collect();
+    Some(format!("{name} does not take {}.", listed.join(", ")))
+}
+
+fn collect_undeclared(value: &Value, schema: &Value, at: &str, undeclared: &mut BTreeSet<String>) {
+    if let Value::Array(items) = value {
+        for item in items {
+            collect_undeclared(item, &schema["items"], at, undeclared);
+        }
+        return;
+    }
+    // A schema without `properties`, like Workflow's `args` or Read's `paths` items, takes any keys.
+    let (Value::Object(object), Some(properties)) = (value, schema["properties"].as_object()) else {
+        return;
+    };
+    for (key, item) in object {
+        let path = if at.is_empty() { key.clone() } else { format!("{at}.{key}") };
+        match properties.get(key) {
+            Some(property) => collect_undeclared(item, property, &path, undeclared),
+            None => {
+                undeclared.insert(path);
+            }
+        }
+    }
 }
 
 /// Runs one tool call. The bool is true when the result is an error. Setting `abort` kills a running bash or rg.
@@ -530,6 +566,27 @@ mod tests {
         let offers = |query: bool| schemas("", query).as_array().unwrap().iter().any(|tool| tool["name"] == "ContextTreeQuery");
         assert!(offers(true));
         assert!(!offers(false));
+    }
+
+    #[test]
+    fn parameters_a_schema_lacks_are_named_at_any_depth() {
+        let tools = schemas("", false);
+        let undeclared = |name: &str, input: Value| undeclared_params(&tools, name, &input);
+        assert_eq!(undeclared("Grep", json!({"pattern": "x", "head_limit": 5, "-A": 2})).unwrap(), "Grep does not take `-A`, `head_limit`.");
+        let edits = json!({"file_path": "a", "edits": [{"old_string": "a", "new_string": "b", "replace_all": true}, {"old_string": "c", "new_string": "d", "replace_all": true}]});
+        assert_eq!(undeclared("Edit", edits).unwrap(), "Edit does not take `edits.replace_all`.");
+        assert_eq!(undeclared("Agent", json!({"tasks": [{"description": "a", "prompt": "x", "subagent_type": "Explore"}]})).unwrap(), "Agent does not take `tasks.subagent_type`.");
+        assert_eq!(undeclared("ListAgents", json!({"all": true})).unwrap(), "ListAgents does not take `all`.");
+    }
+
+    #[test]
+    fn declared_parameters_free_form_values_and_other_tools_pass() {
+        let tools = schemas("", false);
+        let undeclared = |name: &str, input: Value| undeclared_params(&tools, name, &input);
+        assert_eq!(undeclared("Grep", json!({"pattern": "x", "-C": 2, "output_mode": "count"})), None);
+        assert_eq!(undeclared("Workflow", json!({"script": "x", "args": {"any": {"key": 1}}})), None);
+        assert_eq!(undeclared("Read", json!({"paths": [{"file_path": "a", "offset": 2}, "b"]})), None);
+        assert_eq!(undeclared("mcp__server__tool", json!({"anything": 1})), None);
     }
 
     #[test]
