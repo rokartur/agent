@@ -399,6 +399,7 @@ fn open_session(options: &Options, args: &[String]) -> Result<(), String> {
         }
         // Started before the screen, so "Reading the message from stdin..." stays visible.
         let stream = serve::Stream::Local(local_session(&home, options, args, &cwd, piped)?);
+        read_keys_from_the_terminal()?;
         return serve::show(&home, &settings, &environment, || Ok(stream));
     }
     serve::show(&home, &settings, &environment, || {
@@ -407,6 +408,24 @@ fn open_session(options: &Options, args: &[String]) -> Result<(), String> {
         }
         tailnet::start(&settings, &environment, &cwd, args)
     })
+}
+
+/// Points stdin at the terminal on stdout once the session server holds the piped message. With stdin not a terminal
+/// crossterm reads keys from `/dev/tty`, which kqueue on macOS cannot watch, so no key arrived.
+fn read_keys_from_the_terminal() -> Result<(), String> {
+    use std::os::fd::AsRawFd;
+    // SAFETY: ttyname returns null or a NUL-terminated name in a static buffer, copied out before any other call.
+    let name = unsafe { libc::ttyname(libc::STDOUT_FILENO) };
+    if name.is_null() {
+        return Err(format!("Cannot find the terminal to read keys from: {}", std::io::Error::last_os_error()));
+    }
+    let path = unsafe { std::ffi::CStr::from_ptr(name) }.to_string_lossy().into_owned();
+    let terminal = std::fs::File::options().read(true).write(true).open(&path).map_err(|e| format!("Cannot open {path}: {e}"))?;
+    // SAFETY: dup2 takes two descriptors this process owns; `terminal` stays open across the call.
+    if unsafe { libc::dup2(terminal.as_raw_fd(), libc::STDIN_FILENO) } == -1 {
+        return Err(format!("Cannot read keys from {path}: {}", std::io::Error::last_os_error()));
+    }
+    Ok(())
 }
 
 /// The running session `-r` or `-c` names in `cwd`, or a new session server for `args` there. `agent serve
