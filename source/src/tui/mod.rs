@@ -2533,6 +2533,12 @@ impl App {
                         }
                     });
                 }
+                KeyCode::Enter => {
+                    let Some(source) = matching_skills(&self.skills, &query.text()).get(*index).and_then(|skill| skill.source.clone()) else { return };
+                    let mut settings = self.settings.clone();
+                    settings.toggle_disabled_repo(&source, &self.skills);
+                    self.update_settings(|s| *s = settings);
+                }
                 _ => {
                     if query.edit_key(key) {
                         *index = 0;
@@ -3658,7 +3664,7 @@ impl App {
                     rows: &rows,
                     selected: *index,
                     empty: if self.skills.is_empty() { "No skills. Add one under ~/.agents/skills/<name>/SKILL.md." } else { "No matching skills." },
-                    hint: "type to search name or owner/repo     ↑↓ navigate     space enable/disable     esc close",
+                    hint: "type to search name or owner/repo     ↑↓ navigate     space enable/disable     enter whole repo on/off     esc close",
                 };
                 view.render(width, PANEL_ROWS)
             }

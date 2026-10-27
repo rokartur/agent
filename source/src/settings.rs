@@ -228,6 +228,16 @@ impl Settings {
         }
     }
 
+    /// Disables every skill of the repo, or enables them all when every one is already disabled.
+    pub fn toggle_disabled_repo(&mut self, source: &str, skills: &[Skill]) {
+        let names: Vec<&String> = skills.iter().filter(|skill| skill.source.as_deref() == Some(source)).map(|skill| &skill.name).collect();
+        let all_disabled = names.iter().all(|name| self.disabled_skills.contains(name));
+        self.disabled_skills.retain(|disabled| !names.contains(&disabled));
+        if !all_disabled {
+            self.disabled_skills.extend(names.into_iter().cloned());
+        }
+    }
+
     /// Also renames the profile in `active_profiles`; no `from` creates it.
     pub fn rename_profile(&mut self, from: Option<&str>, to: &str) {
         let entries = from.and_then(|from| self.skill_profiles.remove(from)).unwrap_or_default();
@@ -658,6 +668,11 @@ mod tests {
         settings.toggle_profile_skill("work", &skills[1], &skills);
         assert_eq!(entries(&settings), ["tdd", "seo-audit"]);
         settings.toggle_profile("work");
+        settings.disabled_skills = vec!["seo-audit".into()];
+        settings.toggle_disabled_repo("coreyhaines31/marketingskills", &skills);
+        assert_eq!(settings.disabled_skills, ["seo-audit", "ads"]);
+        settings.toggle_disabled_repo("coreyhaines31/marketingskills", &skills);
+        assert!(settings.disabled_skills.is_empty());
         settings.rename_profile(Some("work"), "writing");
         assert_eq!((settings.skill_profiles.keys().map(String::as_str).collect::<Vec<_>>(), settings.active_profiles.clone()), (vec!["writing"], vec!["writing".to_string()]));
         settings.delete_profile("writing");
