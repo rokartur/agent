@@ -87,7 +87,7 @@ A JavaScript script that orchestrates many subagents in the background and retur
 _Avoid_: Pipeline, swarm
 
 **Peer**:
-Another interactive session on the same computer, reachable with `SendMessage`.
+Another interactive session on this or another of the user's computers, reachable with `SendMessage`; one on another computer is addressed `<environment>:<session>`.
 _Avoid_: Sibling, neighbour
 
 ## Remote sessions
