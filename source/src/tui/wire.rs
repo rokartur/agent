@@ -13,7 +13,7 @@ use std::path::Path;
 use std::time::Duration;
 
 /// Bumped when a message changes shape, so a client and a server of different releases refuse each other plainly.
-pub const PROTOCOL: u64 = 2;
+pub const PROTOCOL: u64 = 3;
 /// A remote client that hears nothing for `SILENCE` takes the link as gone and reconnects.
 pub const PING_EVERY: Duration = Duration::from_secs(5);
 pub const SILENCE: Duration = Duration::from_secs(15);
