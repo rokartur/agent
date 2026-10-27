@@ -5,7 +5,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
-use std::sync::mpsc::{self, Sender};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -112,12 +112,9 @@ fn serve_client(id: u64, stream: UnixStream, events: &Sender<Msg>) {
     let env = hello["env"].as_object().into_iter().flatten().filter_map(|(name, value)| Some((name.clone(), value.as_str()?.to_string()))).collect();
     let _ = stream.set_write_timeout(Some(WRITE_TIMEOUT));
     let (lines_out, outbox) = mpsc::channel::<String>();
+    let _ = lines_out.send(json!({"server": std::process::id()}).to_string());
     let writer = std::thread::spawn(move || {
-        for line in outbox {
-            if writeln!(&stream, "{line}").is_err() {
-                break;
-            }
-        }
+        write_lines(&outbox, &stream, wire::PING_EVERY);
         // Wakes this client's reader, which then reports the detach.
         let _ = stream.shutdown(std::net::Shutdown::Both);
     });
@@ -136,6 +133,20 @@ fn serve_client(id: u64, stream: UnixStream, events: &Sender<Msg>) {
         }
     }
     let _ = events.send(Msg::Detached(id));
+}
+
+/// Writes each line of `outbox` to `out`, and a ping after `ping_every` without one, until either side lets go.
+fn write_lines(outbox: &Receiver<String>, mut out: impl Write, ping_every: Duration) {
+    loop {
+        let line = match outbox.recv_timeout(ping_every) {
+            Ok(line) => line,
+            Err(RecvTimeoutError::Timeout) => json!({"ping": true}).to_string(),
+            Err(RecvTimeoutError::Disconnected) => return,
+        };
+        if writeln!(out, "{line}").is_err() {
+            return;
+        }
+    }
 }
 
 /// What a terminal's line means to the session; None for a line it does not know.
@@ -174,6 +185,20 @@ mod tests {
         assert!(error.contains("9.9.9") && error.contains(env!("CARGO_PKG_VERSION")), "{error}");
         assert_eq!(accepted(&json!({"protocol": wire::PROTOCOL, "size": [80, 24]})), Ok((80, 24)));
         assert!(accepted(&json!({"protocol": wire::PROTOCOL})).is_err());
+    }
+
+    #[test]
+    fn a_quiet_session_pings_its_terminal() {
+        let (lines, outbox) = mpsc::channel();
+        lines.send("{\"output\":\"a\"}".to_string()).unwrap();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            drop(lines);
+        });
+        let mut out = Vec::new();
+        write_lines(&outbox, &mut out, Duration::from_millis(10));
+        let out = String::from_utf8(out).unwrap();
+        assert!(out.starts_with("{\"output\":\"a\"}\n{\"ping\":true}\n"), "{out}");
     }
 
     #[test]

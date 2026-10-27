@@ -14,8 +14,8 @@ mod server;
 mod voice;
 mod wire;
 
-pub use client::{Ending, attach};
-pub use wire::{PROTOCOL, Place};
+pub use client::{Ending, Fullscreen, attach, ctrl_c_within, notice};
+pub use wire::{PROTOCOL, Place, SILENCE};
 
 use crossterm::event::{
     DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste, EnableFocusChange, EnableMouseCapture, Event as Input, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,

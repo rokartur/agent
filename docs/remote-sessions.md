@@ -78,6 +78,8 @@ A new remote session starts in the same directory path as your terminal. When th
 
 The project is the host's: `@` file completion, `!` commands, git status and diffs all come from the host. What you do on your own computer stays there: Ctrl+V pastes an image from your clipboard, a file you drag into the terminal is read from your disk, and `/copy`, copied selections and links you click use your clipboard and your browser.
 
+When the connection drops (Wi-Fi off, a network change, sleep), the session keeps running on the host, and a permission prompt waits there. Your terminal keeps the session on screen, says it is reconnecting, and tries again every few seconds. Once the host answers, the screen shows everything the session did meanwhile and takes keys again. Keys typed while it reconnects are not sent. Ctrl+C stops trying and leaves; `agent attach` returns to the session later.
+
 Several computers can attach to one session at once, as terminals on one computer can. `/model` lists the host's models. To change the host's settings or log in to a provider there, do it on the host.
 
 The two computers update separately. When their releases cannot talk to each other, the client names the computer to update and the version.

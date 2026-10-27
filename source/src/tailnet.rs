@@ -2,7 +2,8 @@
 //! devices on this computer's Tailscale addresses, then lists, attaches to or starts the session servers here and
 //! relays the wire between the TCP connection and the session's socket. `--on`, /env and `agent attach` are its clients.
 //!
-//! Each connection sends one request line, `{"list": true}`, `{"attach": id}` or `{"start": {"cwd", "args"}}`, with
+//! Each connection sends one request line, `{"list": true}`, `{"attach": id}`, `{"start": {"cwd", "args"}}` or
+//! `{"reattach": pid}` for the session server a dropped connection showed, with
 //! `protocol` and `version`, and gets one reply line carrying the listener's own `protocol` and `version`: the
 //! sessions, `{"ok": true}`, or `{"error": ..}`. After an ok the connection carries the session's wire unchanged.
 
@@ -16,7 +17,7 @@ use serde_json::{Value, json};
 
 use crate::serve::{self, Listed, Stream};
 use crate::settings::Settings;
-use crate::tui::PROTOCOL;
+use crate::tui::{PROTOCOL, SILENCE};
 
 pub const LOCAL: &str = "local";
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -65,6 +66,25 @@ pub fn attach(settings: &Settings, environment: &str, session: &str) -> Result<S
     Ok(Stream::Remote(reader, writer))
 }
 
+/// How an attempt to get back to a session after a dropped connection went.
+pub enum Reattach {
+    Back(Stream),
+    /// The host answered no, so trying again does not help.
+    Refused(String),
+    /// The host did not answer, or not as itself; why.
+    NotYet(String),
+}
+
+pub fn reattach(settings: &Settings, environment: &str, server: u32) -> Reattach {
+    match ask(settings, environment, json!({"reattach": server}), LIST_TIMEOUT) {
+        Err(failure) => Reattach::NotYet(failure),
+        Ok((reader, writer, reply)) => match refusal(environment, &reply) {
+            Some(refusal) => Reattach::Refused(refusal),
+            None => Reattach::Back(Stream::Remote(reader, writer)),
+        },
+    }
+}
+
 /// The running sessions of every environment but `local`, asked at once, and why the ones that did not answer did
 /// not. Those show the sessions they had when they last answered, kept in `~/.agents/environments.json`.
 pub fn listing(home: &Path, settings: &Settings) -> (Vec<Listed>, Vec<String>) {
@@ -108,8 +128,17 @@ fn entry(environment: &str, session: &Value, reachable: bool) -> Option<Listed> 
     Some(Listed { environment: environment.into(), session: session["session"].as_str()?.into(), title: text("title"), cwd: text("cwd"), busy: session["busy"].as_bool().unwrap_or(false), reachable })
 }
 
-/// Connects to `environment`, checks the computer there is this user's, sends `body` and reads the reply.
+/// Asks `environment` for `body` and returns the connection and the reply, or why it refused.
 fn request(settings: &Settings, environment: &str, body: Value, timeout: Duration) -> Result<(BufReader<TcpStream>, TcpStream, Value), String> {
+    let (reader, stream, reply) = ask(settings, environment, body, timeout)?;
+    if let Some(refusal) = refusal(environment, &reply) {
+        return Err(refusal);
+    }
+    Ok((reader, stream, reply))
+}
+
+/// Connects to `environment`, checks the computer there is this user's, sends `body` and reads the reply.
+fn ask(settings: &Settings, environment: &str, body: Value, timeout: Duration) -> Result<(BufReader<TcpStream>, TcpStream, Value), String> {
     let stream = connect(environment, settings.tailnet_port)?;
     let host = stream.peer_addr().map_err(|e| format!("Cannot reach {environment}: {e}"))?;
     // Keys typed into a session reach the host, so a host owned by someone else must not get them.
@@ -142,11 +171,9 @@ fn exchange(stream: TcpStream, environment: &str, mut body: Value, timeout: Dura
     if line.is_empty() {
         return Err(format!("{environment} closed the connection without an answer; its `agent serve --tailnet` may have just stopped."));
     }
-    stream.set_read_timeout(None).map_err(|e| format!("Cannot reach {environment}: {e}"))?;
+    // After a reply a session sends at least a ping every `PING_EVERY`, so a read that waits longer finds the link gone.
+    stream.set_read_timeout(Some(SILENCE)).map_err(|e| format!("Cannot reach {environment}: {e}"))?;
     let reply: Value = serde_json::from_str(&line).map_err(|_| format!("{environment} answered, but not as agent serve --tailnet."))?;
-    if let Some(refusal) = refusal(environment, &reply) {
-        return Err(refusal);
-    }
     Ok((reader, stream, reply))
 }
 
@@ -261,6 +288,11 @@ fn answer(home: &Path, request: &Value) -> Result<Answer, String> {
     if let Some(prefix) = request["attach"].as_str() {
         let peer = serve::find(home, prefix)?.ok_or_else(|| format!("No session {prefix} runs here."))?;
         return serve::connect(home, peer.pid).map(Answer::Session);
+    }
+    if let Some(server) = request["reattach"].as_u64() {
+        let ended = || format!("The session ended: its server {server} no longer runs.");
+        let pid = u32::try_from(server).map_err(|_| ended())?;
+        return serve::connect(home, pid).map(Answer::Session).map_err(|_| ended());
     }
     if request["start"].is_object() {
         return start_here(home, &request["start"]).map(Answer::Session);
@@ -379,6 +411,19 @@ mod tests {
     }
 
     #[test]
+    fn a_reattach_reaches_the_session_server_it_names_while_it_runs() {
+        let home = std::env::temp_dir().join(format!("agent-reattach-{}", std::process::id()));
+        let socket = serve::socket(&home, 4242);
+        std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
+        let _server = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        assert!(matches!(answer(&home, &json!({"protocol": PROTOCOL, "reattach": 4242})), Ok(Answer::Session(_))));
+        let ended = |server: u64| answer(&home, &json!({"protocol": PROTOCOL, "reattach": server})).err();
+        assert_eq!(ended(4243), Some("The session ended: its server 4243 no longer runs.".into()));
+        assert_eq!(ended(1 << 40), Some(format!("The session ended: its server {} no longer runs.", 1u64 << 40)));
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
     fn only_an_untagged_device_of_the_owner_is_admitted() {
         let whois = |id: u64, tags: Value| json!({"Node": {"Tags": tags}, "UserProfile": {"ID": id, "LoginName": "eve@example.com"}});
         assert_eq!(owned_by(&whois(7, Value::Null), 7), Ok(()));
@@ -423,7 +468,8 @@ mod tests {
         let ask = |body: Value| exchange(connect("127.0.0.1", serve_one(&home)).unwrap(), "studio", body, LIST_TIMEOUT);
         let (_, _, reply) = ask(json!({"list": true})).unwrap();
         assert_eq!(reply["sessions"], json!([]));
-        assert_eq!(ask(json!({"attach": "abc"})).err(), Some("No session abc runs here.".into()));
+        let (_, _, reply) = ask(json!({"attach": "abc"})).unwrap();
+        assert_eq!(refusal("studio", &reply), Some("No session abc runs here.".into()));
         let stream = connect("127.0.0.1", serve_one(&home)).unwrap();
         writeln!(&stream, "{}", json!({"protocol": PROTOCOL - 1, "version": "0.0.1", "list": true})).unwrap();
         let reply: Value = serde_json::from_str(&BufReader::new(stream).lines().next().unwrap().unwrap()).unwrap();
