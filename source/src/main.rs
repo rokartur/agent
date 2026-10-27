@@ -40,8 +40,10 @@ Usage:
 
 Commands:
   attach [id]                 Return to a running session, or open a saved one; lists the running ones without an id
-  serve --tailnet             Accept sessions from your other computers over Tailscale; needs "serve_tailnet": true
-  service install             Run serve --tailnet now and after every login; status, restart and uninstall manage it
+  serve --tailnet             Accept sessions from your other computers over Tailscale; needs "serve_tailnet": true,
+                              which service install sets
+  service install [--on host] Run serve --tailnet now and after every login, here or over ssh on host; status,
+                              restart and uninstall manage it
   plugin install <name|path>  Copy a bundled plugin or a plugin directory into ~/.agents/plugins
   plugin remove <name>        Remove an installed plugin
   plugin list                 List bundled and installed plugins

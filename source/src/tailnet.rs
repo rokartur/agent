@@ -239,7 +239,7 @@ fn connect(environment: &str, port: u16) -> Result<TcpStream, String> {
         }
     }
     let failure = failure.map_or_else(|| "no address".to_string(), |error| error.to_string());
-    Err(format!("{environment} does not answer on port {port} ({failure}); is it awake and running `agent serve --tailnet`?"))
+    Err(format!("{environment} does not answer on port {port} ({failure}); is it awake and running `agent serve --tailnet`? `agent service install --on <host>` sets it up over ssh."))
 }
 
 fn exchange(stream: TcpStream, environment: &str, mut body: Value, timeout: Duration) -> Result<(BufReader<TcpStream>, TcpStream, Value), String> {
