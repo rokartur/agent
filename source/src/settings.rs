@@ -106,9 +106,10 @@ pub struct Settings {
     pub serve_tailnet: bool,
     /// The port `agent serve --tailnet` listens on and remote environments are reached on.
     pub tailnet_port: u16,
-    /// Tailscale names of the other computers sessions can run on, besides `local`.
+    /// Tailscale names of other computers to offer as environments even when they are offline, besides the ones
+    /// discovered online on the tailnet.
     pub environments: Vec<String>,
-    /// `local` or one of `environments`: where `agent` starts a session without `--on`.
+    /// `local` or another environment: where `agent` starts a session without `--on`.
     pub default_environment: String,
     /// One of `MID_TURN`: a message sent while the agent works reaches it at the next tool call, or waits for the turn to end.
     pub mid_turn: String,
