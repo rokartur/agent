@@ -9,6 +9,7 @@ use std::sync::mpsc::{self, Sender};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
+use crossterm::event::Event as Input;
 use serde_json::{Value, json};
 
 use super::Msg;
@@ -74,7 +75,7 @@ impl Client {
     }
 
     /// A send fails only once the writer gave up on this client; its reader then reports `Msg::Detached`.
-    fn send(&self, message: Value) {
+    pub fn send(&self, message: Value) {
         let _ = self.lines.send(message.to_string());
     }
 }
@@ -129,12 +130,29 @@ fn serve_client(id: u64, stream: UnixStream, events: &Sender<Msg>) {
         return;
     }
     for line in lines.map_while(Result::ok) {
-        let Some(input) = serde_json::from_str::<Value>(&line).ok().and_then(|message| wire::decode(&message["input"])) else { continue };
-        if events.send(Msg::Input(id, input)).is_err() {
+        let Some(event) = serde_json::from_str::<Value>(&line).ok().and_then(|message| from_terminal(id, &message)) else { continue };
+        if events.send(event).is_err() {
             return;
         }
     }
     let _ = events.send(Msg::Detached(id));
+}
+
+/// What a terminal's line means to the session; None for a line it does not know.
+fn from_terminal(id: u64, message: &Value) -> Option<Msg> {
+    if let Some(error) = message["failed"].as_str() {
+        return Some(Msg::TerminalFailed(error.to_string()));
+    }
+    let input = wire::decode(&message["input"]);
+    if message["image"].is_null() {
+        return input.map(|input| Msg::Input(id, input));
+    }
+    let image = wire::decode_image(&message["image"]);
+    match input {
+        Some(Input::Paste(text)) => Some(Msg::Image { id, paste: Some(text), image }),
+        Some(input) => Some(Msg::Input(id, input)),
+        None => Some(Msg::Image { id, paste: None, image }),
+    }
 }
 
 /// The terminal size a hello carries, or why this server refuses the client.
@@ -156,5 +174,17 @@ mod tests {
         assert!(error.contains("9.9.9") && error.contains(env!("CARGO_PKG_VERSION")), "{error}");
         assert_eq!(accepted(&json!({"protocol": wire::PROTOCOL, "size": [80, 24]})), Ok((80, 24)));
         assert!(accepted(&json!({"protocol": wire::PROTOCOL})).is_err());
+    }
+
+    #[test]
+    fn a_terminal_line_becomes_input_an_image_or_a_failure() {
+        let paste = json!({"type": "paste", "text": "/a.png"});
+        assert!(matches!(from_terminal(7, &json!({"input": paste})), Some(Msg::Input(7, Input::Paste(text))) if text == "/a.png"));
+        let dropped = from_terminal(7, &json!({"input": paste, "image": {"error": "too big"}}));
+        assert!(matches!(dropped, Some(Msg::Image { id: 7, paste: Some(text), image: Err(error) }) if text == "/a.png" && error == "too big"));
+        let clipboard = from_terminal(7, &json!({"image": {"error": "No image in the clipboard"}}));
+        assert!(matches!(clipboard, Some(Msg::Image { id: 7, paste: None, image: Err(_) })));
+        assert!(matches!(from_terminal(7, &json!({"failed": "Cannot run pbcopy"})), Some(Msg::TerminalFailed(error)) if error == "Cannot run pbcopy"));
+        assert!(from_terminal(7, &json!({"what": 1})).is_none());
     }
 }

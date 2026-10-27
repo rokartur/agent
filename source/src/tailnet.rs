@@ -278,8 +278,20 @@ fn start_here(home: &Path, start: &Value) -> Result<UnixStream, String> {
     if options.acp || options.serve || options.print || options.json || options.headless || options.parent.is_some() {
         return Err("A remote session is interactive, so it takes no acp, serve, -p, --json, --headless or --parent.".into());
     }
-    let cwd = start["cwd"].as_str().map(PathBuf::from).filter(|cwd| cwd.is_absolute() && cwd.is_dir()).unwrap_or_else(|| home.to_path_buf());
+    let (cwd, missing) = start_dir(home, start["cwd"].as_str());
+    let mut args = args;
+    if let Some(missing) = missing {
+        args.extend(["--missing-cwd".to_string(), missing.display().to_string()]);
+    }
     crate::local_session(home, &options, &args, &cwd, false)
+}
+
+/// Where a remote start runs: the directory it asked for, or home and the asked one when that is not on this computer.
+fn start_dir(home: &Path, asked: Option<&str>) -> (PathBuf, Option<PathBuf>) {
+    match asked.map(PathBuf::from).filter(|cwd| cwd.is_absolute()) {
+        Some(cwd) if cwd.is_dir() => (cwd, None),
+        missing => (home.to_path_buf(), missing),
+    }
 }
 
 fn reply(stream: &TcpStream, mut message: Value) {
@@ -355,6 +367,16 @@ fn for_keystrokes(stream: &TcpStream) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_start_from_a_directory_missing_here_runs_in_home_and_names_it() {
+        let home = std::env::temp_dir();
+        assert_eq!(start_dir(&home, home.to_str()), (home.clone(), None));
+        assert_eq!(start_dir(&home, Some("/no/such/agent/dir")), (home.clone(), Some(PathBuf::from("/no/such/agent/dir"))));
+        assert_eq!(start_dir(&home, Some("relative")), (home.clone(), None));
+        assert_eq!(start_dir(&home, None), (home, None));
+        assert_eq!(crate::parse_args(vec!["serve".into(), "--missing-cwd".into(), "/x".into()]).unwrap().missing_cwd, Some(PathBuf::from("/x")));
+    }
 
     #[test]
     fn only_an_untagged_device_of_the_owner_is_admitted() {

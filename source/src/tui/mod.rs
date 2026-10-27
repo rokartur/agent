@@ -25,7 +25,7 @@ use crossterm::execute;
 use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::io::{Stdout, Write};
+use std::io::Stdout;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
@@ -46,7 +46,6 @@ use crate::api::accounts::Policy;
 use crate::api::models::{self, Model};
 use crate::api::oauth::Tokens;
 use crate::api::{AccountView, Client, Delta, Usage};
-use crate::image;
 use crate::settings::THINKING_LEVELS;
 use crate::settings::{self, CACHE_TTLS, CONFLICT_PRIORITIES, MID_TURN, PROVIDER_SORTS, PRUNE_SESSIONS, SPEEDS, Settings, model_key};
 use crate::tools::bg::{Status as TerminalStatus, Terminal, Terminals};
@@ -90,6 +89,14 @@ enum Msg {
     Attached(server::Client),
     /// A terminal event from the client with this id.
     Input(u64, Input),
+    /// An image from the client's computer: its clipboard's after Ctrl+V, or a dropped file with the `paste` that named it.
+    Image {
+        id: u64,
+        paste: Option<String>,
+        image: Result<Value, String>,
+    },
+    /// The client's computer could not copy or open what the session asked it to.
+    TerminalFailed(String),
     Detached(u64),
     Agent(Event),
     Done(Result<String, String>),
@@ -716,6 +723,8 @@ pub struct Setup {
     pub modes_error: Option<String>,
     /// One line per bundled plugin updated, or failed to update, at startup.
     pub plugin_updates: Vec<String>,
+    /// The directory a remote start asked for, which is not on this computer, so the session started in home.
+    pub missing_cwd: Option<PathBuf>,
 }
 
 /// Runs the session for the terminals that attach on `socket`, until one quits or it idles unattached past
@@ -1147,7 +1156,7 @@ fn event_loop(app: &mut App, inbox: &Receiver<Msg>) -> Result<(), String> {
 
 impl App {
     fn new(agent: &Agent, setup: Setup, commands: Sender<Command>, events: Sender<Msg>) -> App {
-        let Setup { home, settings, modes_error, plugin_updates, .. } = setup;
+        let Setup { home, settings, modes_error, plugin_updates, missing_cwd, .. } = setup;
         let mut recent_prompts: Vec<String> = history::load(&home.join(".agents")).into_iter().map(|entry| entry.prompt).collect();
         recent_prompts.drain(..recent_prompts.len().saturating_sub(100));
         let slash_commands: Vec<(String, String)> = BUILTIN_COMMANDS.iter().map(|(name, _, description)| (name.to_string(), description.to_string())).collect();
@@ -1236,6 +1245,11 @@ impl App {
         }
         for notice in plugin_updates {
             app.system("plugins", notice);
+        }
+        if let Some(missing) = missing_cwd {
+            let notice =
+                format!("{} is not on this computer, so this session started in {}. Move it with !cd <dir>, then /worktree to pick a branch or worktree.", missing.display(), app.cwd.display());
+            app.system("session", notice);
         }
         app.header_len = app.entries.len();
         app.push_history(&agent.messages);
@@ -1333,17 +1347,13 @@ impl App {
                 let point = self.point_at(row, mouse.column);
                 let line = self.transcript_line(point.line);
                 let Some(url) = link_at(&line, point.column) else { return };
-                if let Err(error) = open_in_browser(&url) {
-                    self.push(Item::Error(error));
-                }
+                self.ask_terminal(json!({"open": url}));
             }
             MouseEventKind::Up(MouseButton::Left) => {
                 let (top, lines) = &self.panel_view;
                 let Some(line) = row.checked_sub(*top).and_then(|at| lines.get(at)) else { return };
                 let Some(url) = link_at(line, mouse.column as usize) else { return };
-                if let Err(error) = open_in_browser(&url) {
-                    self.push(Item::Error(error));
-                }
+                self.ask_terminal(json!({"open": url}));
             }
             _ => {}
         }
@@ -1393,10 +1403,8 @@ impl App {
             self.hint = Some(("Selection is empty".into(), Instant::now()));
             return;
         }
-        match copy_to_clipboard(text) {
-            Ok(()) => self.hint = Some(("Copied selection".into(), Instant::now())),
-            Err(error) => self.push(Item::Error(error)),
-        }
+        self.ask_terminal(json!({"copy": text}));
+        self.hint = Some(("Copied selection".into(), Instant::now()));
     }
 
     /// The pill sits centered on the last transcript row while the view is scrolled up.
@@ -1475,6 +1483,14 @@ impl App {
             Input::FocusGained => self.set_focus(id, true),
             Input::FocusLost => self.set_focus(id, false),
             _ => {}
+        }
+    }
+
+    /// Copying, opening links and reading the clipboard happen on the computer of the terminal that typed, which in a
+    /// remote session is not this one. A failure comes back as `Msg::TerminalFailed`.
+    fn ask_terminal(&self, request: Value) {
+        if let Some(client) = self.clients.iter().find(|client| Some(client.id) == self.typing_client) {
+            client.send(request);
         }
     }
 
@@ -1562,6 +1578,15 @@ impl App {
                 self.invalidate_screens();
             }
             Msg::Input(id, input) => self.input(id, input),
+            Msg::Image { id, paste, image } => {
+                self.typing_client = Some(id);
+                match paste {
+                    // A dropped path is plain text to a panel's field.
+                    Some(text) if self.panel.is_some() => self.paste(&text),
+                    _ => self.attach(image),
+                }
+            }
+            Msg::TerminalFailed(error) => self.push(Item::Error(error)),
             Msg::Agent(event) => self.agent_event(event),
             Msg::Done(result) => self.done(result),
             Msg::ModelSettled { model, failures } => {
@@ -1722,13 +1747,7 @@ impl App {
                 *index = 0;
             }
             Some(_) => {}
-            None => match image::pasted_path(text) {
-                Some(path) => self.attach(image::block(&path).map(|mut block| {
-                    block[DROPPED_PATH] = path.display().to_string().into();
-                    block
-                })),
-                None => self.editor.paste(text),
-            },
+            None => self.editor.paste(text),
         }
     }
 
@@ -1853,7 +1872,7 @@ impl App {
                 self.panel = Some(Panel::Agents { row: 1 });
             }
             KeyCode::Down => self.editor.down(self.editor_width),
-            KeyCode::Char('v') if ctrl => self.attach(image::from_clipboard()),
+            KeyCode::Char('v') if ctrl => self.ask_terminal(json!({"paste_image": true})),
             _ => _ = self.editor.edit_key(key),
         }
     }
@@ -2387,18 +2406,19 @@ impl App {
                 }
                 None => self.push(Item::Error(format!("Context window must be 100k to 1M, got {args}"))),
             },
-            "copy" => match self.copy_last_answer() {
-                Ok(()) => self.system("copy", "Copied last agent message to clipboard"),
-                Err(error) => self.push(Item::Error(error)),
+            "copy" => match self.last_answer() {
+                Some(answer) => {
+                    self.ask_terminal(json!({"copy": answer}));
+                    self.system("copy", "Copied last agent message to clipboard");
+                }
+                None => self.push(Item::Error("No agent message to copy yet.".into())),
             },
             "copy-session-path" => {
                 let Some(path) = self.session_path.clone() else {
                     return self.push(Item::Error("This session is not saved, so there is no file to share.".into()));
                 };
-                match copy_to_clipboard(&path) {
-                    Ok(()) => self.system("copy", format!("Copied {path}")),
-                    Err(error) => self.push(Item::Error(error)),
-                }
+                self.ask_terminal(json!({"copy": path}));
+                self.system("copy", format!("Copied {path}"));
             }
             "session" => {
                 let file = self.session_path.clone().unwrap_or_else(|| "not saved".into());
@@ -2939,10 +2959,10 @@ impl App {
         match action {
             login::Action::None => {}
             login::Action::Close => self.panel = None,
-            login::Action::Copy(url) => match copy_to_clipboard(&url) {
-                Ok(()) => self.hint = Some(("Copied login link".into(), Instant::now())),
-                Err(error) => self.push(Item::Error(error)),
-            },
+            login::Action::Copy(url) => {
+                self.ask_terminal(json!({"copy": url}));
+                self.hint = Some(("Copied login link".into(), Instant::now()));
+            }
             login::Action::Exchange { provider, cancel, exchange } => {
                 let events = self.events.clone();
                 std::thread::spawn(move || {
@@ -4168,12 +4188,11 @@ impl App {
         Some(session.name.unwrap_or(session.title))
     }
 
-    fn copy_last_answer(&self) -> Result<(), String> {
-        let answer = self.entries.iter().rev().find_map(|entry| match &entry.item {
+    fn last_answer(&self) -> Option<String> {
+        self.entries.iter().rev().find_map(|entry| match &entry.item {
             Item::Assistant { text, .. } if !text.trim().is_empty() => Some(text.clone()),
             _ => None,
-        });
-        copy_to_clipboard(&answer.ok_or("No agent message to copy yet.")?)
+        })
     }
 
     fn menu_matches(&self) -> Vec<(String, String)> {
@@ -5925,46 +5944,6 @@ fn duration(d: Duration) -> String {
         (0, m, s) => format!("{m}m {s}s"),
         (h, m, s) => format!("{h}h {m}m {s}s"),
     }
-}
-
-fn copy_to_clipboard(text: &str) -> Result<(), String> {
-    let (program, args): (&str, &[&str]) = if cfg!(target_os = "macos") {
-        ("pbcopy", &[])
-    } else if std::env::var_os("WAYLAND_DISPLAY").is_some() {
-        ("wl-copy", &[])
-    } else {
-        ("xclip", &["-selection", "clipboard"])
-    };
-    let mut child = crate::process::command(program)
-        .args(args)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .map_err(|e| format!("Cannot run {program}: {e}"))?;
-    // The stdin handle drops before `wait`, so the child sees EOF; it is reaped even when the write failed.
-    let written = child.stdin.take().unwrap().write_all(text.as_bytes());
-    child.wait().map_err(|e| e.to_string())?;
-    written.map_err(|e| e.to_string())
-}
-
-fn open_in_browser(url: &str) -> Result<(), String> {
-    if !(url.starts_with("https://") || url.starts_with("http://")) {
-        return Err(format!("Not a web link: {url}"));
-    }
-    if !cfg!(target_os = "macos") {
-        // Reaped on a thread: xdg-open runs a browser without a desktop handler in the foreground.
-        let mut child =
-            crate::process::command("xdg-open").arg(url).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().map_err(|e| format!("Cannot run xdg-open: {e}"))?;
-        std::thread::spawn(move || child.wait());
-        return Ok(());
-    }
-    // output() and not status(): open's stderr would draw over the alternate screen.
-    let output = crate::process::command("open").arg(url).output().map_err(|e| format!("Cannot run open: {e}"))?;
-    if !output.status.success() {
-        return Err(format!("open {url} failed: {}", String::from_utf8_lossy(&output.stderr).trim()));
-    }
-    Ok(())
 }
 
 /// fx's "Permission needed" prompt.
