@@ -111,3 +111,7 @@ _Avoid_: Server, remote, target
 **Environment**:
 A host as the TUI offers it when starting a session: `local`, or a computer named by its Tailscale name.
 _Avoid_: Machine, remote, target
+
+**Listener**:
+`agent serve --tailnet`: the one process on a host that accepts its owner's other computers over Tailscale and hands each connection to a session server there.
+_Avoid_: Daemon, gateway, relay

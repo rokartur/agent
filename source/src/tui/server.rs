@@ -24,6 +24,8 @@ pub struct Client {
     pub id: u64,
     pub size: (usize, usize),
     pub focused: Option<bool>,
+    /// Where this terminal's computer sees the session, and where /env can move it.
+    pub place: wire::Place,
     env: HashMap<String, String>,
     screen: Screen,
     /// Escape sequences (title, notifications, progress) that go out ahead of the next frame.
@@ -57,6 +59,16 @@ impl Client {
             self.send(json!({"output": self.pending}));
         }
         self.send(json!({"exit": text}));
+        self.close();
+    }
+
+    /// /env: tells the terminal to start a new session in `environment`, then lets go of it.
+    pub fn switch(self, environment: &str) {
+        self.send(json!({"switch": environment}));
+        self.close();
+    }
+
+    fn close(self) {
         drop(self.lines);
         let _ = self.writer.join();
     }
@@ -108,7 +120,11 @@ fn serve_client(id: u64, stream: UnixStream, events: &Sender<Msg>) {
         // Wakes this client's reader, which then reports the detach.
         let _ = stream.shutdown(std::net::Shutdown::Both);
     });
-    let client = Client { id, size: (size.0 as usize, size.1 as usize), focused: None, env, screen: Screen::new(), pending: String::new(), lines: lines_out, writer };
+    let place = wire::Place {
+        environment: hello["environment"].as_str().unwrap_or(crate::tailnet::LOCAL).to_string(),
+        environments: hello["environments"].as_array().into_iter().flatten().filter_map(|name| Some(name.as_str()?.to_string())).collect(),
+    };
+    let client = Client { id, size: (size.0 as usize, size.1 as usize), focused: None, place, env, screen: Screen::new(), pending: String::new(), lines: lines_out, writer };
     if events.send(Msg::Attached(client)).is_err() {
         return;
     }

@@ -47,6 +47,8 @@ Known names fill in the URL and the key variable: `ollama`, `lmstudio`, `groq`, 
 
 **Sessions outlive the terminal.** Close it mid-turn and the turn finishes anyway. `agent attach` picks the session up again in any terminal, and two terminals on one session see the same screen.
 
+**Sessions on your other computers.** Over Tailscale, `agent --on studio` runs the session on another of your computers: its files, shell and accounts. No cloud relay, no pairing. [Setup](docs/remote-sessions.md)
+
 ## Compared with jcode and pi
 
 Same model (Claude Opus 5.5, medium thinking), same prompt, two coding tasks, 6 runs each, averages. Every run of every harness passed all hidden tests. A: fix a CSV parser and write a CLI (39 tests). B: port semver range matching with no dependencies (2550 cases).
