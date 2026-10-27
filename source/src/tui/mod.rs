@@ -1,5 +1,6 @@
 mod ask;
 mod btw;
+mod cmux;
 mod editor;
 mod history;
 mod login;
@@ -606,6 +607,8 @@ struct App {
     transcribing: Option<Instant>,
     /// None until the terminal reports focus or a key arrives; notifications go out unless it is Some(true).
     focused: Option<bool>,
+    /// Some inside a cmux terminal, whose sidebar shows the turn's state.
+    cmux: Option<cmux::Cmux>,
     prompt_usage: Usage,
     /// Answer and thinking chars streamed since the last request's usage arrived, for the live token estimate.
     streamed_chars: usize,
@@ -742,6 +745,9 @@ pub fn run(agent: Agent, setup: Setup, model_lists: JoinHandle<Vec<String>>) -> 
     app.offer_trust();
     let result = event_loop(&mut app, &inbox, &mut out);
     show_progress(false);
+    if let Some(cmux) = app.cmux.take() {
+        cmux.finish();
+    }
     app.terminals.lock().unwrap().kill_all();
     app.subagents.lock().unwrap().stop_all();
     crate::tools::remove_spills();
@@ -1063,6 +1069,7 @@ fn event_loop(app: &mut App, inbox: &Receiver<Msg>, out: &mut Stdout) -> Result<
             progress_sent = show.then(Instant::now);
             show_progress(show);
         }
+        app.report_to_cmux();
         let (width, height) = terminal::size().map_err(|e| e.to_string())?;
         let (rows, cursor) = app.frame(width as usize, height as usize);
         screen.draw(out, rows, Some(cursor)).map_err(|e| e.to_string())?;
@@ -1137,6 +1144,7 @@ impl App {
             recording: None,
             transcribing: None,
             focused: None,
+            cmux: cmux::Cmux::detect(),
             prompt_usage: Usage::default(),
             streamed_chars: 0,
             shown_output: 0,
@@ -4275,9 +4283,30 @@ impl App {
         entry.cache = None;
     }
 
-    /// Desktop notification, sent only while the terminal is in the background.
+    fn report_to_cmux(&mut self) {
+        let status = if matches!(self.panel, Some(Panel::Permission { .. } | Panel::Ask(_))) {
+            cmux::Status::NeedsInput
+        } else if self.working.is_some() {
+            cmux::Status::Running
+        } else {
+            cmux::Status::Idle
+        };
+        let resume = self.session_path.as_ref().map(|_| (self.session_id.clone(), self.cwd.clone()));
+        if let Some(cmux) = &mut self.cmux {
+            cmux.report(status, resume);
+        }
+    }
+
+    /// Desktop notification, sent only while the terminal is in the background; cmux decides that itself and also lists it in its sidebar.
     fn notify(&self, body: &str) {
-        if !self.settings.notifications || self.focused == Some(true) {
+        if !self.settings.notifications {
+            return;
+        }
+        if let Some(cmux) = &self.cmux {
+            cmux.notify(&notify::printable(body));
+            return;
+        }
+        if self.focused == Some(true) {
             return;
         }
         print!("{}", notify::sequence("agent", body, |name| std::env::var(name).ok()));
