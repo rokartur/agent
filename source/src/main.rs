@@ -393,14 +393,20 @@ fn open_session(options: &Options, args: &[String]) -> Result<(), String> {
     let environment = options.on.clone().unwrap_or_else(|| settings.default_environment.clone());
     tailnet::check(&settings, &environment)?;
     let cwd = std::env::current_dir().map_err(|e| format!("Cannot read the working directory: {e}"))?;
-    let stream = if environment == tailnet::LOCAL {
-        serve::Stream::Local(local_session(&home, options, args, &cwd, piped)?)
-    } else if piped {
-        return Err(format!("A piped message cannot reach a session on {environment}; pass it as words after the flags."));
-    } else {
-        tailnet::start(&settings, &environment, &cwd, args)?
-    };
-    serve::show(&home, &settings, &environment, stream)
+    if piped {
+        if environment != tailnet::LOCAL {
+            return Err(format!("A piped message cannot reach a session on {environment}; pass it as words after the flags."));
+        }
+        // Started before the screen, so "Reading the message from stdin..." stays visible.
+        let stream = serve::Stream::Local(local_session(&home, options, args, &cwd, piped)?);
+        return serve::show(&home, &settings, &environment, || Ok(stream));
+    }
+    serve::show(&home, &settings, &environment, || {
+        if environment == tailnet::LOCAL {
+            return Ok(serve::Stream::Local(local_session(&home, options, args, &cwd, false)?));
+        }
+        tailnet::start(&settings, &environment, &cwd, args)
+    })
 }
 
 /// The running session `-r` or `-c` names in `cwd`, or a new session server for `args` there. `agent serve
