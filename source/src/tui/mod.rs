@@ -649,6 +649,8 @@ struct App {
     selecting_input: bool,
     /// Screen row of the first shown editor row, the shown row count, and the editor rows hidden below them, in the last frame.
     input_view: (usize, usize, usize),
+    /// Screen row of the open panel's first row and its rows, in the last frame, so a click opens a link in it.
+    panel_view: (usize, Vec<Line>),
     /// First editor row shown when the editor is taller than `EDITOR_ROWS`.
     input_top: usize,
     todos: Arc<Mutex<Todos>>,
@@ -1161,6 +1163,7 @@ impl App {
             input_selection: Selection::default(),
             selecting_input: false,
             input_view: (0, 0, 0),
+            panel_view: (0, Vec::new()),
             input_top: 0,
             todos: agent.todos.clone(),
             goal: agent.goal.clone(),
@@ -1287,6 +1290,14 @@ impl App {
                 let point = self.point_at(row, mouse.column);
                 let line = self.transcript_line(point.line);
                 let Some(url) = link_at(&line, point.column) else { return };
+                if let Err(error) = open_in_browser(&url) {
+                    self.push(Item::Error(error));
+                }
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                let (top, lines) = &self.panel_view;
+                let Some(line) = row.checked_sub(*top).and_then(|at| lines.get(at)) else { return };
+                let Some(url) = link_at(line, mouse.column as usize) else { return };
                 if let Err(error) = open_in_browser(&url) {
                     self.push(Item::Error(error));
                 }
@@ -4140,10 +4151,12 @@ impl App {
             self.panel = None;
         }
         let mut panel_cursor = None;
+        let mut panel_view = (0, Vec::new());
         match &self.panel {
             Some(panel) => {
                 let mut lines = self.render_panel(panel, width);
                 panel_cursor = take_cursor(&mut lines).map(|(x, y)| (x, bottom.len() + y));
+                panel_view = (bottom.len(), lines.clone());
                 bottom.extend(lines);
             }
             None => bottom.extend(self.menu()),
@@ -4228,6 +4241,7 @@ impl App {
         }
         rows.resize(room, Vec::new());
         self.input_view = (rows.len() + editor_top, shown, below);
+        self.panel_view = (rows.len() + panel_view.0, panel_view.1);
         let cursor_y = rows.len() + cursor.1;
         rows.extend(bottom);
         rows.truncate(height);
