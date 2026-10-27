@@ -95,6 +95,8 @@ enum Msg {
         paste: Option<String>,
         image: Result<Value, String>,
     },
+    /// The client's computer copied what the session asked it to.
+    TerminalCopied,
     /// The client's computer could not copy or open what the session asked it to.
     TerminalFailed(String),
     Detached(u64),
@@ -614,6 +616,12 @@ struct Git {
     others: usize,
 }
 
+/// How a copy confirms itself: a passing hint, or a transcript line.
+enum Copied {
+    Hint(String),
+    Line(String),
+}
+
 struct App {
     entries: Vec<Entry>,
     editor: Editor,
@@ -662,6 +670,8 @@ struct App {
     abort: Arc<AtomicBool>,
     permission_mode: Arc<Mutex<Mode>>,
     hint: Option<(String, Instant)>,
+    /// Shown once the terminal confirms the copy, so a clipboard that failed never reads as copied.
+    pending_copy: Option<Copied>,
     /// Image blocks pasted into the editor; `[Image #n]` in the text refers to `images[n - 1]`.
     images: Vec<Value>,
     quit: bool,
@@ -1198,6 +1208,7 @@ impl App {
             abort: agent.abort.clone(),
             permission_mode: agent.permission_mode.clone(),
             hint: None,
+            pending_copy: None,
             images: Vec::new(),
             quit: false,
             skills: Vec::new(),
@@ -1406,8 +1417,12 @@ impl App {
             self.hint = Some(("Selection is empty".into(), Instant::now()));
             return;
         }
+        self.copy(text, Copied::Hint("Copied selection".into()));
+    }
+
+    fn copy(&mut self, text: &str, copied: Copied) {
         self.ask_terminal(json!({"copy": text}));
-        self.hint = Some(("Copied selection".into(), Instant::now()));
+        self.pending_copy = Some(copied);
     }
 
     /// The pill sits centered on the last transcript row while the view is scrolled up.
@@ -1589,6 +1604,11 @@ impl App {
                     _ => self.attach(image),
                 }
             }
+            Msg::TerminalCopied => match self.pending_copy.take() {
+                Some(Copied::Hint(text)) => self.hint = Some((text, Instant::now())),
+                Some(Copied::Line(text)) => self.system("copy", text),
+                None => {}
+            },
             Msg::TerminalFailed(error) => self.push(Item::Error(error)),
             Msg::Agent(event) => self.agent_event(event),
             Msg::Done(result) => self.done(result),
@@ -2411,8 +2431,7 @@ impl App {
             },
             "copy" => match self.last_answer() {
                 Some(answer) => {
-                    self.ask_terminal(json!({"copy": answer}));
-                    self.system("copy", "Copied last agent message to clipboard");
+                    self.copy(&answer, Copied::Line("Copied last agent message to clipboard".into()));
                 }
                 None => self.push(Item::Error("No agent message to copy yet.".into())),
             },
@@ -2420,8 +2439,7 @@ impl App {
                 let Some(path) = self.session_path.clone() else {
                     return self.push(Item::Error("This session is not saved, so there is no file to share.".into()));
                 };
-                self.ask_terminal(json!({"copy": path}));
-                self.system("copy", format!("Copied {path}"));
+                self.copy(&path, Copied::Line(format!("Copied {path}")));
             }
             "session" => {
                 let file = self.session_path.clone().unwrap_or_else(|| "not saved".into());
@@ -2963,8 +2981,7 @@ impl App {
             login::Action::None => {}
             login::Action::Close => self.panel = None,
             login::Action::Copy(url) => {
-                self.ask_terminal(json!({"copy": url}));
-                self.hint = Some(("Copied login link".into(), Instant::now()));
+                self.copy(&url, Copied::Hint("Copied login link".into()));
             }
             login::Action::Exchange { provider, cancel, exchange } => {
                 let events = self.events.clone();

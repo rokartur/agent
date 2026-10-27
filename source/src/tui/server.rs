@@ -154,6 +154,9 @@ fn from_terminal(id: u64, message: &Value) -> Option<Msg> {
     if let Some(error) = message["failed"].as_str() {
         return Some(Msg::TerminalFailed(error.to_string()));
     }
+    if message["copied"] == true {
+        return Some(Msg::TerminalCopied);
+    }
     let input = wire::decode(&message["input"]);
     if message["image"].is_null() {
         return input.map(|input| Msg::Input(id, input));
@@ -210,6 +213,7 @@ mod tests {
         let clipboard = from_terminal(7, &json!({"image": {"error": "No image in the clipboard"}}));
         assert!(matches!(clipboard, Some(Msg::Image { id: 7, paste: None, image: Err(_) })));
         assert!(matches!(from_terminal(7, &json!({"failed": "Cannot run pbcopy"})), Some(Msg::TerminalFailed(error)) if error == "Cannot run pbcopy"));
+        assert!(matches!(from_terminal(7, &json!({"copied": true})), Some(Msg::TerminalCopied)));
         assert!(from_terminal(7, &json!({"what": 1})).is_none());
     }
 }

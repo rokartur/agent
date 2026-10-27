@@ -4,8 +4,8 @@
 //! `PING_EVERY` without another line, and at the end `{"exit": ..}` with the text to print after leaving the screen,
 //! `{"switch": environment}` when /env moves the terminal to a new session there, or `{"error": ..}`.
 //! The terminal's computer may not be the session's, so the server asks the terminal to `{"copy": text}`,
-//! `{"open": url}` or `{"paste_image": true}`; the terminal answers `{"image": ..}` or `{"failed": error}`, and sends a
-//! dropped image file's bytes in the `image` of its paste.
+//! `{"open": url}` or `{"paste_image": true}`; the terminal answers `{"copied": true}`, `{"image": ..}` or
+//! `{"failed": error}`, and sends a dropped image file's bytes in the `image` of its paste.
 
 use crossterm::event::{Event as Input, KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use serde_json::{Value, json};
@@ -13,7 +13,7 @@ use std::path::Path;
 use std::time::Duration;
 
 /// Bumped when a message changes shape, so a client and a server of different releases refuse each other plainly.
-pub const PROTOCOL: u64 = 3;
+pub const PROTOCOL: u64 = 4;
 /// A remote client that hears nothing for `SILENCE` takes the link as gone and reconnects.
 pub const PING_EVERY: Duration = Duration::from_secs(5);
 pub const SILENCE: Duration = Duration::from_secs(15);
