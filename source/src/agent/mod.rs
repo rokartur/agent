@@ -1861,6 +1861,20 @@ pub struct SessionInfo {
     pub modified: std::time::SystemTime,
 }
 
+impl SessionInfo {
+    /// None for the null summary of a session /resume leaves out.
+    fn from_summary(id: &str, summary: &Value, modified: std::time::SystemTime) -> Option<SessionInfo> {
+        Some(SessionInfo {
+            id: id.to_string(),
+            cwd: summary["cwd"].as_str()?.to_string(),
+            name: summary["name"].as_str().map(String::from),
+            title: summary["title"].as_str()?.to_string(),
+            turns: summary["turns"].as_u64()? as usize,
+            modified,
+        })
+    }
+}
+
 impl Session {
     /// The session file for display; `None` when the session is not saved.
     pub fn display_path(&self) -> Option<String> {
@@ -1981,13 +1995,34 @@ impl Session {
     }
 
     /// Saved sessions in `dir`, newest first. Unreadable files are skipped.
+    /// Reads only the files changed since the last list; `dir/index.json` keeps the summary of the rest by size and mtime.
     pub fn list(dir: &Path) -> Vec<SessionInfo> {
         let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
+        let index_path = dir.join("index.json");
+        let old_index = read_session_index(&index_path);
+        let mut index = serde_json::Map::new();
         let mut sessions = Vec::new();
         for path in entries.filter_map(|e| e.ok()).map(|e| e.path()) {
-            if let Some(info) = Session::info(&path) {
+            let Some(id) = path.file_name().and_then(|name| name.to_str()).and_then(|name| name.strip_suffix(".jsonl")) else { continue };
+            // Stat before reading: a file that grows in between is read again next time instead of kept stale.
+            let Ok(metadata) = path.metadata() else { continue };
+            let Ok(modified) = metadata.modified() else { continue };
+            let stamp = json!([metadata.len(), modified.duration_since(std::time::UNIX_EPOCH).map_or(0, |since| since.as_nanos() as u64)]);
+            let summary = match old_index.get(id) {
+                Some(cached) if cached["stamp"] == stamp => cached["summary"].clone(),
+                _ => match std::fs::read_to_string(&path) {
+                    Ok(text) => summarize(&text),
+                    Err(_) => continue,
+                },
+            };
+            if let Some(info) = SessionInfo::from_summary(id, &summary, modified) {
                 sessions.push(info);
             }
+            index.insert(id.to_string(), json!({"stamp": stamp, "summary": summary}));
+        }
+        if index != old_index {
+            // Only a cache: when it cannot be written, the next list reads the files again.
+            let _ = write_session_index(&index_path, index);
         }
         sessions.sort_by_key(|s| std::cmp::Reverse(s.modified));
         sessions
@@ -1998,24 +2033,7 @@ impl Session {
         let id = path.file_name()?.to_str()?.strip_suffix(".jsonl")?;
         let text = std::fs::read_to_string(path).ok()?;
         let modified = path.metadata().and_then(|m| m.modified()).ok()?;
-        let mut info = SessionInfo { id: id.to_string(), cwd: String::new(), name: None, title: String::new(), turns: 0, modified };
-        let mut subagent = false;
-        for entry in text.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()) {
-            match entry["type"].as_str() {
-                Some("session") => info.cwd = entry["cwd"].as_str().unwrap_or_default().to_string(),
-                Some("session_info") => info.name = entry["name"].as_str().map(String::from),
-                // Subagent sessions stay out of /resume and --continue; /tasks opens them.
-                Some("parent") => subagent = true,
-                Some("message") if entry["message"]["role"] == "user" && entry["message"]["content"][0]["type"] == "text" => {
-                    info.turns += 1;
-                    if info.title.is_empty() {
-                        info.title = entry["message"]["content"][0]["text"].as_str().unwrap_or_default().lines().next().unwrap_or_default().to_string();
-                    }
-                }
-                _ => {}
-            }
-        }
-        (info.turns > 0 && !subagent).then_some(info)
+        SessionInfo::from_summary(id, &summarize(&text), modified)
     }
 
     /// Deletes saved sessions untouched for longer than `max_age`. A session open in any process, this one included, holds its lock and stays.
@@ -2082,6 +2100,52 @@ fn write_new_private(path: &Path, text: &str) -> std::io::Result<()> {
     file.write_all(text.as_bytes()).inspect_err(|_| {
         let _ = std::fs::remove_file(path);
     })
+}
+
+/// Bump when `summarize` changes what it keeps, so `Session::list` reads every file again instead of trusting an older index.
+const SESSION_INDEX_VERSION: u64 = 1;
+
+/// What /resume shows of one session file; null for a subagent's session or one without a prompt yet.
+fn summarize(text: &str) -> Value {
+    let (mut cwd, mut name, mut title, mut turns) = (String::new(), None, String::new(), 0);
+    let mut subagent = false;
+    for entry in text.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()) {
+        match entry["type"].as_str() {
+            Some("session") => cwd = entry["cwd"].as_str().unwrap_or_default().to_string(),
+            Some("session_info") => name = entry["name"].as_str().map(String::from),
+            // Subagent sessions stay out of /resume and --continue; /tasks opens them.
+            Some("parent") => subagent = true,
+            Some("message") if entry["message"]["role"] == "user" && entry["message"]["content"][0]["type"] == "text" => {
+                turns += 1;
+                if title.is_empty() {
+                    title = entry["message"]["content"][0]["text"].as_str().unwrap_or_default().lines().next().unwrap_or_default().to_string();
+                }
+            }
+            _ => {}
+        }
+    }
+    if turns == 0 || subagent {
+        return Value::Null;
+    }
+    json!({"cwd": cwd, "name": name, "title": title, "turns": turns})
+}
+
+/// The summaries `Session::list` saved by session id; empty when missing, unreadable or from another index version.
+fn read_session_index(path: &Path) -> serde_json::Map<String, Value> {
+    let Ok(text) = std::fs::read_to_string(path) else { return serde_json::Map::new() };
+    let Ok(mut index) = serde_json::from_str::<Value>(&text) else { return serde_json::Map::new() };
+    match index["sessions"].take() {
+        Value::Object(sessions) if index["version"] == SESSION_INDEX_VERSION => sessions,
+        _ => serde_json::Map::new(),
+    }
+}
+
+fn write_session_index(path: &Path, sessions: serde_json::Map<String, Value>) -> std::io::Result<()> {
+    // Titles are prompt lines, so 0600 like the sessions; the rename keeps another process from reading half a file.
+    let temporary = path.with_extension(format!("json.{}.tmp", std::process::id()));
+    let mut file = OpenOptions::new().create(true).write(true).truncate(true).mode(0o600).open(&temporary)?;
+    file.write_all(json!({"version": SESSION_INDEX_VERSION, "sessions": sessions}).to_string().as_bytes())?;
+    std::fs::rename(&temporary, path)
 }
 
 /// The full id for an exact id or a unique prefix of a saved session's id.
@@ -2628,6 +2692,28 @@ mod tests {
         let infos = [&titled, &named, &child, &empty].map(|path| Session::info(path).map(|s| (s.title, s.name, s.turns)));
         std::fs::remove_dir_all(&dir).unwrap();
         assert_eq!(infos, [Some(("fix login".into(), None, 2)), Some(("x".into(), Some("Login fix".into()), 1)), None, None]);
+    }
+
+    #[test]
+    fn list_reads_again_only_the_session_files_changed_since_the_last_list() {
+        let dir = std::env::temp_dir().join(format!("agent-list-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let prompt = |text: &str| json!({"type": "message", "message": {"role": "user", "content": [{"type": "text", "text": text}]}}).to_string() + "\n";
+        let path = dir.join("a.jsonl");
+        let header = json!({"type": "session", "cwd": "/w"}).to_string() + "\n";
+        std::fs::write(&path, header.clone() + &prompt("first")).unwrap();
+        let listed = || Session::list(&dir).into_iter().map(|s| (s.title, s.turns)).collect::<Vec<_>>();
+        let read = listed();
+        let modified = path.metadata().unwrap().modified().unwrap();
+        std::fs::write(&path, header + &prompt("other")).unwrap();
+        File::options().write(true).open(&path).unwrap().set_modified(modified).unwrap();
+        let same_size_and_mtime = listed();
+        OpenOptions::new().append(true).open(&path).unwrap().write_all(prompt("again").as_bytes()).unwrap();
+        let appended = listed();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(read, [("first".to_string(), 1)]);
+        assert_eq!(same_size_and_mtime, read, "an unchanged size and mtime keep the summary from the index");
+        assert_eq!(appended, [("other".to_string(), 2)]);
     }
 
     #[test]
