@@ -96,7 +96,10 @@ fn input_message(input: &event::Event) -> Option<Value> {
 /// Does on this computer what the session asked for, and returns the answer to send back, if any.
 fn serve_request(request: &Value) -> Option<Value> {
     let done = if let Some(text) = request["copy"].as_str() {
-        copy_to_clipboard(text)
+        return Some(match copy_to_clipboard(text) {
+            Ok(()) => json!({"copied": true}),
+            Err(error) => json!({"failed": error}),
+        });
     } else if let Some(url) = request["open"].as_str() {
         open_in_browser(url)
     } else if request["paste_image"] == true {
