@@ -109,7 +109,7 @@ The computer a session runs on: its files, shell, settings and accounts are the 
 _Avoid_: Server, remote, target
 
 **Environment**:
-A host as the TUI offers it when starting a session: `local`, or a computer named by its Tailscale name.
+A host as the TUI offers it when starting a session: `local`, a computer named in settings, or one of the user's computers found online on the tailnet, by its Tailscale name.
 _Avoid_: Machine, remote, target
 
 **Listener**:

@@ -1537,11 +1537,11 @@ impl App {
         if name.is_empty() {
             let rows: Vec<String> =
                 place.environments.iter().map(|environment| if *environment == place.environment { format!("{environment} (this session)") } else { environment.clone() }).collect();
-            self.system("env", format!("{}\nStart a session on one with /env <name>; add computers to \"environments\" in ~/.agents/settings.json on the computer you type on.", rows.join(", ")));
+            self.system("env", format!("{}\nStart a session on one with /env <name>. Your other computers show up here while they are online on the tailnet.", rows.join(", ")));
             return;
         }
         if !place.environments.iter().any(|environment| environment == name) {
-            let error = format!("No environment {name}. Add it to \"environments\" in ~/.agents/settings.json on the computer you type on.");
+            let error = format!("No environment {name}. It must be one of your computers, online on the tailnet and running `agent serve --tailnet` (`agent service install`).");
             self.push(Item::Error(error));
             return;
         }

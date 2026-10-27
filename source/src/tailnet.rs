@@ -36,10 +36,12 @@ const KEEPALIVE_IDLE_SECS: libc::c_int = 30;
 const KEEPALIVE_INTERVAL_SECS: libc::c_int = 10;
 const KEEPALIVE_PROBES: libc::c_int = 3;
 
-/// `local` first, then the computers in `environments`.
+/// `local` first, then the computers in `environments`, then this user's other computers online on the tailnet.
 pub fn environments(settings: &Settings) -> Vec<String> {
+    // Without Tailscale, or with it stopped, only the computers in `environments` are offered.
+    let found = tailscale(&["status", "--json"]).map(|status| discovered(&status)).unwrap_or_default();
     let mut names = vec![LOCAL.to_string()];
-    for name in &settings.environments {
+    for name in settings.environments.iter().chain(&found) {
         if !names.contains(name) {
             names.push(name.clone());
         }
@@ -47,12 +49,34 @@ pub fn environments(settings: &Settings) -> Vec<String> {
     names
 }
 
+/// The peers in `tailscale status --json` a listener there would admit this computer from, as `owned_by` decides,
+/// that are online and run macOS or Linux, named by the first label of their MagicDNS name.
+fn discovered(status: &Value) -> Vec<String> {
+    let Some(owner) = status["Self"]["UserID"].as_u64().filter(|_| status["BackendState"] == "Running") else { return Vec::new() };
+    let mut names = Vec::new();
+    for peer in status["Peer"].as_object().into_iter().flat_map(|peers| peers.values()) {
+        let tagged = peer["Tags"].as_array().is_some_and(|tags| !tags.is_empty());
+        let desktop = matches!(peer["OS"].as_str(), Some("macOS" | "linux"));
+        if peer["Online"] != true || peer["UserID"].as_u64() != Some(owner) || tagged || !desktop {
+            continue;
+        }
+        if let Some(name) = peer["DNSName"].as_str().and_then(|dns| dns.split('.').next()).filter(|name| !name.is_empty()) {
+            names.push(name.to_string());
+        }
+    }
+    names.sort();
+    names
+}
+
 pub fn check(settings: &Settings, name: &str) -> Result<(), String> {
+    if name == LOCAL {
+        return Ok(());
+    }
     let names = environments(settings);
     if names.iter().any(|known| known == name) {
         return Ok(());
     }
-    Err(format!("No environment {name}. Add its Tailscale name to \"environments\" in ~/.agents/settings.json; now there are: {}.", names.join(", ")))
+    Err(format!("No environment {name}. It must be one of your computers, online on the tailnet and running `agent serve --tailnet` (`agent service install`); now there are: {}.", names.join(", ")))
 }
 
 /// A new session on `environment` in `cwd`, or in the host's home when `cwd` does not exist there.
@@ -85,10 +109,14 @@ pub fn reattach(settings: &Settings, environment: &str, server: u32) -> Reattach
     }
 }
 
-/// The running sessions of every environment but `local`, asked at once, and why the ones that did not answer did
-/// not. Those show the sessions they had when they last answered, kept in `~/.agents/environments.json`.
+/// The running sessions of every environment but `local`, asked at once, and why the ones in `environments` that did
+/// not answer did not; those show the sessions they had when they last answered, kept in `~/.agents/environments.json`.
+/// A discovered computer that does not answer is left out: most do not run the listener.
 pub fn listing(home: &Path, settings: &Settings) -> (Vec<Listed>, Vec<String>) {
-    let remote = &environments(settings)[1..];
+    listing_of(home, settings, &environments(settings)[1..])
+}
+
+fn listing_of(home: &Path, settings: &Settings, remote: &[String]) -> (Vec<Listed>, Vec<String>) {
     if remote.is_empty() {
         return (Vec::new(), Vec::new());
     }
@@ -98,21 +126,23 @@ pub fn listing(home: &Path, settings: &Settings) -> (Vec<Listed>, Vec<String>) {
     });
     let path = home.join(".agents/environments.json");
     let mut seen = std::fs::read_to_string(&path).ok().and_then(|text| serde_json::from_str::<Value>(&text).ok()).filter(Value::is_object).unwrap_or_else(|| json!({}));
-    let (mut listed, mut failures) = (Vec::new(), Vec::new());
+    let (mut listed, mut failures, mut answered) = (Vec::new(), Vec::new(), false);
     for (environment, answer) in answers {
         let (sessions, reachable) = match answer {
             Ok(sessions) => {
                 seen[environment] = json!(sessions);
+                answered = true;
                 (sessions, true)
             }
-            Err(failure) => {
+            Err(failure) if settings.environments.contains(environment) => {
                 failures.push(failure);
                 (seen[environment].as_array().cloned().unwrap_or_default(), false)
             }
+            Err(_) => continue,
         };
         listed.extend(sessions.iter().filter_map(|session| entry(environment, session, reachable)));
     }
-    if failures.len() < remote.len() {
+    if answered {
         let _ = std::fs::write(&path, seen.to_string());
     }
     (listed, failures)
@@ -449,9 +479,30 @@ mod tests {
         let home = std::env::temp_dir().join(format!("agent-tailnet-names-{}", std::process::id()));
         let mut settings = crate::settings::load(&home).unwrap();
         settings.environments = vec!["studio".into(), LOCAL.into(), "studio".into()];
-        assert_eq!(environments(&settings), ["local", "studio"]);
+        let names = environments(&settings);
+        assert_eq!(names[..2], ["local", "studio"]);
+        assert_eq!(names.iter().filter(|name| *name == "studio").count(), 1);
         assert_eq!(check(&settings, "studio"), Ok(()));
-        assert!(check(&settings, "laptop").unwrap_err().contains("local, studio"));
+        assert!(check(&settings, "no-such-agent-computer").unwrap_err().contains("local, studio"));
+    }
+
+    #[test]
+    fn only_online_untagged_desktops_of_this_login_are_discovered() {
+        let peer = |dns: &str, os: &str, user: u64, online: bool, tags: Value| json!({"DNSName": dns, "OS": os, "UserID": user, "Online": online, "Tags": tags});
+        let status = json!({"BackendState": "Running", "Self": {"UserID": 7}, "Peer": {
+            "k1": peer("studio.tail1.ts.net.", "macOS", 7, true, Value::Null),
+            "k2": peer("box.tail1.ts.net.", "linux", 7, true, json!([])),
+            "k3": peer("server.tail1.ts.net.", "linux", 7, true, json!(["tag:server"])),
+            "k4": peer("eves-mac.tail1.ts.net.", "macOS", 8, true, Value::Null),
+            "k5": peer("asleep.tail1.ts.net.", "macOS", 7, false, Value::Null),
+            "k6": peer("phone.tail1.ts.net.", "iOS", 7, true, Value::Null),
+            "k7": peer("pc.tail1.ts.net.", "windows", 7, true, Value::Null),
+        }});
+        assert_eq!(discovered(&status), ["box", "studio"]);
+        let mut stopped = status.clone();
+        stopped["BackendState"] = json!("Stopped");
+        assert!(discovered(&stopped).is_empty());
+        assert!(discovered(&json!({})).is_empty());
     }
 
     /// The listener's side of a connection, over loopback with the Tailscale check left out.
@@ -489,9 +540,20 @@ mod tests {
         // Port 1 on loopback refuses at once, like a computer that is up but not serving.
         settings.tailnet_port = 1;
         std::fs::write(home.join(".agents/environments.json"), json!({"127.0.0.1": [{"session": "abc", "title": "t", "cwd": "/p", "busy": true}]}).to_string()).unwrap();
-        let (listed, failures) = listing(&home, &settings);
+        let (listed, failures) = listing_of(&home, &settings, &settings.environments);
         assert_eq!(listed, [Listed { environment: "127.0.0.1".into(), session: "abc".into(), title: "t".into(), cwd: "/p".into(), busy: true, reachable: false }]);
         assert_eq!(failures.len(), 1);
+        std::fs::remove_dir_all(&home).unwrap();
+    }
+
+    #[test]
+    fn a_discovered_computer_that_does_not_answer_is_left_out_quietly() {
+        let home = std::env::temp_dir().join(format!("agent-tailnet-quiet-{}", std::process::id()));
+        std::fs::create_dir_all(home.join(".agents")).unwrap();
+        let mut settings = crate::settings::load(&home).unwrap();
+        settings.tailnet_port = 1;
+        std::fs::write(home.join(".agents/environments.json"), json!({"127.0.0.1": [{"session": "abc", "title": "t", "cwd": "/p", "busy": true}]}).to_string()).unwrap();
+        assert_eq!(listing_of(&home, &settings, &["127.0.0.1".into()]), (Vec::new(), Vec::new()));
         std::fs::remove_dir_all(&home).unwrap();
     }
 }

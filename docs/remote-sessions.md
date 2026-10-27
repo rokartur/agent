@@ -33,7 +33,7 @@ To run the listener without the service, for example to watch its output, run `a
 
 ## On the computer you type on
 
-List the host in `~/.agents/settings.json`:
+Your other computers online on the tailnet show up as environments by their Tailscale name: untagged macOS and Linux devices logged in as you, as `tailscale status` lists them. To keep a host offered while it is offline, so `agent attach` shows the sessions it last had, list it in `~/.agents/settings.json`:
 
 ```json
 { "environments": ["studio"] }
@@ -44,7 +44,7 @@ Then:
 - `agent --on studio` starts a session on `studio`. Flags and a message work as they do locally: `agent --on studio -c`, `agent --on studio fix the failing test`. A piped message does not reach a remote session.
 - `"default_environment": "studio"` makes `agent` start every session there. `agent --on local` still starts one here.
 - `/env` lists the environments. `/env studio` starts a new session on `studio` in this terminal, and the session you leave keeps running.
-- `agent attach` lists the running sessions of every environment, tagged with the computer. A computer that does not answer shows the sessions it had when it last answered, greyed out. `agent attach <id>` finds the session on any of them.
+- `agent attach` lists the running sessions of every environment, tagged with the computer. A computer in `environments` that does not answer shows the sessions it had when it last answered, greyed out; a discovered one that does not answer is left out. `agent attach <id>` finds the session on any of them.
 
 A new remote session starts in the same directory path as your terminal. When that directory does not exist on the host, it starts in the host's home directory and says so. Move it with `!cd <dir>`, then use `/worktree` to pick a branch or a worktree there.
 
