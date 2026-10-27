@@ -367,7 +367,7 @@ impl Agent {
         let agent_dir = home.join(".agents");
         Agent {
             client,
-            system: prompt::system_prompt(&agent_dir, &cwd, settings.trusts(&cwd), &settings.disabled_skills, settings.prefer_global()),
+            system: prompt::system_prompt(&agent_dir, &cwd, settings.trusts(&cwd), |skill| settings.skill_enabled(skill), settings.prefer_global()),
             trusted_projects: settings.trusted_projects.clone(),
             modes: modes::prompt(&home, &settings.ponytail, &settings.caveman),
             // agent.load fills it, with the session's swarm prompt.
@@ -1146,7 +1146,7 @@ impl Agent {
         let name = input["skill"].as_str().unwrap_or_default().trim().trim_start_matches('/');
         let args = input["args"].as_str().unwrap_or_default();
         let settings = crate::settings::load(&self.home)?;
-        let mut skills = prompt::load_skills(&self.agent_dir, &self.cwd, settings.trusts(&self.cwd), &settings.disabled_skills, settings.prefer_global());
+        let mut skills = prompt::load_skills(&self.agent_dir, &self.cwd, settings.trusts(&self.cwd), |skill| settings.skill_enabled(skill), settings.prefer_global());
         skills.retain(|skill| skill.model_invocable);
         let skill = skills.iter().find(|skill| skill.name == name).ok_or_else(|| format!("Unknown skill: {name}"))?;
         self.record_skill_read(&skill.path);
@@ -1561,7 +1561,7 @@ impl Agent {
         *self.permission_mode.lock().unwrap() = settings.permission_mode;
         self.rtk = if settings.rtk { Rtk::ON } else { Rtk::OFF };
         self.modes = modes::prompt(&self.home, &settings.ponytail, &settings.caveman);
-        self.system = prompt::system_prompt(&self.agent_dir, &self.cwd, settings.trusts(&self.cwd), &settings.disabled_skills, settings.prefer_global());
+        self.system = prompt::system_prompt(&self.agent_dir, &self.cwd, settings.trusts(&self.cwd), |skill| settings.skill_enabled(skill), settings.prefer_global());
     }
 
     /// Applies `settings`, swapping a model no account lists for one an account lists, then for OpenRouter's public list.
@@ -1658,7 +1658,7 @@ impl Agent {
         self.grants = Grants::default();
         self.shell_context.push(format!("Session moved from {} to {}. Paths and git state from earlier messages refer to the old checkout.", self.cwd.display(), cwd.display()));
         self.trusted_projects = settings.trusted_projects.clone();
-        self.system = prompt::system_prompt(&self.agent_dir, &cwd, settings.trusts(&cwd), &settings.disabled_skills, settings.prefer_global());
+        self.system = prompt::system_prompt(&self.agent_dir, &cwd, settings.trusts(&cwd), |skill| settings.skill_enabled(skill), settings.prefer_global());
         self.anchors = Anchors::new(&session.id);
         self.nested_instructions.clear();
         self.checkpoints.clear();

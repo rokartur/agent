@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::agent::permissions::Mode;
+use crate::agent::prompt::Skill;
 use crate::api::accounts::Policy;
 use crate::api::models::{self, Model};
 
@@ -56,6 +57,10 @@ pub struct Settings {
     pub pinned_models: Vec<String>,
     /// Skill names left out of the prompt and /skill: completion.
     pub disabled_skills: Vec<String>,
+    /// Profile name to the skill names and `owner/repo` sources it holds; those skills load only while one of their profiles is active.
+    pub skill_profiles: BTreeMap<String, Vec<String>>,
+    /// Profiles from `skill_profiles` that `/profile:<name>` turned on.
+    pub active_profiles: Vec<String>,
     /// One of `CONFLICT_PRIORITIES`: the side whose skill or prompt wins when the project and `~/.agents` share a name.
     pub conflict_priority: String,
     /// Installed plugins that are not started.
@@ -171,6 +176,72 @@ impl Settings {
 
     pub fn prefer_global(&self) -> bool {
         self.conflict_priority == "global"
+    }
+
+    /// A skill no profile holds loads unless disabled; one a profile holds loads only while one of its profiles is active.
+    pub fn skill_enabled(&self, skill: &Skill) -> bool {
+        if self.disabled_skills.contains(&skill.name) {
+            return false;
+        }
+        let holders: Vec<&String> = self.skill_profiles.keys().filter(|profile| self.profile_holds(profile, skill)).collect();
+        holders.is_empty() || holders.iter().any(|profile| self.active_profiles.contains(profile))
+    }
+
+    pub fn profile_holds(&self, profile: &str, skill: &Skill) -> bool {
+        let entries = self.skill_profiles.get(profile).map_or(&[][..], Vec::as_slice);
+        entries.iter().any(|entry| *entry == skill.name || skill.source.as_ref() == Some(entry))
+    }
+
+    pub fn toggle_profile(&mut self, profile: &str) {
+        if self.active_profiles.iter().any(|active| active == profile) {
+            self.active_profiles.retain(|active| active != profile);
+        } else {
+            self.active_profiles.push(profile.to_string());
+        }
+    }
+
+    /// Taking out a skill its repo brought in swaps the repo entry for the names of the repo's other `skills`.
+    pub fn toggle_profile_skill(&mut self, profile: &str, skill: &Skill, skills: &[Skill]) {
+        let entries = self.skill_profiles.entry(profile.to_string()).or_default();
+        if let Some(source) = skill.source.as_ref().filter(|source| entries.contains(source)) {
+            entries.retain(|entry| entry != source && *entry != skill.name);
+            for other in skills.iter().filter(|other| other.source.as_ref() == Some(source) && other.name != skill.name) {
+                if !entries.contains(&other.name) {
+                    entries.push(other.name.clone());
+                }
+            }
+        } else if entries.contains(&skill.name) {
+            entries.retain(|entry| *entry != skill.name);
+        } else {
+            entries.push(skill.name.clone());
+        }
+    }
+
+    /// Adding a repo drops the names of its `skills`, which the repo entry now covers.
+    pub fn toggle_profile_repo(&mut self, profile: &str, source: &str, skills: &[Skill]) {
+        let entries = self.skill_profiles.entry(profile.to_string()).or_default();
+        if entries.iter().any(|entry| entry == source) {
+            entries.retain(|entry| entry != source);
+        } else {
+            entries.retain(|entry| !skills.iter().any(|skill| skill.name == *entry && skill.source.as_deref() == Some(source)));
+            entries.push(source.to_string());
+        }
+    }
+
+    /// Also renames the profile in `active_profiles`; no `from` creates it.
+    pub fn rename_profile(&mut self, from: Option<&str>, to: &str) {
+        let entries = from.and_then(|from| self.skill_profiles.remove(from)).unwrap_or_default();
+        self.skill_profiles.insert(to.to_string(), entries);
+        for active in &mut self.active_profiles {
+            if Some(active.as_str()) == from {
+                *active = to.to_string();
+            }
+        }
+    }
+
+    pub fn delete_profile(&mut self, profile: &str) {
+        self.skill_profiles.remove(profile);
+        self.active_profiles.retain(|active| active != profile);
     }
 
     /// `providers` in the order `provider_sort` picks.
@@ -305,6 +376,8 @@ fn from_json(own: &Value) -> Settings {
         provider_order: string_list(&own["provider_order"]),
         pinned_models: string_list(&own["pinned_models"]),
         disabled_skills: string_list(&own["disabled_skills"]),
+        skill_profiles: own["skill_profiles"].as_object().into_iter().flatten().map(|(profile, entries)| (profile.clone(), string_list(entries))).collect(),
+        active_profiles: string_list(&own["active_profiles"]),
         conflict_priority: level(&own["conflict_priority"], &CONFLICT_PRIORITIES, "project"),
         disabled_plugins: string_list(&own["disabled_plugins"]),
         disabled_mcp: string_list(&own["disabled_mcp"]),
@@ -427,6 +500,8 @@ fn to_json(settings: &Settings) -> Value {
         "provider_order": settings.provider_order,
         "pinned_models": settings.pinned_models,
         "disabled_skills": settings.disabled_skills,
+        "skill_profiles": settings.skill_profiles,
+        "active_profiles": settings.active_profiles,
         "conflict_priority": settings.conflict_priority,
         "disabled_plugins": settings.disabled_plugins,
         "disabled_mcp": settings.disabled_mcp,
@@ -551,6 +626,45 @@ mod tests {
     }
 
     #[test]
+    fn a_skill_a_profile_holds_loads_only_while_one_of_its_profiles_is_active() {
+        let skill =
+            |name: &str, source: Option<&str>| Skill { name: name.into(), description: String::new(), path: PathBuf::new(), model_invocable: true, shadows: None, source: source.map(Into::into) };
+        let (seo, copywriting, tdd) = (skill("seo-audit", Some("coreyhaines31/marketingskills")), skill("copywriting", None), skill("tdd", Some("mattpocock/skills")));
+        let mut settings = load(Path::new("/nonexistent")).unwrap();
+        settings.skill_profiles.insert("marketing".into(), vec!["coreyhaines31/marketingskills".into()]);
+        settings.skill_profiles.insert("writing".into(), vec!["copywriting".into(), "seo-audit".into()]);
+        let enabled = |settings: &Settings| [&seo, &copywriting, &tdd].map(|skill| settings.skill_enabled(skill));
+        assert_eq!(enabled(&settings), [false, false, true]);
+        settings.active_profiles = vec!["marketing".into()];
+        assert_eq!(enabled(&settings), [true, false, true]);
+        settings.active_profiles = vec!["writing".into()];
+        assert_eq!(enabled(&settings), [true, true, true]);
+        settings.disabled_skills = vec!["seo-audit".into(), "tdd".into()];
+        assert_eq!(enabled(&settings), [false, true, false]);
+    }
+
+    #[test]
+    fn a_profile_takes_skills_by_name_and_by_repo() {
+        let skill = |name: &str, source: &str| Skill { name: name.into(), description: String::new(), path: PathBuf::new(), model_invocable: true, shadows: None, source: Some(source.into()) };
+        let skills = [skill("seo-audit", "coreyhaines31/marketingskills"), skill("ads", "coreyhaines31/marketingskills"), skill("tdd", "mattpocock/skills")];
+        let mut settings = load(Path::new("/nonexistent")).unwrap();
+        let entries = |settings: &Settings| settings.skill_profiles["work"].clone();
+        settings.rename_profile(None, "work");
+        settings.toggle_profile_skill("work", &skills[0], &skills);
+        settings.toggle_profile_skill("work", &skills[2], &skills);
+        assert_eq!(entries(&settings), ["seo-audit", "tdd"]);
+        settings.toggle_profile_repo("work", "coreyhaines31/marketingskills", &skills);
+        assert_eq!(entries(&settings), ["tdd", "coreyhaines31/marketingskills"]);
+        settings.toggle_profile_skill("work", &skills[1], &skills);
+        assert_eq!(entries(&settings), ["tdd", "seo-audit"]);
+        settings.toggle_profile("work");
+        settings.rename_profile(Some("work"), "writing");
+        assert_eq!((settings.skill_profiles.keys().map(String::as_str).collect::<Vec<_>>(), settings.active_profiles.clone()), (vec!["writing"], vec!["writing".to_string()]));
+        settings.delete_profile("writing");
+        assert!(settings.skill_profiles.is_empty() && settings.active_profiles.is_empty());
+    }
+
+    #[test]
     fn settings_survive_a_save() {
         let home = std::env::temp_dir().join(format!("agent-settings-{}", std::process::id()));
         let mut settings = load(&home).unwrap();
@@ -566,6 +680,8 @@ mod tests {
         settings.provider_order = vec!["openrouter".into(), "anthropic".into()];
         settings.pinned_models = vec!["anthropic/claude-haiku-5-5".into()];
         settings.disabled_skills = vec!["remotion-render".into()];
+        settings.skill_profiles.insert("marketing".into(), vec!["coreyhaines31/marketingskills".into(), "copywriting".into()]);
+        settings.active_profiles = vec!["marketing".into()];
         settings.disabled_plugins = vec!["usagefleet".into()];
         settings.disabled_mcp = vec!["github".into()];
         settings.plugin_settings = serde_json::json!({"usagefleet": {"token": "x"}});

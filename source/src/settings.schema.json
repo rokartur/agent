@@ -30,6 +30,8 @@
     "provider_order": { "type": "array", "items": { "type": "string" }, "default": [], "description": "Providers listed first when provider_sort is manual; the rest keep their default order after them." },
     "pinned_models": { "type": "array", "items": { "type": "string" }, "default": [], "description": "Models, as provider/id, the model picker lists first and Ctrl+P switches between, in order." },
     "disabled_skills": { "type": "array", "items": { "type": "string" }, "default": [] },
+    "skill_profiles": { "type": "object", "additionalProperties": { "type": "array", "items": { "type": "string" } }, "default": {}, "description": "Profile name to skill names and owner/repo sources. A skill a profile holds loads only while one of its profiles is active; /profile:<name> turns one on or off." },
+    "active_profiles": { "type": "array", "items": { "type": "string" }, "default": [], "description": "Profiles from skill_profiles that are on." },
     "conflict_priority": { "enum": ["project", "global"], "default": "project", "description": "Which skill or prompt wins when the project's .agents and ~/.agents have one with the same name." },
     "disabled_plugins": { "type": "array", "items": { "type": "string" }, "default": [] },
     "disabled_mcp": { "type": "array", "items": { "type": "string" }, "default": [] },

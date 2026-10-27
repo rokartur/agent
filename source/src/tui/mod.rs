@@ -177,6 +177,20 @@ enum Panel {
         tab: usize,
         index: usize,
     },
+    /// The settings tab of skill profiles: one row per profile, then a row that makes a new one.
+    Profiles {
+        index: usize,
+        /// The name typed for a new profile, or for the selected one when renaming.
+        naming: Option<Editor>,
+        /// `d` was pressed once on the selected profile; a second `d` deletes it.
+        confirm: bool,
+    },
+    /// Every skill, checked when `profile` holds it by name or by its repo.
+    ProfileSkills {
+        profile: String,
+        query: Editor,
+        index: usize,
+    },
     /// fx's "Permission needed" prompt; the agent thread waits on `reply`.
     Permission {
         request: Request,
@@ -193,7 +207,7 @@ enum Panel {
         /// `d` was pressed once on the selected plugin; a second `d` removes it.
         confirm: bool,
     },
-    /// Every skill, including the ones `Settings.disabled_skills` leaves out of the prompt.
+    /// Every skill, including the ones `Settings.skill_enabled` leaves out of the prompt.
     Skills {
         query: Editor,
         index: usize,
@@ -479,6 +493,8 @@ const SETTING_SECTIONS: [(&str, &[usize]); 5] = [
     ("Modes", &[14, 15, 16, 17, 34, 35, 26]),
     ("Interface", &[6, 31, 32, 19, 33, 20, 23, 21, 22, 24, 36]),
 ];
+/// The settings tab after `SETTING_SECTIONS`, drawn by `Panel::Profiles`.
+const PROFILES_TAB: usize = SETTING_SECTIONS.len();
 const MODEL_ROWS: [usize; 5] = [0, 8, 12, 29, 30];
 const CONTEXT_WINDOW_ROW: usize = 13;
 const PROVIDER_ORDER_ROW: usize = 25;
@@ -1566,7 +1582,11 @@ impl App {
                 }
             }
             Some(Panel::Btw) => self.btw.as_mut().expect("the btw panel opens with a thread").input.insert(&line),
-            Some(Panel::Headroom { input, .. }) => input.insert(line.trim()),
+            Some(Panel::Headroom { input, .. } | Panel::Profiles { naming: Some(input), .. }) => input.insert(line.trim()),
+            Some(Panel::ProfileSkills { query, index, .. }) => {
+                query.insert(line.trim());
+                *index = 0;
+            }
             Some(_) => {}
             None => match image::pasted_path(text) {
                 Some(path) => self.attach(image::block(&path).map(|mut block| {
@@ -1926,14 +1946,54 @@ impl App {
     }
 
     fn enabled_skills(&self) -> impl Iterator<Item = &Skill> {
-        self.skills.iter().filter(|skill| !self.settings.disabled_skills.contains(&skill.name))
+        self.skills.iter().filter(|skill| self.settings.skill_enabled(skill))
     }
 
-    /// Every skill, the disabled ones too: /skills lists them, `enabled_skills` filters by `Settings.disabled_skills`.
+    /// "1 skill" or "N skills" the profile holds among the loaded ones.
+    fn profile_skills(&self, profile: &str) -> String {
+        let count = self.skills.iter().filter(|skill| self.settings.profile_holds(profile, skill)).count();
+        if count == 1 { "1 skill".into() } else { format!("{count} skills") }
+    }
+
+    /// The skills matching `query` as checkbox rows with aligned name, repo and description columns.
+    /// The description gives way so the state on the right fits in `columns`.
+    fn skill_rows(&self, query: &str, columns: usize, state: impl Fn(&Skill) -> (&'static str, Span)) -> Vec<panel::Row> {
+        let name_width = self.skills.iter().map(|skill| skill.name.chars().count()).max().unwrap_or(0);
+        let source_width = self.skills.iter().filter_map(|skill| skill.source.as_ref()).map(|source| source.chars().count()).max().unwrap_or(0);
+        let skills: Vec<(&Skill, &str, Span)> = matching_skills(&self.skills, query)
+            .into_iter()
+            .map(|skill| {
+                let (mark, right) = state(skill);
+                (skill, mark, right)
+            })
+            .collect();
+        // The panel puts `→ ` before a row and four spaces before its right side.
+        let room = columns.saturating_sub(2 + 4 + skills.iter().map(|(_, _, right)| render::width(&right.text)).max().unwrap_or(0));
+        let mut rows = Vec::new();
+        for (skill, mark, right) in skills {
+            let description = skill.description.split_whitespace().collect::<Vec<_>>().join(" ");
+            let source = skill.source.as_deref().unwrap_or_default();
+            let left = format!("{mark} {:<name_width$}  {source:<source_width$}  {description}", skill.name);
+            let left = render::truncate(&vec![span(left, PLAIN)], room).into_iter().map(|cut| cut.text).collect();
+            rows.push(panel::Row { left, right: vec![right] });
+        }
+        rows
+    }
+
+    fn toggle_profile(&mut self, profile: &str) {
+        if !self.settings.skill_profiles.contains_key(profile) {
+            return self.push(Item::Error(format!("No profile {profile}. Add it to skill_profiles in ~/.agents/settings.json.")));
+        }
+        self.update_settings(|s| s.toggle_profile(profile));
+        let on = self.settings.active_profiles.iter().any(|active| active == profile);
+        self.system("profile", format!("{profile} {}: {}", if on { "on" } else { "off" }, self.profile_skills(profile)));
+    }
+
+    /// Every skill, the disabled ones too: /skills lists them, `enabled_skills` filters by `Settings.skill_enabled`.
     fn load_skills_and_prompts(&mut self) {
         let agent_dir = self.home.join(".agents");
         let trusted = self.settings.trusts(&self.cwd);
-        self.skills = crate::agent::prompt::load_skills(&agent_dir, &self.cwd, trusted, &[], self.settings.prefer_global());
+        self.skills = crate::agent::prompt::load_skills(&agent_dir, &self.cwd, trusted, |_| true, self.settings.prefer_global());
         self.templates = crate::agent::prompt::load_templates(&agent_dir, &self.cwd, trusted, self.settings.prefer_global());
         self.saved_workflows = workflow::saved(&crate::agent::prompt::project_agents_dirs(&self.cwd, trusted), &agent_dir);
     }
@@ -2030,6 +2090,7 @@ impl App {
             let command = text.starts_with('!')
                 || text.trim().starts_with("/skill:")
                 || text.trim().starts_with("/prompt:")
+                || text.trim().starts_with("/profile:")
                 || self.slash_commands.iter().any(|(name, _)| command_args(&text, &format!("/{name}")).is_some());
             // Text typed after a waiting prompt waits behind it, or steering would reach the model first.
             let queued = (self.settings.mid_turn == "queued") != flip;
@@ -2215,6 +2276,7 @@ impl App {
                 let mut lines: Vec<String> = self.slash_commands.iter().map(|(name, description)| format!("/{name:<14}\t{description}")).collect();
                 lines.push(format!("/{:<14}\trun a skill ({} loaded)", "skill:<name>", self.enabled_skills().count()));
                 lines.push(format!("/{:<14}\trun a prompt ({} loaded)", "prompt:<name>", self.templates.len()));
+                lines.push(format!("/{:<14}\tturn a skill profile on or off ({} defined)", "profile:<name>", self.settings.skill_profiles.len()));
                 self.system("help", format!("{} commands\n{}", lines.len(), lines.join("\n")));
             }
             "resume" => self.open_resume(),
@@ -2234,6 +2296,7 @@ impl App {
                     Err(error) => self.push(Item::Error(error)),
                 }
             }
+            name if let Some(profile) = name.strip_prefix("profile:") => self.toggle_profile(profile),
             name if self.plugins.commands().iter().any(|(command, _)| command == name) => {
                 let _ = self.commands.send(Command::Plugin(name.to_string(), args.to_string()));
             }
@@ -2358,6 +2421,8 @@ impl App {
             Some(Panel::Models { .. }) => return self.models_key(key),
             Some(Panel::ContextWindows { .. }) => return self.context_windows_key(key),
             Some(Panel::ProviderOrder { .. }) => return self.provider_order_key(key),
+            Some(Panel::Profiles { .. }) => return self.profiles_key(key),
+            Some(Panel::ProfileSkills { .. }) => return self.profile_skills_key(key),
             Some(Panel::Headroom { .. }) => return self.headroom_key(key),
             Some(Panel::Diff { .. }) => return self.diff_key(code),
             Some(Panel::Terminal { .. }) => return self.terminal_key(code),
@@ -2416,11 +2481,10 @@ impl App {
                 let index = rows.iter().position(|r| r == row);
                 match code {
                     KeyCode::Tab | KeyCode::BackTab => {
-                        let count = SETTING_SECTIONS.len();
+                        let count = PROFILES_TAB + 1;
                         let section = setting_section(*row);
                         let next = if code == KeyCode::Tab { (section + 1) % count } else { (section + count - 1) % count };
-                        *row = SETTING_SECTIONS[next].1[0];
-                        *query = Editor::new();
+                        self.panel = Some(settings_tab(next));
                     }
                     KeyCode::Enter if *row == PROVIDER_ORDER_ROW && index.is_some() => self.panel = Some(Panel::ProviderOrder { tab: 0, index: 0 }),
                     KeyCode::Up if !rows.is_empty() => *row = rows[index.map_or(0, |i| i.saturating_sub(1))],
@@ -2710,6 +2774,8 @@ impl App {
                 | Panel::Models { .. }
                 | Panel::ContextWindows { .. }
                 | Panel::ProviderOrder { .. }
+                | Panel::Profiles { .. }
+                | Panel::ProfileSkills { .. }
                 | Panel::Headroom { .. }
                 | Panel::Terminal { .. }
                 | Panel::Workflows { .. }
@@ -3042,6 +3108,89 @@ impl App {
         }
     }
 
+    fn profiles_key(&mut self, key: KeyEvent) {
+        let Some(Panel::Profiles { index, naming, confirm }) = self.panel.as_mut() else { return };
+        let selected = self.settings.skill_profiles.keys().nth(*index).cloned();
+        if let Some(input) = naming {
+            match key.code {
+                KeyCode::Esc => *naming = None,
+                KeyCode::Enter => {
+                    let name = input.text().split_whitespace().collect::<Vec<_>>().join("-");
+                    *naming = None;
+                    self.name_profile(selected, name);
+                }
+                _ => _ = input.edit_key(key),
+            }
+            return;
+        }
+        let deleting = std::mem::take(confirm);
+        match (key.code, selected) {
+            (KeyCode::Esc, _) => self.panel = None,
+            (KeyCode::Tab, _) => self.panel = Some(settings_tab(0)),
+            (KeyCode::BackTab, _) => self.panel = Some(settings_tab(PROFILES_TAB - 1)),
+            (KeyCode::Up, _) => *index = index.saturating_sub(1),
+            (KeyCode::Down, _) => *index = (*index + 1).min(self.settings.skill_profiles.len()),
+            (KeyCode::Enter, None) => *naming = Some(Editor::new()),
+            (KeyCode::Enter, Some(profile)) => self.panel = Some(Panel::ProfileSkills { profile, query: Editor::new(), index: 0 }),
+            (KeyCode::Left | KeyCode::Right, Some(profile)) => self.update_settings(|s| s.toggle_profile(&profile)),
+            (KeyCode::Char('r'), Some(profile)) => {
+                let mut input = Editor::new();
+                input.set(&profile);
+                *naming = Some(input);
+            }
+            (KeyCode::Char('d'), Some(profile)) if deleting => self.update_settings(|s| s.delete_profile(&profile)),
+            (KeyCode::Char('d'), Some(_)) => *confirm = true,
+            _ => {}
+        }
+    }
+
+    /// Creates the profile `name`, or renames `from` to it, and selects it.
+    fn name_profile(&mut self, from: Option<String>, name: String) {
+        if name.is_empty() || from.as_ref() == Some(&name) {
+            return;
+        }
+        if self.settings.skill_profiles.contains_key(&name) {
+            return self.push(Item::Error(format!("A profile named {name} already exists.")));
+        }
+        self.update_settings(|s| s.rename_profile(from.as_deref(), &name));
+        if let Some(Panel::Profiles { index, .. }) = self.panel.as_mut() {
+            *index = self.settings.skill_profiles.keys().position(|profile| *profile == name).expect("the profile was just saved");
+        }
+    }
+
+    fn profile_skills_key(&mut self, key: KeyEvent) {
+        let Some(Panel::ProfileSkills { profile, query, index }) = self.panel.as_mut() else { return };
+        let profile = profile.clone();
+        let matching = matching_skills(&self.skills, &query.text());
+        let mut settings = self.settings.clone();
+        match key.code {
+            KeyCode::Esc => {
+                let index = self.settings.skill_profiles.keys().position(|name| *name == profile).unwrap_or(0);
+                self.panel = Some(Panel::Profiles { index, naming: None, confirm: false });
+                return;
+            }
+            KeyCode::Up => *index = index.saturating_sub(1),
+            KeyCode::Down => *index = (*index + 1).min(matching.len().saturating_sub(1)),
+            // Skill names and sources hold no spaces, so space stays the toggle while typing searches.
+            KeyCode::Char(' ') => {
+                let Some(skill) = matching.get(*index) else { return };
+                settings.toggle_profile_skill(&profile, skill, &self.skills);
+            }
+            KeyCode::Enter => {
+                let Some(source) = matching.get(*index).and_then(|skill| skill.source.as_ref()) else { return };
+                settings.toggle_profile_repo(&profile, source, &self.skills);
+            }
+            _ => {
+                if query.edit_key(key) {
+                    *index = 0;
+                }
+            }
+        }
+        if settings != self.settings {
+            self.update_settings(|s| *s = settings);
+        }
+    }
+
     fn provider_order_key(&mut self, key: KeyEvent) {
         let Some(Panel::ProviderOrder { tab, index }) = self.panel.as_mut() else { return };
         let providers = PROVIDER_LISTS[*tab];
@@ -3288,7 +3437,7 @@ impl App {
                 let rows: Vec<panel::Row> = matches.iter().map(|&r| panel::Row { left: SETTING_NAMES[r].to_string(), right: values[r].clone() }).collect();
                 let view = panel::Panel {
                     title: "Settings".into(),
-                    tabs: &SETTING_SECTIONS.map(|(name, _)| name),
+                    tabs: &setting_tabs(),
                     tab: setting_section(*row),
                     search: Some(query.field(None)),
                     rows: &rows,
@@ -3345,6 +3494,64 @@ impl App {
                     selected: *index,
                     empty: "No providers.",
                     hint: "↑↓ navigate     shift+↑↓ move     tab models/web search     esc back",
+                };
+                view.render(width, PANEL_ROWS)
+            }
+            Panel::Profiles { index, naming, confirm } => {
+                let renaming = self.settings.skill_profiles.keys().nth(*index);
+                if let Some(input) = naming {
+                    let view = panel::Panel {
+                        title: renaming.map_or("New profile".into(), |profile| format!("Rename {profile}")),
+                        tabs: &[],
+                        tab: 0,
+                        search: Some(input.field(None)),
+                        rows: &[],
+                        selected: 0,
+                        empty: "Its name runs it as /profile:<name>.",
+                        hint: "enter save     esc cancel",
+                    };
+                    return view.render(width, PANEL_ROWS);
+                }
+                let mut rows: Vec<panel::Row> = self
+                    .settings
+                    .skill_profiles
+                    .keys()
+                    .map(|profile| {
+                        let state = if self.settings.active_profiles.contains(profile) { "on" } else { "off" };
+                        let mut right = choices(["off", "on"].map(String::from), state);
+                        right.push(span(format!("     {}", self.profile_skills(profile)), MUTED));
+                        panel::Row { left: profile.clone(), right }
+                    })
+                    .collect();
+                rows.push(panel::Row { left: "New profile".into(), right: vec![span("enter name", MUTED)] });
+                let hint = match renaming {
+                    Some(profile) if *confirm => format!("d again deletes {profile}     any other key keeps it"),
+                    Some(_) => "↑↓ navigate     ←→ on/off     enter edit skills     r rename     d delete     tab section     esc close".into(),
+                    None => "↑↓ navigate     enter new profile     tab section     esc close".into(),
+                };
+                let view = panel::Panel { title: "Settings".into(), tabs: &setting_tabs(), tab: PROFILES_TAB, search: None, rows: &rows, selected: *index, empty: "", hint: &hint };
+                view.render(width, PANEL_ROWS)
+            }
+            Panel::ProfileSkills { profile, query, index } => {
+                let entries = self.settings.skill_profiles.get(profile).map_or(&[][..], Vec::as_slice);
+                let rows = self.skill_rows(&query.text(), width, |skill| {
+                    if skill.source.as_ref().is_some_and(|source| entries.contains(source)) {
+                        ("[x]", span("via repo", MUTED))
+                    } else if entries.contains(&skill.name) {
+                        ("[x]", span("", PLAIN))
+                    } else {
+                        ("[ ]", span("", PLAIN))
+                    }
+                });
+                let view = panel::Panel {
+                    title: format!("Profile {profile}"),
+                    tabs: &[],
+                    tab: 0,
+                    search: Some(query.field(None)),
+                    rows: &rows,
+                    selected: *index,
+                    empty: if self.skills.is_empty() { "No skills. Add one under ~/.agents/skills/<name>/SKILL.md." } else { "No matching skills." },
+                    hint: "type to search name or owner/repo     ↑↓ navigate     space in/out     enter whole repo in/out     esc back",
                 };
                 view.render(width, PANEL_ROWS)
             }
@@ -3434,18 +3641,15 @@ impl App {
                 view.render(width, PANEL_ROWS)
             }
             Panel::Skills { query, index } => {
-                let name_width = self.skills.iter().map(|skill| skill.name.chars().count()).max().unwrap_or(0);
-                let source_width = self.skills.iter().filter_map(|skill| skill.source.as_ref()).map(|source| source.chars().count()).max().unwrap_or(0);
-                let rows: Vec<panel::Row> = matching_skills(&self.skills, &query.text())
-                    .into_iter()
-                    .map(|skill| {
-                        let disabled = self.settings.disabled_skills.contains(&skill.name);
-                        let (mark, right) = if disabled { ("[ ]", span("disabled", MUTED)) } else { ("[x]", span("enabled", PLAIN)) };
-                        let description = skill.description.split_whitespace().collect::<Vec<_>>().join(" ");
-                        let source = skill.source.as_deref().unwrap_or_default();
-                        panel::Row { left: format!("{mark} {:<name_width$}  {source:<source_width$}  {description}", skill.name), right: vec![right] }
-                    })
-                    .collect();
+                let rows = self.skill_rows(&query.text(), width, |skill| {
+                    if self.settings.disabled_skills.contains(&skill.name) {
+                        ("[ ]", span("disabled", MUTED))
+                    } else if !self.settings.skill_enabled(skill) {
+                        ("[ ]", span("profile off", MUTED))
+                    } else {
+                        ("[x]", span("enabled", PLAIN))
+                    }
+                });
                 let view = panel::Panel {
                     title: "Skills".into(),
                     tabs: &[],
@@ -3851,6 +4055,10 @@ impl App {
                 let mut commands = self.slash_commands.clone();
                 commands.extend(skills);
                 commands.extend(self.templates.iter().map(|template| (format!("prompt:{}", template.name), template.description.clone())));
+                commands.extend(self.settings.skill_profiles.keys().map(|profile| {
+                    let action = if self.settings.active_profiles.contains(profile) { "turn off" } else { "turn on" };
+                    (format!("profile:{profile}"), format!("{action} {}", self.profile_skills(profile)))
+                }));
                 commands.extend(self.plugins.commands());
                 commands.extend(self.saved_workflows.iter().map(|saved| (saved.meta.name.clone(), saved.meta.description.clone())));
                 matching_commands(&commands, slash_query(&self.editor.text(), self.editor.before_cursor()))
@@ -5325,6 +5533,18 @@ fn matching_settings(row: usize, query: &str) -> Vec<usize> {
         return SETTING_SECTIONS[setting_section(row)].1.to_vec();
     }
     panel::search(SETTING_SECTIONS.iter().flat_map(|(_, rows)| rows.iter().copied()), query, |&r| SETTING_NAMES[r].to_string())
+}
+
+fn setting_tabs() -> Vec<&'static str> {
+    SETTING_SECTIONS.iter().map(|(name, _)| *name).chain(["Profiles"]).collect()
+}
+
+/// The settings panel opened on tab `tab` of `setting_tabs`.
+fn settings_tab(tab: usize) -> Panel {
+    match SETTING_SECTIONS.get(tab) {
+        Some((_, rows)) => Panel::Settings { row: rows[0], query: Editor::new() },
+        None => Panel::Profiles { index: 0, naming: None, confirm: false },
+    }
 }
 
 fn setting_section(row: usize) -> usize {

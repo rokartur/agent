@@ -74,6 +74,10 @@ _Avoid_: Extension, add-on
 A folder with a `SKILL.md` of instructions the model loads when a task matches its description.
 _Avoid_: Prompt, recipe
 
+**Profile**:
+A named set of skills, by name or `owner/repo` source, in `skill_profiles`; its skills load only while `/profile:<name>` has it on. Skills no profile holds always load.
+_Avoid_: Mode, skill set
+
 **Subagent**:
 A child agent process a session starts for a piece of parallel work; it reports its answer back to the parent.
 _Avoid_: Worker, child session

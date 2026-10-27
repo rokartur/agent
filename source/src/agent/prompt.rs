@@ -23,7 +23,7 @@ const CONTEXT_FILES: [&str; 3] = ["AGENTS.override.md", "AGENTS.md", "AGENTS.MD"
 /// Preamble, addendum, project context, skills, cwd. ponytail and caveman come from `modes`.
 /// The project's `.agents/` SYSTEM.md wins over the agent dir's (`~/.agents`); skills follow `prefer_global`.
 /// An untrusted project gives only its AGENTS.md files.
-pub fn system_prompt(agent_dir: &Path, cwd: &Path, trusted: bool, disabled_skills: &[String], prefer_global: bool) -> String {
+pub fn system_prompt(agent_dir: &Path, cwd: &Path, trusted: bool, skill_enabled: impl Fn(&Skill) -> bool, prefer_global: bool) -> String {
     let mut sections = vec![override_file(agent_dir, cwd, trusted, "SYSTEM.md").unwrap_or_else(|| DEFAULT_PREAMBLE.into())];
     if let Some(addendum) = override_file(agent_dir, cwd, trusted, "APPEND_SYSTEM.md") {
         sections.push(tag("addendum", &addendum));
@@ -33,7 +33,7 @@ pub fn system_prompt(agent_dir: &Path, cwd: &Path, trusted: bool, disabled_skill
         sections.push(tag("project_context", &context));
     }
     // The host injects ponytail and caveman natively, so their skills would only duplicate the rules.
-    let skills: Vec<Skill> = load_skills(agent_dir, cwd, trusted, disabled_skills, prefer_global).into_iter().filter(|s| s.model_invocable && s.name != "ponytail" && s.name != "caveman").collect();
+    let skills: Vec<Skill> = load_skills(agent_dir, cwd, trusted, skill_enabled, prefer_global).into_iter().filter(|s| s.model_invocable && s.name != "ponytail" && s.name != "caveman").collect();
     if !skills.is_empty() {
         sections.push(tag("skills", &format_skills(skills)));
     }
@@ -175,7 +175,8 @@ fn agents_dirs(agent_dir: &Path, cwd: &Path, trusted: bool, prefer_global: bool)
 }
 
 /// Skills from `~/.agents/skills` and `.agents/skills` in cwd and its parents up to the git root.
-pub fn load_skills(agent_dir: &Path, cwd: &Path, trusted: bool, disabled: &[String], prefer_global: bool) -> Vec<Skill> {
+/// A skill `enabled` turns down leaves its name to the same-named skill on the other side.
+pub fn load_skills(agent_dir: &Path, cwd: &Path, trusted: bool, enabled: impl Fn(&Skill) -> bool, prefer_global: bool) -> Vec<Skill> {
     let mut found: Vec<(Skill, bool)> = Vec::new();
     let mut seen = HashSet::new();
     for (dir, global) in agents_dirs(agent_dir, cwd, trusted, prefer_global) {
@@ -188,7 +189,7 @@ pub fn load_skills(agent_dir: &Path, cwd: &Path, trusted: bool, disabled: &[Stri
             }
             let Some(mut skill) = parse_skill(&path) else { continue };
             skill.source = sources.get(&skill.name).cloned();
-            if disabled.contains(&skill.name) {
+            if !enabled(&skill) {
                 continue;
             }
             match found.iter_mut().find(|(winner, _)| winner.name == skill.name) {
@@ -479,7 +480,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("agent-stable-{}", std::process::id()));
         std::fs::create_dir_all(root.join("a")).unwrap();
         std::fs::create_dir_all(root.join("b")).unwrap();
-        assert_eq!(system_prompt(&root, &root.join("a"), true, &[], false), system_prompt(&root, &root.join("b"), true, &[], false));
+        assert_eq!(system_prompt(&root, &root.join("a"), true, |_| true, false), system_prompt(&root, &root.join("b"), true, |_| true, false));
         assert_eq!(cwd_section(&root.join("a"), &[]), format!("<cwd>\n{}\n</cwd>", root.join("a").display()));
         let extra = [root.join("b"), root.join("c")];
         assert_eq!(cwd_section(&root.join("a"), &extra), format!("<cwd>\n{}\nAdditional directories: {}, {}\n</cwd>", root.join("a").display(), extra[0].display(), extra[1].display()));
@@ -557,7 +558,7 @@ mod tests {
         std::fs::write(root.join("repo/.agents/prompts/review.md"), "Review").unwrap();
         let cwd = root.join("repo/src");
         let templates: Vec<String> = load_templates(&root.join("home"), &cwd, true, false).into_iter().map(|t| t.name).collect();
-        let system = system_prompt(&root.join("home"), &cwd, true, &[], false);
+        let system = system_prompt(&root.join("home"), &cwd, true, |_| true, false);
         std::fs::remove_dir_all(&root).unwrap();
         assert_eq!(templates, ["review"]);
         assert!(system.starts_with("repo system") && !system.contains("outside the repo"), "{system}");
@@ -576,7 +577,7 @@ mod tests {
             std::fs::write(path, "---\ndescription: x\n---\n").unwrap();
         }
         let resolved = |prefer_global| {
-            let skills = load_skills(&home, &repo, true, &[], prefer_global);
+            let skills = load_skills(&home, &repo, true, |_| true, prefer_global);
             let templates = load_templates(&home, &repo, true, prefer_global);
             let skill = skills.into_iter().map(|s| (s.path, s.shadows)).collect::<Vec<_>>();
             let template = templates.into_iter().map(|t| (t.path, t.shadows)).collect::<Vec<_>>();
@@ -597,7 +598,7 @@ mod tests {
             std::fs::write(home.join("skills").join(name).join("SKILL.md"), "---\ndescription: x\n---\n").unwrap();
         }
         std::fs::write(home.join(".skill-lock.json"), r#"{"version":3,"skills":{"tdd":{"source":"mattpocock/skills"}}}"#).unwrap();
-        let sources: Vec<(String, Option<String>)> = load_skills(&home, &root, true, &[], false).into_iter().map(|s| (s.name, s.source)).collect();
+        let sources: Vec<(String, Option<String>)> = load_skills(&home, &root, true, |_| true, false).into_iter().map(|s| (s.name, s.source)).collect();
         std::fs::remove_dir_all(&root).unwrap();
         assert_eq!(sources, [("local".to_string(), None), ("tdd".to_string(), Some("mattpocock/skills".to_string()))]);
     }
@@ -615,9 +616,9 @@ mod tests {
         std::fs::write(repo.join(".agents/prompts/review.md"), "Review").unwrap();
         std::fs::write(repo.join(".agents/SYSTEM.md"), "repo system").unwrap();
         std::fs::write(repo.join("AGENTS.md"), "repo rules").unwrap();
-        let skills: Vec<String> = load_skills(&home, &repo, false, &[], false).into_iter().map(|s| s.name).collect();
+        let skills: Vec<String> = load_skills(&home, &repo, false, |_| true, false).into_iter().map(|s| s.name).collect();
         let templates = load_templates(&home, &repo, false, false);
-        let system = system_prompt(&home, &repo, false, &[], false);
+        let system = system_prompt(&home, &repo, false, |_| true, false);
         std::fs::remove_dir_all(&root).unwrap();
         assert_eq!(skills, ["global"]);
         assert!(templates.is_empty());
