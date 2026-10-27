@@ -3,7 +3,7 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossterm::event;
 use crossterm::terminal;
@@ -22,8 +22,30 @@ pub enum Ending {
     Exit(String),
     /// /env picked this environment: the terminal starts a new session there.
     Switch(String),
-    /// The connection closed or failed with no goodbye: the server crashed, or the network to its computer went.
-    Lost,
+    /// The connection closed, failed or went silent with no goodbye: the server crashed, or the network to its computer
+    /// went. Carries the pid of the session server the client can reattach to, once it named it.
+    Lost(Option<u32>),
+}
+
+/// The alternate screen attached sessions draw on, kept over /env and reconnects; dropping it gives the terminal back.
+pub struct Fullscreen;
+
+impl Fullscreen {
+    pub fn enter() -> Result<Self, String> {
+        super::enter(&mut std::io::stdout()).map_err(|e| format!("Cannot set up the terminal: {e}"))?;
+        let previous_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            super::leave(&mut std::io::stdout());
+            previous_hook(info);
+        }));
+        Ok(Self)
+    }
+}
+
+impl Drop for Fullscreen {
+    fn drop(&mut self) {
+        super::leave(&mut std::io::stdout());
+    }
 }
 
 /// Shows the session the server on the other end of `reader` and `sender` runs, until it lets go of this terminal.
@@ -32,14 +54,7 @@ pub fn attach(reader: impl Read, sender: impl Write + Send + 'static, place: &wi
     // The key reader and the answers to the server's requests both write lines.
     let sender = Arc::new(Mutex::new(sender));
     writeln!(sender.lock().unwrap(), "{}", wire::hello(size, place)).map_err(|e| format!("Cannot reach the session: {e}"))?;
-    let mut out = std::io::stdout();
-    super::enter(&mut out).map_err(|e| format!("Cannot set up the terminal: {e}"))?;
-    let previous_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        super::leave(&mut std::io::stdout());
-        previous_hook(info);
-    }));
-    // Stops with the session, so after /env the next session's reader is the only one taking keys from the terminal.
+    // Stops with the session, so after /env or a reconnect the next reader is the only one taking keys from the terminal.
     let stop = Arc::new(AtomicBool::new(false));
     let keys = std::thread::spawn({
         let (stop, sender) = (stop.clone(), sender.clone());
@@ -56,14 +71,13 @@ pub fn attach(reader: impl Read, sender: impl Write + Send + 'static, place: &wi
             }
         }
     });
-    let ending = show(BufReader::new(reader), &mut out, |request| {
+    let ending = show(BufReader::new(reader), &mut std::io::stdout(), |request| {
         let Some(answer) = serve_request(request) else { return };
         // A failed write means the connection is gone; reading it then ends the session.
         let _ = writeln!(sender.lock().unwrap(), "{answer}");
     });
     stop.store(true, Ordering::Relaxed);
     let _ = keys.join();
-    super::leave(&mut out);
     ending
 }
 
@@ -95,8 +109,9 @@ fn serve_request(request: &Value) -> Option<Value> {
 
 /// Writes the session's frames to `out` and hands its requests to `requests`, until it lets go of this terminal.
 fn show(stream: impl BufRead, out: &mut impl Write, mut requests: impl FnMut(&Value)) -> Result<Ending, String> {
+    let mut server = None;
     for line in stream.lines() {
-        let Ok(line) = line else { return Ok(Ending::Lost) };
+        let Ok(line) = line else { return Ok(Ending::Lost(server)) };
         let message: Value = serde_json::from_str(&line).map_err(|e| format!("The session sent a broken message: {e}"))?;
         if let Some(output) = message["output"].as_str() {
             out.write_all(output.as_bytes()).and_then(|()| out.flush()).map_err(|e| format!("Cannot write to the terminal: {e}"))?;
@@ -106,11 +121,38 @@ fn show(stream: impl BufRead, out: &mut impl Write, mut requests: impl FnMut(&Va
             return Ok(Ending::Switch(environment.to_string()));
         } else if let Some(error) = message["error"].as_str() {
             return Err(error.to_string());
+        } else if let Some(pid) = message["server"].as_u64() {
+            server = u32::try_from(pid).ok();
         } else {
             requests(&message);
         }
     }
-    Ok(Ending::Lost)
+    Ok(Ending::Lost(server))
+}
+
+/// Writes `text` over the bottom row, where the frame of a session that went quiet shows its status.
+pub fn notice(text: &str) -> Result<(), String> {
+    let (width, height) = terminal::size().map_err(|e| format!("Cannot read the terminal size: {e}"))?;
+    let text: String = text.chars().take(usize::from(width)).collect();
+    let mut out = std::io::stdout();
+    write!(out, "\x1b[{height};1H\x1b[2K\x1b[7m{text}\x1b[0m").and_then(|()| out.flush()).map_err(|e| format!("Cannot write to the terminal: {e}"))
+}
+
+/// Whether the user pressed Ctrl+C within `wait`. Other keys are dropped: they were typed at a screen that is no longer
+/// the session's, which may ask for a permission by now.
+pub fn ctrl_c_within(wait: Duration) -> bool {
+    let deadline = Instant::now() + wait;
+    while let Some(left) = deadline.checked_duration_since(Instant::now())
+        && event::poll(left).unwrap_or(false)
+    {
+        if let Ok(event::Event::Key(key)) = event::read()
+            && key.code == event::KeyCode::Char('c')
+            && key.modifiers.contains(event::KeyModifiers::CONTROL)
+        {
+            return true;
+        }
+    }
+    false
 }
 
 fn copy_to_clipboard(text: &str) -> Result<(), String> {
@@ -171,7 +213,7 @@ mod tests {
         let mut out = Vec::new();
         let mut requests = Vec::new();
         let stream = "{\"output\":\"a\"}\n{\"copy\":\"x\"}\n{\"output\":\"b\"}\n{\"paste_image\":true}\n";
-        assert_eq!(show(stream.as_bytes(), &mut out, |request| requests.push(request.clone())), Ok(Ending::Lost));
+        assert_eq!(show(stream.as_bytes(), &mut out, |request| requests.push(request.clone())), Ok(Ending::Lost(None)));
         assert_eq!(out, b"ab");
         assert_eq!(requests, [json!({"copy": "x"}), json!({"paste_image": true})]);
     }
@@ -198,6 +240,8 @@ mod tests {
     #[test]
     fn a_refusal_is_an_error_and_a_dropped_connection_is_lost() {
         assert_eq!(show("{\"error\":\"too old\"}\n".as_bytes(), &mut Vec::new(), |_| {}), Err("too old".into()));
-        assert_eq!(show("{\"output\":\"a\"}\n".as_bytes(), &mut Vec::new(), |_| {}), Ok(Ending::Lost));
+        assert_eq!(show("{\"output\":\"a\"}\n".as_bytes(), &mut Vec::new(), |_| {}), Ok(Ending::Lost(None)));
+        let named = "{\"server\":4242}\n{\"ping\":true}\n{\"output\":\"a\"}\n";
+        assert_eq!(show(named.as_bytes(), &mut Vec::new(), |_| {}), Ok(Ending::Lost(Some(4242))));
     }
 }

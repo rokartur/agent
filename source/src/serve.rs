@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use crate::agent::peers::{self, Peer};
 use crate::settings::Settings;
-use crate::tailnet::{self, LOCAL};
+use crate::tailnet::{self, LOCAL, Reattach};
 use crate::tui::{Ending, Place};
 
 /// A session server this terminal reaches: its socket on this computer, or `agent serve --tailnet` on another one.
@@ -44,6 +44,8 @@ impl Listed {
 const CRASH_LOG_AGE: Duration = Duration::from_secs(7 * 24 * 3600);
 /// Startup downloads the mode rules when they are missing, so it can take a few seconds on a slow network.
 const START_TIMEOUT: Duration = Duration::from_secs(60);
+/// A woken laptop finds its host again within this long of the network coming back.
+const MAX_RECONNECT_WAIT: Duration = Duration::from_secs(3);
 
 fn dir(home: &Path) -> PathBuf {
     home.join(".agents/serve")
@@ -120,8 +122,10 @@ pub fn connect(home: &Path, pid: u32) -> Result<UnixStream, String> {
 }
 
 /// Shows the session until it ends or this terminal detaches, then prints what the server said goodbye with. /env
-/// leaves it for a new session in another environment, which this terminal then shows.
+/// leaves it for a new session in another environment, which this terminal then shows. A remote session whose
+/// connection drops stays on screen while this terminal reconnects to it.
 pub fn show(home: &Path, settings: &Settings, environment: &str, stream: Stream) -> Result<(), String> {
+    let fullscreen = crate::tui::Fullscreen::enter()?;
     let (mut environment, mut stream) = (environment.to_string(), stream);
     loop {
         let place = Place { environment: environment.clone(), environments: tailnet::environments(settings) };
@@ -131,17 +135,46 @@ pub fn show(home: &Path, settings: &Settings, environment: &str, stream: Stream)
         };
         let next = match ending {
             Ending::Exit(text) => {
+                drop(fullscreen);
                 print!("{text}");
                 return Ok(());
             }
             Ending::Switch(next) => next,
-            Ending::Lost if environment == LOCAL => return Err("The session server stopped.".into()),
-            Ending::Lost => return Err(format!("Lost the connection to {environment}. If {environment} is up, the session runs on there and `agent attach` returns to it.")),
+            Ending::Lost(_) if environment == LOCAL => return Err("The session server stopped.".into()),
+            Ending::Lost(Some(server)) => {
+                let Some(back) = reconnect(settings, &environment, server)? else {
+                    drop(fullscreen);
+                    println!("Left the session on {environment}. It keeps running there, and `agent attach` returns to it.");
+                    return Ok(());
+                };
+                stream = back;
+                continue;
+            }
+            Ending::Lost(None) => return Err(format!("Lost the connection to {environment}. If {environment} is up, the session runs on there and `agent attach` returns to it.")),
         };
         tailnet::check(settings, &next)?;
         let cwd = std::env::current_dir().map_err(|e| format!("Cannot read the working directory: {e}"))?;
         stream = if next == LOCAL { Stream::Local(start(home, &[], &cwd, false)?) } else { tailnet::start(settings, &next, &cwd, &[])? };
         environment = next;
+    }
+}
+
+/// Tries `server` on `environment` again until it answers or refuses; None when the user leaves with Ctrl+C.
+fn reconnect(settings: &Settings, environment: &str, server: u32) -> Result<Option<Stream>, String> {
+    let leaving = "Ctrl+C leaves; the session keeps running there.";
+    crate::tui::notice(&format!("Reconnecting to {environment}... {leaving}"))?;
+    let mut wait = Duration::from_secs(1);
+    loop {
+        let reason = match tailnet::reattach(settings, environment, server) {
+            Reattach::Back(stream) => return Ok(Some(stream)),
+            Reattach::Refused(refusal) => return Err(refusal),
+            Reattach::NotYet(reason) => reason,
+        };
+        crate::tui::notice(&format!("Reconnecting to {environment}. {leaving} {reason}"))?;
+        if crate::tui::ctrl_c_within(wait) {
+            return Ok(None);
+        }
+        wait = (wait * 2).min(MAX_RECONNECT_WAIT);
     }
 }
 
