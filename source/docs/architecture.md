@@ -7,7 +7,8 @@ One binary, no async runtime: threads and `mpsc` channels. HTTP is `ureq` with r
 | Module | Owns |
 |---|---|
 | `main.rs` | CLI parsing, `Setup`, the print/json/headless loops, `plugin`, `update`, `doctor` subcommands. |
-| `serve.rs` | `agent` and `agent attach` on the terminal side: start or find a session server and attach to it. |
+| `serve.rs` | `agent` and `agent attach` on the terminal side: start or find a session server, here or in an environment, and attach to it. |
+| `tailnet.rs` | `agent serve --tailnet` and its client: remote environments over Tailscale, checked with `tailscale whois`. |
 | `agent/` | `Agent`: the turn loop, messages, session journal, compaction, snapshots, permissions, subagents, workflows, cross-session messaging. |
 | `agent/prompt.rs` | System prompt assembly: `SYSTEM.md`, `AGENTS.md` files, skills, prompt templates, `/skill:` and `/prompt:` expansion. |
 | `api/` | `Client`: Anthropic Messages, OpenAI Codex, OpenRouter, GitHub Copilot and OpenAI-compatible custom providers; accounts, OAuth, model catalog, account choice and failover. |

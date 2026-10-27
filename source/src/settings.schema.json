@@ -58,6 +58,10 @@
     "update_channel": { "enum": ["latest", "pre-release", "off"], "default": "latest" },
     "prune_sessions": { "enum": ["never", "24h", "3d", "7d", "14d", "30d"], "default": "never", "description": "Delete saved sessions untouched this long, at start." },
     "unload_idle_sessions_after_minutes": { "type": "integer", "minimum": 0, "default": 30, "description": "Minutes a session with no terminal attached and no running turn or background work stays in memory; then its session server exits and `agent attach` or `agent -r` loads it from disk again. 0 keeps it until you quit it." },
+    "serve_tailnet": { "type": "boolean", "default": false, "description": "Let `agent serve --tailnet` accept sessions from your other computers on this computer's Tailscale address. Off, agent opens no network port." },
+    "tailnet_port": { "type": "integer", "minimum": 1, "maximum": 65535, "default": 24368, "description": "The TCP port `agent serve --tailnet` listens on, and the port other environments are reached on." },
+    "environments": { "type": "array", "items": { "type": "string" }, "default": [], "description": "Tailscale names of your other computers that run `agent serve --tailnet`; `agent --on <name>` and /env start sessions there." },
+    "default_environment": { "type": "string", "default": "local", "description": "Where `agent` starts a session without --on: `local` or one of `environments`." },
     "mid_turn": { "enum": ["steering", "queued"], "default": "steering", "description": "A message sent while the agent works: steering reaches the model at its next tool call, queued waits for the turn to end and runs as the next prompt." },
     "on_start": { "type": "array", "items": { "type": "string" }, "default": [], "description": "Shell commands the TUI runs in the background at start." },
     "custom_providers": {

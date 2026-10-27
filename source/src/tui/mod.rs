@@ -14,7 +14,8 @@ mod server;
 mod voice;
 mod wire;
 
-pub use client::attach;
+pub use client::{Ending, attach};
+pub use wire::{PROTOCOL, Place};
 
 use crossterm::event::{
     DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste, EnableFocusChange, EnableMouseCapture, Event as Input, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
@@ -447,6 +448,7 @@ const BUILTIN_COMMANDS: &[(&str, MidTurn, &str)] = &[
     ("logout", MidTurn::Runs, "Remove a saved account"),
     ("account", MidTurn::Runs, "Show accounts and their usage; pick one to use until it reaches the switch threshold"),
     ("detach", MidTurn::Runs, "Close this terminal's view and leave the session running; `agent attach` returns to it"),
+    ("env", MidTurn::Runs, "[name]: List the computers sessions can run on, or start a new session on one; this one keeps running"),
     ("quit", MidTurn::Runs, "Quit agent"),
 ];
 const MENU_ROWS: [usize; 5] = [4, 6, 8, 10, 12];
@@ -1490,6 +1492,31 @@ impl App {
         self.invalidate_screens();
     }
 
+    /// /env: without a name lists the environments of the terminal that typed it, with one moves that terminal to a
+    /// new session there. A session that never got a message and has no other terminal ends instead of idling.
+    fn switch_environment(&mut self, name: &str) {
+        let Some(index) = self.clients.iter().position(|client| Some(client.id) == self.typing_client) else { return };
+        let place = &self.clients[index].place;
+        if name.is_empty() {
+            let rows: Vec<String> =
+                place.environments.iter().map(|environment| if *environment == place.environment { format!("{environment} (this session)") } else { environment.clone() }).collect();
+            self.system("env", format!("{}\nStart a session on one with /env <name>; add computers to \"environments\" in ~/.agents/settings.json on the computer you type on.", rows.join(", ")));
+            return;
+        }
+        if !place.environments.iter().any(|environment| environment == name) {
+            let error = format!("No environment {name}. Add it to \"environments\" in ~/.agents/settings.json on the computer you type on.");
+            self.push(Item::Error(error));
+            return;
+        }
+        let client = self.clients.remove(index);
+        client.switch(name);
+        self.invalidate_screens();
+        let talked = self.session_path.as_ref().is_some_and(|path| std::fs::read_to_string(path).is_ok_and(|text| text.contains(r#""type":"message""#)));
+        if !talked && self.clients.is_empty() && self.working.is_none() {
+            self.quit = true;
+        }
+    }
+
     /// One frame at the smallest attached size, sent to every client; a session without clients draws nothing.
     fn draw(&mut self) {
         let Some(width) = self.clients.iter().map(|client| client.size.0).min() else { return };
@@ -2240,6 +2267,7 @@ impl App {
         match name {
             "quit" | "exit" => self.quit = true,
             "detach" => self.detach(),
+            "env" => self.switch_environment(args),
             "compact" => {
                 self.system("compact", "Compacting context...");
                 self.start(Command::Compact(Some(args.to_string()).filter(|focus| !focus.is_empty())));

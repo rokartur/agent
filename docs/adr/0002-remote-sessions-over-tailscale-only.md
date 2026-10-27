@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 ---
 
 # Remote sessions reach other computers over Tailscale only, with no cloud relay

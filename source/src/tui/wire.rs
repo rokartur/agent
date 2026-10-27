@@ -1,6 +1,7 @@
 //! The session server's wire format: one JSON object per line over the socket.
 //! Client to server: a hello, then `{"input": ..}` per terminal event. Server to client: `{"output": ..}` with terminal
-//! bytes, then `{"exit": ..}` with the text to print after leaving the screen, or `{"error": ..}`.
+//! bytes, then `{"exit": ..}` with the text to print after leaving the screen, `{"switch": environment}` when /env moves
+//! the terminal to a new session there, or `{"error": ..}`.
 
 use crossterm::event::{Event as Input, KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use serde_json::{Value, json};
@@ -34,10 +35,18 @@ const NAMED_KEYS: [(&str, KeyCode); 21] = [
 
 const BUTTONS: [(&str, MouseButton); 3] = [("left", MouseButton::Left), ("right", MouseButton::Right), ("middle", MouseButton::Middle)];
 
-/// The first line a client sends: its terminal size and the variables that pick its notification sequences.
-pub fn hello(size: (u16, u16)) -> Value {
+/// The first line a client sends: its terminal size, the variables that pick its notification sequences, and the
+/// environments it can move to with /env, named as its own settings name them.
+pub fn hello(size: (u16, u16), place: &Place) -> Value {
     let env: serde_json::Map<String, Value> = super::notify::TERMINAL_VARS.iter().filter_map(|name| Some((name.to_string(), Value::String(std::env::var(name).ok()?)))).collect();
-    json!({"protocol": PROTOCOL, "version": env!("CARGO_PKG_VERSION"), "size": [size.0, size.1], "env": env})
+    json!({"protocol": PROTOCOL, "version": env!("CARGO_PKG_VERSION"), "size": [size.0, size.1], "env": env, "environment": place.environment, "environments": place.environments})
+}
+
+/// Where a client sees the session it attaches to: `environment` is one of `environments`, `local` included.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Place {
+    pub environment: String,
+    pub environments: Vec<String>,
 }
 
 /// None for keys the TUI never asks the terminal to report: media and lone modifier keys.

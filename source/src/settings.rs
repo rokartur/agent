@@ -102,6 +102,14 @@ pub struct Settings {
     pub prune_sessions: String,
     /// Minutes a session with no terminal attached and nothing running stays loaded before its server exits; 0 keeps it.
     pub unload_idle_sessions_after_minutes: u64,
+    /// `agent serve --tailnet` runs only with this on, so a computer that never sets it opens no network port.
+    pub serve_tailnet: bool,
+    /// The port `agent serve --tailnet` listens on and remote environments are reached on.
+    pub tailnet_port: u16,
+    /// Tailscale names of the other computers sessions can run on, besides `local`.
+    pub environments: Vec<String>,
+    /// `local` or one of `environments`: where `agent` starts a session without `--on`.
+    pub default_environment: String,
     /// One of `MID_TURN`: a message sent while the agent works reaches it at the next tool call, or waits for the turn to end.
     pub mid_turn: String,
     /// Shell commands the TUI runs in the background at start, e.g. a global tool update.
@@ -155,6 +163,8 @@ pub const CONFLICT_PRIORITIES: [&str; 2] = ["project", "global"];
 pub const MID_TURN: [&str; 2] = ["steering", "queued"];
 /// Below this a condensed batch costs more in cache rewrites than its summary saves on later cache reads.
 pub const CONDENSE_MIN_BATCH_CHARS: u64 = 10_000;
+/// "agent" on a phone keypad.
+pub const DEFAULT_TAILNET_PORT: u16 = 24368;
 
 impl Settings {
     pub fn context_window(&self, model: &Model) -> u64 {
@@ -411,6 +421,10 @@ fn from_json(own: &Value) -> Settings {
         update_channel: level(&own["update_channel"], &crate::update::CHANNELS, "latest"),
         prune_sessions: own["prune_sessions"].as_str().unwrap_or("never").to_string(),
         unload_idle_sessions_after_minutes: own["unload_idle_sessions_after_minutes"].as_u64().unwrap_or(30),
+        serve_tailnet: own["serve_tailnet"].as_bool().unwrap_or(false),
+        tailnet_port: own["tailnet_port"].as_u64().and_then(|port| u16::try_from(port).ok()).filter(|port| *port > 0).unwrap_or(DEFAULT_TAILNET_PORT),
+        environments: string_list(&own["environments"]),
+        default_environment: own["default_environment"].as_str().filter(|name| !name.is_empty()).unwrap_or(crate::tailnet::LOCAL).to_string(),
         mid_turn: level(&own["mid_turn"], &MID_TURN, "steering"),
         on_start: string_list(&own["on_start"]),
         lsp: lsp_servers(&own["lsp"]),
@@ -536,6 +550,10 @@ fn to_json(settings: &Settings) -> Value {
         "update_channel": settings.update_channel,
         "prune_sessions": settings.prune_sessions,
         "unload_idle_sessions_after_minutes": settings.unload_idle_sessions_after_minutes,
+        "serve_tailnet": settings.serve_tailnet,
+        "tailnet_port": settings.tailnet_port,
+        "environments": settings.environments,
+        "default_environment": settings.default_environment,
         "mid_turn": settings.mid_turn,
         "on_start": settings.on_start,
         "custom_providers": settings.custom_providers.iter().map(|p| json!({

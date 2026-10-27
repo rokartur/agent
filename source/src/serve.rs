@@ -1,7 +1,9 @@
 //! The terminal side of a session server: `agent` starts one per session and attaches to it, `agent attach`
-//! returns to a running one. Each server is an `agent serve` process listening on `~/.agents/serve/<pid>.sock`.
+//! returns to a running one. Each server is an `agent serve` process listening on `~/.agents/serve/<pid>.sock`;
+//! `crate::tailnet` reaches the ones on other computers.
 
-use std::io::{BufRead, IsTerminal, Write};
+use std::io::{BufRead, BufReader, IsTerminal, Write};
+use std::net::TcpStream;
 use std::os::fd::IntoRawFd;
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::net::UnixStream;
@@ -10,6 +12,33 @@ use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use crate::agent::peers::{self, Peer};
+use crate::settings::Settings;
+use crate::tailnet::{self, LOCAL};
+use crate::tui::{Ending, Place};
+
+/// A session server this terminal reaches: its socket on this computer, or `agent serve --tailnet` on another one.
+pub enum Stream {
+    Local(UnixStream),
+    Remote(BufReader<TcpStream>, TcpStream),
+}
+
+/// A running session as `agent attach` lists it. One on a computer that does not answer is the one it had when it
+/// last did, and cannot be attached to.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Listed {
+    pub environment: String,
+    pub session: String,
+    pub title: String,
+    pub cwd: String,
+    pub busy: bool,
+    pub reachable: bool,
+}
+
+impl Listed {
+    fn local(peer: Peer) -> Listed {
+        Listed { environment: LOCAL.into(), session: peer.session, title: peer.title, cwd: peer.cwd, busy: peer.busy, reachable: true }
+    }
+}
 
 /// A crashed server's log stays this long for a bug report, then the next listing removes it.
 const CRASH_LOG_AGE: Duration = Duration::from_secs(7 * 24 * 3600);
@@ -54,15 +83,15 @@ pub fn remove_files(home: &Path) {
     remove_log(home);
 }
 
-/// Starts `agent serve <args>` and connects once it listens. A piped stdin goes to the server, which reads the
-/// message from it as `agent` always did.
-pub fn start(home: &Path, args: &[String]) -> Result<UnixStream, String> {
+/// Starts `agent serve <args>` in `cwd` and connects once it listens. A `piped` stdin goes to the server, which reads
+/// the message from it as `agent` always did.
+pub fn start(home: &Path, args: &[String], cwd: &Path, piped: bool) -> Result<UnixStream, String> {
     let exe = std::env::current_exe().map_err(|e| format!("Cannot find the agent binary: {e}"))?;
     // sh starts the server in the background and exits, so the server is no child of ours: on SIGHUP, closing the
     // terminal, `process::hang_up_children` would end it. An async list's stdin is /dev/null unless redirected.
     let mut command = crate::process::command("sh");
-    command.args(["-c", r#""$0" serve "$@" <&0 >/dev/null 2>&1 & echo $!"#]).arg(exe).args(args).stdout(Stdio::piped()).stderr(Stdio::null());
-    if !std::io::stdin().is_terminal() {
+    command.args(["-c", r#""$0" serve "$@" <&0 >/dev/null 2>&1 & echo $!"#]).arg(exe).args(args).current_dir(cwd).stdout(Stdio::piped()).stderr(Stdio::null());
+    if piped {
         command.stdin(Stdio::inherit());
     }
     let output = command.output().map_err(|e| format!("Cannot start the session server: {e}"))?;
@@ -90,11 +119,30 @@ pub fn connect(home: &Path, pid: u32) -> Result<UnixStream, String> {
     UnixStream::connect(socket(home, pid)).map_err(|e| format!("Cannot reach session server {pid}: {e}"))
 }
 
-/// Shows the session until it ends or this terminal detaches, then prints what the server said goodbye with.
-pub fn show(stream: UnixStream) -> Result<(), String> {
-    let text = crate::tui::attach(stream)?;
-    print!("{text}");
-    Ok(())
+/// Shows the session until it ends or this terminal detaches, then prints what the server said goodbye with. /env
+/// leaves it for a new session in another environment, which this terminal then shows.
+pub fn show(home: &Path, settings: &Settings, environment: &str, stream: Stream) -> Result<(), String> {
+    let (mut environment, mut stream) = (environment.to_string(), stream);
+    loop {
+        let place = Place { environment: environment.clone(), environments: tailnet::environments(settings) };
+        let ending = match stream {
+            Stream::Local(socket) => crate::tui::attach(socket.try_clone().map_err(|e| format!("Cannot use the session socket: {e}"))?, socket, &place)?,
+            Stream::Remote(reader, writer) => crate::tui::attach(reader, writer, &place)?,
+        };
+        let next = match ending {
+            Ending::Exit(text) => {
+                print!("{text}");
+                return Ok(());
+            }
+            Ending::Switch(next) => next,
+            Ending::Lost if environment == LOCAL => return Err("The session server stopped.".into()),
+            Ending::Lost => return Err(format!("Lost the connection to {environment}. If {environment} is up, the session runs on there and `agent attach` returns to it.")),
+        };
+        tailnet::check(settings, &next)?;
+        let cwd = std::env::current_dir().map_err(|e| format!("Cannot read the working directory: {e}"))?;
+        stream = if next == LOCAL { Stream::Local(start(home, &[], &cwd, false)?) } else { tailnet::start(settings, &next, &cwd, &[])? };
+        environment = next;
+    }
 }
 
 /// Sessions a terminal can attach to: the cross-session cards of live processes that also listen for terminals.
@@ -107,49 +155,111 @@ pub fn live(home: &Path) -> Vec<Peer> {
 pub fn find(home: &Path, prefix: &str) -> Result<Option<Peer>, String> {
     let mut matches: Vec<Peer> = live(home).into_iter().filter(|peer| peer.session.starts_with(prefix)).collect();
     if matches.len() > 1 {
-        return Err(format!("{prefix} matches {} running sessions; use a longer id:\n{}", matches.len(), list(&matches)));
+        return Err(format!("{prefix} matches {} running sessions; use a longer id:\n{}", matches.len(), list(&matches.into_iter().map(Listed::local).collect::<Vec<_>>())));
     }
     Ok(matches.pop())
 }
 
-/// `agent attach [id]`: a running session, or with an id that none has, the saved one, like `agent -r <id>`.
+/// `agent attach [id]`: a running session here or in an environment, or with an id that none has, the saved one here,
+/// like `agent -r <id>`.
 pub fn attach_command(args: &[String]) -> Result<(), String> {
     if !(std::io::stdin().is_terminal() && std::io::stdout().is_terminal()) {
         return Err("agent attach needs a terminal.".into());
     }
     let home = crate::home()?;
-    let stream = match args {
-        [] => connect(&home, pick(live(&home))?.pid)?,
-        [id] if !id.starts_with('-') => match find(&home, id)? {
-            Some(peer) => connect(&home, peer.pid)?,
-            None => start(&home, &["--resume".to_string(), id.clone()])?,
+    let settings = crate::settings::load(&home)?;
+    let listed = match args {
+        [] => pick(listing(&home, &settings))?,
+        [id] if !id.starts_with('-') => match find_anywhere(&home, &settings, id)? {
+            Some(listed) => listed,
+            None => {
+                let cwd = std::env::current_dir().map_err(|e| format!("Cannot read the working directory: {e}"))?;
+                return show(&home, &settings, LOCAL, Stream::Local(start(&home, &["--resume".to_string(), id.clone()], &cwd, false)?));
+            }
         },
         _ => return Err("Usage: agent attach [session id].".into()),
     };
-    show(stream)
+    let stream = if listed.environment == LOCAL {
+        let peer = find(&home, &listed.session)?.ok_or_else(|| format!("Session {} has just ended.", listed.session))?;
+        Stream::Local(connect(&home, peer.pid)?)
+    } else {
+        tailnet::attach(&settings, &listed.environment, &listed.session)?
+    };
+    show(&home, &settings, &listed.environment, stream)
 }
 
-fn pick(mut sessions: Vec<Peer>) -> Result<Peer, String> {
-    match sessions.len() {
-        0 => return Err("No session is running. Start one with `agent`, or open a saved one with `agent -r`.".into()),
-        1 => return Ok(sessions.remove(0)),
-        _ => {}
+/// Running sessions here, then in each environment; the reasons environments did not answer go to stderr.
+fn listing(home: &Path, settings: &Settings) -> Vec<Listed> {
+    let mut sessions: Vec<Listed> = live(home).into_iter().map(Listed::local).collect();
+    let (remote, failures) = tailnet::listing(home, settings);
+    for failure in failures {
+        eprintln!("{DIM}{failure}{RESET}");
     }
-    eprint!("{}\nAttach to [1-{}]: ", list(&sessions), sessions.len());
+    sessions.extend(remote);
+    sessions
+}
+
+/// The session whose id starts with `prefix`: here first, so a local one does not wait on asleep computers.
+fn find_anywhere(home: &Path, settings: &Settings, prefix: &str) -> Result<Option<Listed>, String> {
+    if let Some(peer) = find(home, prefix)? {
+        return Ok(Some(Listed::local(peer)));
+    }
+    let (remote, _) = tailnet::listing(home, settings);
+    let (mut reachable, unreachable): (Vec<Listed>, Vec<Listed>) = remote.into_iter().filter(|listed| listed.session.starts_with(prefix)).partition(|listed| listed.reachable);
+    if reachable.len() > 1 {
+        return Err(format!("{prefix} matches {} running sessions; use a longer id:\n{}", reachable.len(), list(&reachable)));
+    }
+    if let Some(gone) = unreachable.first().filter(|_| reachable.is_empty()) {
+        return Err(format!("Session {} ran on {}, which does not answer now.", gone.session, gone.environment));
+    }
+    Ok(reachable.pop())
+}
+
+fn pick(sessions: Vec<Listed>) -> Result<Listed, String> {
+    let mut reachable: Vec<Listed> = sessions.iter().filter(|listed| listed.reachable).cloned().collect();
+    if reachable.is_empty() {
+        let offline = if sessions.is_empty() { String::new() } else { format!("\n{}", list(&sessions)) };
+        return Err(format!("No session is running. Start one with `agent`, or open a saved one with `agent -r`.{offline}"));
+    }
+    if sessions.len() == 1 {
+        return Ok(reachable.remove(0));
+    }
+    eprint!("{}\nAttach to [1-{}]: ", list(&sessions), reachable.len());
     let _ = std::io::stderr().flush();
     let mut answer = String::new();
     std::io::stdin().lock().read_line(&mut answer).map_err(|e| format!("Cannot read the answer: {e}"))?;
-    let index = answer.trim().parse::<usize>().ok().filter(|n| (1..=sessions.len()).contains(n)).ok_or_else(|| format!("{} is not on the list.", answer.trim()))?;
-    Ok(sessions.remove(index - 1))
+    let index = answer.trim().parse::<usize>().ok().filter(|n| (1..=reachable.len()).contains(n)).ok_or_else(|| format!("{} is not on the list.", answer.trim()))?;
+    Ok(reachable.remove(index - 1))
 }
 
-fn list(sessions: &[Peer]) -> String {
+const DIM: &str = "\x1b[2m";
+const RESET: &str = "\x1b[0m";
+
+/// Numbers the sessions `pick` takes and greys out the rest; the environment column shows once one is remote.
+fn list(sessions: &[Listed]) -> String {
+    let tagged = sessions.iter().any(|listed| listed.environment != LOCAL);
+    let width = sessions.iter().map(|listed| listed.environment.chars().count()).max().unwrap_or(0);
     let mut lines = Vec::new();
-    for (n, peer) in (1..).zip(sessions) {
-        let state = if peer.busy { "working" } else { "idle" };
-        let title: String = peer.title.chars().filter(|c| !c.is_control()).collect();
-        let cwd: String = peer.cwd.chars().filter(|c| !c.is_control()).collect();
-        lines.push(format!("{n:>3}  {}  {state:<7}  {cwd}  {title}", peer.session));
+    let mut number = 0;
+    for listed in sessions {
+        let state = if !listed.reachable {
+            "offline"
+        } else if listed.busy {
+            "working"
+        } else {
+            "idle"
+        };
+        let title: String = listed.title.chars().filter(|c| !c.is_control()).collect();
+        let cwd: String = listed.cwd.chars().filter(|c| !c.is_control()).collect();
+        let session: String = listed.session.chars().filter(|c| !c.is_control()).collect();
+        let environment = if tagged { format!("{:<width$}  ", listed.environment) } else { String::new() };
+        let row = format!("{environment}{session}  {state:<7}  {cwd}  {title}");
+        if listed.reachable {
+            number += 1;
+            lines.push(format!("{number:>3}  {row}"));
+        } else {
+            lines.push(format!("{DIM}     {row}{RESET}"));
+        }
     }
     lines.join("\n")
 }
@@ -193,6 +303,13 @@ mod tests {
     #[test]
     fn the_list_strips_control_characters_from_cards() {
         let peer = Peer { pid: 1, session: "abc".into(), title: "t\x1b]0;x\x07".into(), cwd: "/p".into(), busy: true, socket: PathBuf::new() };
-        assert_eq!(list(&[peer]), "  1  abc  working  /p  t]0;x");
+        assert_eq!(list(&[Listed::local(peer)]), "  1  abc  working  /p  t]0;x");
+    }
+
+    #[test]
+    fn remote_sessions_are_tagged_and_offline_ones_greyed_out_without_a_number() {
+        let listed = |environment: &str, session: &str, reachable| Listed { environment: environment.into(), session: session.into(), title: "t".into(), cwd: "/p".into(), busy: false, reachable };
+        let rows = list(&[listed(LOCAL, "a", true), listed("studio", "b", false), listed("studio", "c", true)]);
+        assert_eq!(rows, format!("  1  local   a  idle     /p  t\n{DIM}     studio  b  offline  /p  t{RESET}\n  2  studio  c  idle     /p  t"));
     }
 }

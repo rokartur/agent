@@ -11,6 +11,7 @@ mod plugins;
 mod process;
 mod serve;
 mod settings;
+mod tailnet;
 mod tools;
 mod tui;
 mod update;
@@ -38,6 +39,7 @@ Usage:
 
 Commands:
   attach [id]                 Return to a running session, or open a saved one; lists the running ones without an id
+  serve --tailnet             Accept sessions from your other computers over Tailscale; needs "serve_tailnet": true
   plugin install <name|path>  Copy a bundled plugin or a plugin directory into ~/.agents/plugins
   plugin remove <name>        Remove an installed plugin
   plugin list                 List bundled and installed plugins
@@ -53,6 +55,7 @@ Flags:
   --headless                  Run the message, print JSONL events (tool, session, usage, done, error)
   -c, --continue              Continue the latest session in this directory
   -r, --resume [id]           Open a session by id or id prefix, or pick one from the list
+  --on <environment>          Run the session on that computer from "environments", or local
   --add-dir <path>            Also work in this directory; repeat for more, /workspace changes the list
   --no-session                Do not save the session
   --auto                      Let a reviewer model approve tool calls
@@ -107,6 +110,8 @@ struct Options {
     acp: bool,
     /// `agent serve`: run the interactive session for the terminals that attach to it; `agent` starts it.
     serve: bool,
+    /// --on: the environment the interactive session runs in, over `default_environment`.
+    on: Option<String>,
     /// --tools: the only tools this run may call.
     tools: Option<Vec<String>>,
     save: bool,
@@ -193,6 +198,7 @@ fn main() {
         Some("doctor") => Some(doctor_command(&args[1..])),
         Some("update") => Some(update_command(&args[1..])),
         Some("attach") => Some(serve::attach_command(&args[1..])),
+        Some("serve") if args.get(1).is_some_and(|arg| arg == "--tailnet") => Some(tailnet::serve_command(&args[2..])),
         _ => None,
     };
     if let Some(result) = command {
@@ -264,6 +270,7 @@ fn parse_args(args: Vec<String>) -> Result<Options, String> {
             "--headless" => options.headless = true,
             "--parent" => options.parent = Some(value("--parent")?),
             "--add-dir" => options.add_dirs.push(value("--add-dir")?),
+            "--on" => options.on = Some(value("--on")?),
             "--explore" => options.explore = true,
             "--web" => options.web = true,
             "--trust" => options.trust = true,
@@ -303,6 +310,9 @@ fn parse_args(args: Vec<String>) -> Result<Options, String> {
     }
     if options.serve && (options.print || options.json || options.headless || options.parent.is_some()) {
         return Err("serve runs an interactive session, so it takes no -p, --json, --headless or --parent.".into());
+    }
+    if options.on.is_some() && (options.print || options.json || options.headless || options.acp || options.parent.is_some()) {
+        return Err("--on starts an interactive session, so it takes no acp, -p, --json, --headless or --parent.".into());
     }
     let picks_session = matches!(options.resume, Some(Resume::Pick));
     if options.acp && (options.print || options.json || options.headless || options.prompt.is_some() || picks_session) {
@@ -359,35 +369,56 @@ fn styled_help(usage: &str) -> String {
     lines.join("\n")
 }
 
-/// Interactive `agent`: attaches to the running session `-r` or `-c` names, or starts a session server for it.
+/// Interactive `agent`: shows the session in its environment, `--on` or `default_environment`.
 fn open_session(options: &Options, args: &[String]) -> Result<(), String> {
+    let piped = !std::io::stdin().is_terminal();
     // Piped stdin would become a message, which the session list has no place for.
-    if matches!(options.resume, Some(Resume::Pick)) && !std::io::stdin().is_terminal() {
+    if matches!(options.resume, Some(Resume::Pick)) && piped {
         return Err("--resume without an id opens the session list, so it needs a terminal.".into());
     }
     let home = home()?;
+    let settings = settings::load(&home)?;
+    let environment = options.on.clone().unwrap_or_else(|| settings.default_environment.clone());
+    tailnet::check(&settings, &environment)?;
+    let cwd = std::env::current_dir().map_err(|e| format!("Cannot read the working directory: {e}"))?;
+    let stream = if environment == tailnet::LOCAL {
+        serve::Stream::Local(local_session(&home, options, args, &cwd, piped)?)
+    } else if piped {
+        return Err(format!("A piped message cannot reach a session on {environment}; pass it as words after the flags."));
+    } else {
+        tailnet::start(&settings, &environment, &cwd, args)?
+    };
+    serve::show(&home, &settings, &environment, stream)
+}
+
+/// The running session `-r` or `-c` names in `cwd`, or a new session server for `args` there. `agent serve
+/// --tailnet` calls it for the computers that start sessions on this one.
+fn local_session(home: &std::path::Path, options: &Options, args: &[String], cwd: &std::path::Path, piped: bool) -> Result<std::os::unix::net::UnixStream, String> {
     let resumed = match &options.resume {
         Some(Resume::Id(id)) => Some(id.clone()),
-        Some(Resume::Latest) => Some(Session::latest(&home.join(".agents/sessions"), &std::env::current_dir().map_err(|e| format!("Cannot read the working directory: {e}"))?)?),
+        Some(Resume::Latest) => Some(Session::latest(&home.join(".agents/sessions"), cwd)?),
         Some(Resume::Pick) | None => None,
     };
-    if let Some(running) = resumed.map(|id| serve::find(&home, &id)).transpose()?.flatten() {
-        if options.prompt.is_some() || !std::io::stdin().is_terminal() {
+    if let Some(running) = resumed.map(|id| serve::find(home, &id)).transpose()?.flatten() {
+        if options.prompt.is_some() || piped {
             return Err(format!("Session {} is running in another terminal; attach to it with `agent attach {}` and send the message there.", running.session, running.session));
         }
-        return serve::show(serve::connect(&home, running.pid)?);
+        return serve::connect(home, running.pid);
     }
-    if !std::io::stdin().is_terminal() && std::io::stderr().is_terminal() {
+    if piped && std::io::stderr().is_terminal() {
         // An inherited pipe that never closes (IDE task, ssh) would otherwise hang here silently.
         eprintln!("Reading the message from stdin...");
     }
-    serve::show(serve::start(&home, args)?)
+    serve::start(home, args, cwd, piped)
 }
 
 fn run(options: Options) -> Result<(), String> {
     // Piped stdin would become a message, and without a terminal on stdout print mode runs instead of the TUI.
     if !options.serve && matches!(options.resume, Some(Resume::Pick)) && !(std::io::stdin().is_terminal() && std::io::stdout().is_terminal()) {
         return Err("--resume without an id opens the session list, so it needs a terminal.".into());
+    }
+    if !options.serve && options.on.is_some() {
+        return Err("--on starts an interactive session, so it needs a terminal.".into());
     }
     let home = home()?;
     // The flags below apply to this run only; /settings saves only the keys it changes.
@@ -698,6 +729,16 @@ mod tests {
         assert!(super::parse_args(args(&["acp", "hi"])).is_err());
         assert!(super::parse_args(args(&["acp", "-p"])).is_err());
         assert!(!super::parse_args(args(&["-p", "acp"])).unwrap().acp);
+    }
+
+    #[test]
+    fn on_names_an_environment_for_interactive_sessions_only() {
+        let args = |list: &[&str]| list.iter().map(|arg| arg.to_string()).collect::<Vec<_>>();
+        let options = super::parse_args(args(&["--on", "studio", "fix", "it"])).unwrap();
+        assert_eq!((options.on.as_deref(), options.prompt.as_deref()), (Some("studio"), Some("fix it")));
+        assert!(super::parse_args(args(&["serve", "--on", "studio"])).unwrap().serve);
+        assert!(super::parse_args(args(&["--on", "studio", "-p", "hi"])).is_err());
+        assert!(super::parse_args(args(&["--on"])).is_err());
     }
 
     #[test]
