@@ -26,7 +26,7 @@ On macOS this loads a launchd agent, `~/Library/LaunchAgents/com.rokartur.agent.
 Sessions get the listener's environment, and `install` gives it the `PATH` of the shell you run it in, so run it where your tools (git, rg, compilers) are found. Run `agent service install` again after you move agent or change `PATH`. With the macOS firewall on, allow incoming connections for `agent` when macOS asks.
 
 - `agent service status` says whether the listener runs and where its log is.
-- `agent service restart` starts it again. An update of agent does this itself, so the listener runs the new release.
+- `agent service restart` starts it again. An update of agent does this itself, so the listener runs the new release. Remote terminals connect through the listener, so each one reconnects once; their sessions keep running.
 - `agent service uninstall` stops it and removes it from startup. Sessions that run keep running; `agent attach` on the host reaches them.
 
 To run the listener without the service, for example to watch its output, run `agent service uninstall` first, then `agent serve --tailnet` in a terminal; two listeners cannot share the port.
