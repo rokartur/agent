@@ -43,6 +43,8 @@ Then:
 - `/env` lists the environments. `/env studio` starts a new session on `studio` in this terminal, and the session you leave keeps running.
 - `agent attach` lists the running sessions of every environment, tagged with the computer. A computer in `environments` that does not answer shows the sessions it had when it last answered, greyed out; a discovered one that does not answer is left out. `agent attach <id>` finds the session on any of them.
 
+Sessions on different computers can message each other. `ListAgents` lists the running sessions of your other computers as `<computer>:<session>`, and `SendMessage` to that address starts a turn in the session there. That session sees the sender's address in the same form and can reply to it, but the reply arrives only when the sender's computer runs the listener too (`agent service install`). `notify_when_idle` works only for sessions on the same computer.
+
 A new remote session starts in the same directory path as your terminal. When that directory does not exist on the host, it starts in the host's home directory and says so. Move it with `!cd <dir>`, then use `/worktree` to pick a branch or a worktree there.
 
 The project is the host's: `@` file completion, `!` commands, git status and diffs all come from the host. What you do on your own computer stays there: Ctrl+V pastes an image from your clipboard, a file you drag into the terminal is read from your disk, and `/copy`, copied selections and links you click use your clipboard and your browser.

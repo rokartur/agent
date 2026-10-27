@@ -1,11 +1,14 @@
 //! Environments on the other computers of one tailnet (ADR 0002). `agent serve --tailnet` accepts this user's other
-//! devices on this computer's Tailscale addresses, then lists, attaches to or starts the session servers here and
-//! relays the wire between the TCP connection and the session's socket. `--on`, /env and `agent attach` are its clients.
+//! devices on this computer's Tailscale addresses, then lists, attaches to or starts the session servers here, or
+//! delivers a message to one, and relays the wire between the TCP connection and the session's socket. `--on`, /env,
+//! `agent attach`, SendMessage and ListAgents are its clients.
 //!
-//! Each connection sends one request line, `{"list": true}`, `{"attach": id}`, `{"start": {"cwd", "args"}}` or
-//! `{"reattach": pid}` for the session server a dropped connection showed, with
-//! `protocol` and `version`, and gets one reply line carrying the listener's own `protocol` and `version`: the
-//! sessions, `{"ok": true}`, or `{"error": ..}`. After an ok the connection carries the session's wire unchanged.
+//! Each connection sends one request line, `{"list": true}` (with `"cwd"` for `--on auto`), `{"attach": id}`,
+//! `{"start": {"cwd", "args"}}`, `{"reattach": pid}` for the session server a dropped connection showed, or
+//! `{"message": {"to", "from", "from_cwd", "text"}}` for a SendMessage, with `protocol` and `version`. It gets one
+//! reply line carrying the listener's own `protocol` and `version`: the sessions with this computer's `load` (and
+//! `has_cwd` when asked), `{"ok": true}`, `{"ok": true, "sent": ..}` for a message, or `{"error": ..}`. After a bare
+//! ok the connection carries the session's wire unchanged.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
