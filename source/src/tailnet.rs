@@ -15,6 +15,7 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 
+use crate::agent::peers;
 use crate::serve::{self, Listed, Stream};
 use crate::settings::Settings;
 use crate::tui::{PROTOCOL, SILENCE};
@@ -25,6 +26,8 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 const MACOS_APP_CLI: &str = "/Applications/Tailscale.app/Contents/MacOS/Tailscale";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const LIST_TIMEOUT: Duration = Duration::from_secs(5);
+/// The host waits up to 10 s for the session it delivers a message to (`peers::deliver`).
+const MESSAGE_REPLY_TIMEOUT: Duration = Duration::from_secs(15);
 /// A start waits up to `serve::START_TIMEOUT` on the host for the session server to listen.
 const START_REPLY_TIMEOUT: Duration = Duration::from_secs(75);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
@@ -83,6 +86,14 @@ pub fn check(settings: &Settings, name: &str) -> Result<(), String> {
 pub fn start(settings: &Settings, environment: &str, cwd: &Path, args: &[String]) -> Result<Stream, String> {
     let (reader, writer, _) = request(settings, environment, json!({"start": {"cwd": cwd, "args": args}}), START_REPLY_TIMEOUT)?;
     Ok(Stream::Remote(reader, writer))
+}
+
+/// Sends `text` from session `from` here to the session `to` names on `environment`, and says how it went.
+pub fn message(settings: &Settings, environment: &str, to: &str, from: &str, from_cwd: &Path, text: &str) -> Result<String, String> {
+    let body = json!({"message": {"to": to, "from": from, "from_cwd": from_cwd, "text": text}});
+    let (_, _, reply) = request(settings, environment, body, MESSAGE_REPLY_TIMEOUT)?;
+    let sent = reply["sent"].as_str().ok_or_else(|| format!("{environment} sent no answer to the message."))?;
+    Ok(format!("{sent} (on {environment})"))
 }
 
 pub fn attach(settings: &Settings, environment: &str, session: &str) -> Result<Stream, String> {
@@ -274,16 +285,20 @@ fn accept(listener: &TcpListener, owner: u64, home: &Path) {
 
 fn admit(stream: TcpStream, owner: u64, home: &Path) {
     let Ok(peer) = stream.peer_addr() else { return };
-    if let Err(refusal) = same_owner(peer.ip(), owner) {
-        eprintln!("Refused {peer}: {refusal}");
-        reply(&stream, json!({"error": "This computer accepts sessions only from its owner's devices."}));
-        return;
-    }
-    handle(stream, home);
+    let device = match same_owner(peer.ip(), owner) {
+        Ok(device) => device,
+        Err(refusal) => {
+            eprintln!("Refused {peer}: {refusal}");
+            reply(&stream, json!({"error": "This computer accepts sessions only from its owner's devices."}));
+            return;
+        }
+    };
+    handle(stream, home, &device);
 }
 
-/// One admitted connection: reads its request, answers it, and for a session relays the wire until either side ends.
-fn handle(stream: TcpStream, home: &Path) {
+/// One admitted connection from `device`: reads its request, answers it, and for a session relays the wire until
+/// either side ends.
+fn handle(stream: TcpStream, home: &Path, device: &str) {
     for_keystrokes(&stream);
     let Ok(clone) = stream.try_clone() else { return };
     let mut reader = BufReader::new(clone);
@@ -294,8 +309,9 @@ fn handle(stream: TcpStream, home: &Path) {
     }
     let _ = stream.set_read_timeout(None);
     let request = serde_json::from_str(&line).unwrap_or(Value::Null);
-    match answer(home, &request) {
+    match answer(home, device, &request) {
         Ok(Answer::Sessions(sessions)) => reply(&stream, json!({"sessions": sessions})),
+        Ok(Answer::Sent(sent)) => reply(&stream, json!({"ok": true, "sent": sent})),
         Ok(Answer::Session(socket)) => {
             reply(&stream, json!({"ok": true}));
             relay(reader, stream, socket);
@@ -306,10 +322,11 @@ fn handle(stream: TcpStream, home: &Path) {
 
 enum Answer {
     Sessions(Vec<Value>),
+    Sent(String),
     Session(UnixStream),
 }
 
-fn answer(home: &Path, request: &Value) -> Result<Answer, String> {
+fn answer(home: &Path, device: &str, request: &Value) -> Result<Answer, String> {
     if request["protocol"] != PROTOCOL {
         return Err(format!("This computer runs agent v{VERSION}, which cannot talk to agent v{}.", request["version"].as_str().unwrap_or("unknown")));
     }
@@ -328,7 +345,20 @@ fn answer(home: &Path, request: &Value) -> Result<Answer, String> {
     if request["start"].is_object() {
         return start_here(home, &request["start"]).map(Answer::Session);
     }
+    if request["message"].is_object() {
+        return deliver_here(home, device, &request["message"]).map(Answer::Sent);
+    }
     Err("This computer's agent does not know that request.".into())
+}
+
+/// A SendMessage from a session on `device` to a session here. The sender is named `<device>:<session>`, the address
+/// a reply from here reaches it by.
+fn deliver_here(home: &Path, device: &str, message: &Value) -> Result<String, String> {
+    let to = message["to"].as_str().filter(|to| !to.is_empty()).ok_or("The message names no session.")?;
+    let text = message["text"].as_str().filter(|text| !text.is_empty()).ok_or("The message is empty.")?;
+    let peer = peers::find(home, to)?.ok_or_else(|| format!("No session {to} runs here."))?;
+    let from = format!("{device}:{}", message["from"].as_str().unwrap_or("unknown"));
+    peers::send(&peer, &from, Path::new(message["from_cwd"].as_str().unwrap_or("unknown")), text, None)
 }
 
 fn start_here(home: &Path, start: &Value) -> Result<UnixStream, String> {
@@ -381,8 +411,11 @@ fn own_user() -> Result<u64, String> {
     tailscale(&["status", "--json", "--peers=false"])?["Self"]["UserID"].as_u64().ok_or_else(|| "Tailscale reports no user for this computer.".into())
 }
 
-fn same_owner(ip: IpAddr, owner: u64) -> Result<(), String> {
-    owned_by(&tailscale(&["whois", "--json", &ip.to_string()])?, owner)
+/// The name of the device at `ip`, the first label of its MagicDNS name, when it is an untagged device of `owner`.
+fn same_owner(ip: IpAddr, owner: u64) -> Result<String, String> {
+    let whois = tailscale(&["whois", "--json", &ip.to_string()])?;
+    owned_by(&whois, owner)?;
+    Ok(whois["Node"]["Name"].as_str().and_then(|dns| dns.split('.').next()).filter(|name| !name.is_empty()).map_or_else(|| ip.to_string(), str::to_string))
 }
 
 /// A tagged device belongs to the tailnet rather than a person, and a node shared from another tailnet reports
@@ -443,13 +476,34 @@ mod tests {
     }
 
     #[test]
+    fn a_message_from_another_computer_reaches_a_session_here_named_by_that_computer() {
+        let home = std::env::temp_dir().join(format!("agent-tailnet-message-{}", std::process::id()));
+        let follow_ups = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let inbox = peers::open(&home, &follow_ups).unwrap();
+        // peers::list skips this process, so the inbox poses as the parent process, which is alive.
+        let parent = std::os::unix::process::parent_id();
+        let dir = peers::dir(&home);
+        std::fs::rename(inbox.socket(), dir.join(format!("{parent}.sock"))).unwrap();
+        std::fs::write(dir.join(format!("{parent}.json")), json!({"pid": parent, "session": "abc123", "title": "api", "cwd": "/repo", "busy": false}).to_string()).unwrap();
+        let ask = |message: Value| answer(&home, "laptop", &json!({"protocol": PROTOCOL, "message": message}));
+        let Ok(Answer::Sent(sent)) = ask(json!({"to": "abc", "from": "def456", "from_cwd": "/src", "text": "hi"})) else { panic!("the message was not sent") };
+        assert_eq!(sent, "Sent to session abc123 in /repo.");
+        let text = follow_ups.lock().unwrap()[0].text.clone();
+        assert!(text.starts_with("Message from another agent session laptop:def456 in /src, not from the user.") && text.ends_with("hi"), "{text}");
+        assert_eq!(ask(json!({"to": "zzz", "text": "hi"})).err(), Some("No session zzz runs here.".into()));
+        assert_eq!(ask(json!({"to": "abc", "text": ""})).err(), Some("The message is empty.".into()));
+        drop(inbox);
+        std::fs::remove_dir_all(&home).unwrap();
+    }
+
+    #[test]
     fn a_reattach_reaches_the_session_server_it_names_while_it_runs() {
         let home = std::env::temp_dir().join(format!("agent-reattach-{}", std::process::id()));
         let socket = serve::socket(&home, 4242);
         std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
         let _server = std::os::unix::net::UnixListener::bind(&socket).unwrap();
-        assert!(matches!(answer(&home, &json!({"protocol": PROTOCOL, "reattach": 4242})), Ok(Answer::Session(_))));
-        let ended = |server: u64| answer(&home, &json!({"protocol": PROTOCOL, "reattach": server})).err();
+        assert!(matches!(answer(&home, "laptop", &json!({"protocol": PROTOCOL, "reattach": 4242})), Ok(Answer::Session(_))));
+        let ended = |server: u64| answer(&home, "laptop", &json!({"protocol": PROTOCOL, "reattach": server})).err();
         assert_eq!(ended(4243), Some("The session ended: its server 4243 no longer runs.".into()));
         assert_eq!(ended(1 << 40), Some(format!("The session ended: its server {} no longer runs.", 1u64 << 40)));
         std::fs::remove_dir_all(home).unwrap();
@@ -510,7 +564,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let home = home.to_path_buf();
-        std::thread::spawn(move || handle(listener.accept().unwrap().0, &home));
+        std::thread::spawn(move || handle(listener.accept().unwrap().0, &home, "laptop"));
         port
     }
 

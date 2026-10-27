@@ -28,6 +28,7 @@ use crate::api::models::Model;
 use crate::api::{self, Client, Delta, Usage};
 use crate::process::now_ms;
 use crate::settings::Settings;
+use crate::tailnet;
 use crate::tools;
 use crate::tools::ask::{self, Answer, Question};
 use crate::tools::bg::{self, Terminals};
@@ -751,7 +752,7 @@ impl Agent {
             "TaskOutput" => self.terminals.lock().unwrap().status_of(input, &self.follow_ups),
             "TaskStop" => self.task_stop(input),
             "SendMessage" => self.send_message(input, emit),
-            "ListAgents" => Ok(self.list_agents()),
+            "ListAgents" => self.list_agents(),
             "Agent" => self.subagent(input, emit),
             "Workflow" => self.workflow(input),
             "WaitForAgents" => self.bg_wait(input),
@@ -919,6 +920,15 @@ impl Agent {
             }
             return subagent::send(&self.subagents, &run.id, text, None, &self.follow_ups);
         }
+        if let Some((environment, session)) = to.split_once(':') {
+            let settings = crate::settings::load(&self.home)?;
+            if environment != tailnet::LOCAL && tailnet::environments(&settings).iter().any(|known| known == environment) {
+                if notify_when_idle {
+                    return Err("notify_when_idle works only for sessions on this computer.".into());
+                }
+                return tailnet::message(&settings, environment, session, &self.session.id, &self.cwd, text);
+            }
+        }
         let peer = peers::find(&self.home, to)?.ok_or_else(|| format!("No subagent or session named {to}. ListAgents lists the ones you can message."))?;
         let reply_to = self.inbox.as_ref().map(peers::Inbox::socket);
         if notify_when_idle && reply_to.is_none() {
@@ -927,10 +937,9 @@ impl Agent {
         peers::send(&peer, &self.session.id, &self.cwd, text, reply_to.as_deref().filter(|_| notify_when_idle))
     }
 
-    fn list_agents(&self) -> String {
+    fn list_agents(&self) -> Result<String, String> {
         let mut sections = Vec::new();
-        let runs = self.subagents.lock().unwrap();
-        let subagents: Vec<String> = runs.list.iter().filter(|run| run.workflow.is_none()).map(|run| format!("- {} ({}), {}", run.id, run.label, run.status())).collect();
+        let subagents: Vec<String> = self.subagents.lock().unwrap().list.iter().filter(|run| run.workflow.is_none()).map(|run| format!("- {} ({}), {}", run.id, run.label, run.status())).collect();
         if !subagents.is_empty() {
             sections.push(format!("Subagents (`to`: id or label; a finished one resumes in the background):\n{}", subagents.join("\n")));
         }
@@ -938,10 +947,23 @@ impl Agent {
         if !sessions.is_empty() {
             sections.push(format!("Other sessions on this machine (`to`: session id or its prefix, title, or pid):\n{}", sessions.join("\n")));
         }
-        if sections.is_empty() {
-            return "No other agents. Subagents you start with Agent and other interactive sessions on this machine show here.".into();
+        let (remote, _) = tailnet::listing(&self.home, &crate::settings::load(&self.home)?);
+        let remote: Vec<String> = remote
+            .iter()
+            .filter(|listed| listed.reachable)
+            .map(|listed| {
+                let state = if listed.busy { "working" } else { "idle" };
+                let title = if listed.title.is_empty() { String::new() } else { format!(" \"{}\"", listed.title) };
+                format!("- session {}:{}{title}, {state}, in {}", listed.environment, listed.session, listed.cwd)
+            })
+            .collect();
+        if !remote.is_empty() {
+            sections.push(format!("Sessions on your other computers (`to`: <computer>:<session id or its prefix or title>):\n{}", remote.join("\n")));
         }
-        sections.join("\n\n")
+        if sections.is_empty() {
+            return Ok("No other agents. Subagents you start with Agent and other interactive sessions on this and your other computers show here.".into());
+        }
+        Ok(sections.join("\n\n"))
     }
 
     fn bg_wait(&self, input: &Value) -> Result<String, String> {

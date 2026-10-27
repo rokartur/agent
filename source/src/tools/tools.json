@@ -365,20 +365,20 @@
   },
   {
     "name": "SendMessage",
-    "description": "Send a message to another agent. A running subagent reads it after its current tool batch; a finished or stopped one resumes in the background with its whole conversation, and its answer arrives as a message. Also reaches your other agent sessions on this machine (see ListAgents). A subagent sends to `main` or a sibling the same way.",
+    "description": "Send a message to another agent. A running subagent reads it after its current tool batch; a finished or stopped one resumes in the background with its whole conversation, and its answer arrives as a message. Also reaches your other agent sessions on this machine and, as `<computer>:<session>`, on your other computers (see ListAgents). A subagent sends to `main` or a sibling the same way.",
     "input_schema": {
       "type": "object",
       "required": ["to"],
       "properties": {
-        "to": { "type": "string", "description": "Subagent id (sa-1) or label, `main`, or a session id, its prefix or title" },
+        "to": { "type": "string", "description": "Subagent id (sa-1) or label, `main`, a session id, its prefix or title, or `<computer>:<session>` for one on another computer" },
         "message": { "type": "string", "description": "Text to send; may be empty with notify_when_idle" },
-        "notify_when_idle": { "type": "boolean", "description": "Other sessions only: get one notice when that session next goes idle or exits" }
+        "notify_when_idle": { "type": "boolean", "description": "Other sessions on this machine only: get one notice when that session next goes idle or exits" }
       }
     }
   },
   {
     "name": "ListAgents",
-    "description": "List the agents SendMessage can reach: this session's subagents with their status, and your other interactive agent sessions on this machine with their directory and whether they are working.",
+    "description": "List the agents SendMessage can reach: this session's subagents with their status, and your other interactive agent sessions on this machine and your other computers with their directory and whether they are working.",
     "input_schema": { "type": "object", "properties": {} }
   },
   {

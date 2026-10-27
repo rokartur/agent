@@ -1110,13 +1110,10 @@ fn event_loop(app: &mut App, inbox: &Receiver<Msg>) -> Result<(), String> {
             || (matches!(app.panel, Some(Panel::Tasks { .. })) && (app.subagents.lock().unwrap().running() > 0 || app.terminals.lock().unwrap().running() > 0))
         {
             ANIMATION_TICK
-        } else if app.recording.is_some() {
-            Duration::from_secs(1)
-        } else if app.background_running() {
-            // A terminal, background subagent or workflow that ends while idle queues a follow-up that must start a turn.
-            Duration::from_secs(1)
         } else {
-            Duration::from_secs(3600)
+            // A recording, a terminal, subagent or workflow that ends while idle, and a message from another session
+            // queue work with nothing else to wake this loop.
+            Duration::from_secs(1)
         };
         let unattended = app.clients.is_empty() && app.working.is_none() && !app.background_running();
         unattended_since = if unattended { unattended_since.or(Some(Instant::now())) } else { None };
