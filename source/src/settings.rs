@@ -100,6 +100,8 @@ pub struct Settings {
     pub update_channel: String,
     /// One of `PRUNE_SESSIONS`: sessions untouched this long are deleted at start.
     pub prune_sessions: String,
+    /// Minutes a session with no terminal attached and nothing running stays loaded before its server exits; 0 keeps it.
+    pub unload_idle_sessions_after_minutes: u64,
     /// One of `MID_TURN`: a message sent while the agent works reaches it at the next tool call, or waits for the turn to end.
     pub mid_turn: String,
     /// Shell commands the TUI runs in the background at start, e.g. a global tool update.
@@ -408,6 +410,7 @@ fn from_json(own: &Value) -> Settings {
         copy_on_select: own["copy_on_select"].as_bool().unwrap_or(true),
         update_channel: level(&own["update_channel"], &crate::update::CHANNELS, "latest"),
         prune_sessions: own["prune_sessions"].as_str().unwrap_or("never").to_string(),
+        unload_idle_sessions_after_minutes: own["unload_idle_sessions_after_minutes"].as_u64().unwrap_or(30),
         mid_turn: level(&own["mid_turn"], &MID_TURN, "steering"),
         on_start: string_list(&own["on_start"]),
         lsp: lsp_servers(&own["lsp"]),
@@ -532,6 +535,7 @@ fn to_json(settings: &Settings) -> Value {
         "copy_on_select": settings.copy_on_select,
         "update_channel": settings.update_channel,
         "prune_sessions": settings.prune_sessions,
+        "unload_idle_sessions_after_minutes": settings.unload_idle_sessions_after_minutes,
         "mid_turn": settings.mid_turn,
         "on_start": settings.on_start,
         "custom_providers": settings.custom_providers.iter().map(|p| json!({

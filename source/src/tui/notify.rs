@@ -1,3 +1,19 @@
+/// Every variable `sequence` and `progress` read: a client sends them, since the session server's own came from whichever terminal started it.
+pub const TERMINAL_VARS: [&str; 12] = [
+    "KITTY_WINDOW_ID",
+    "TERM",
+    "GHOSTTY_RESOURCES_DIR",
+    "WEZTERM_EXECUTABLE",
+    "VTE_VERSION",
+    "TERM_PROGRAM",
+    "LC_TERMINAL",
+    "LC_TERMINAL_VERSION",
+    "TERM_PROGRAM_VERSION",
+    "WT_SESSION",
+    "ConEmuANSI",
+    "TMUX",
+];
+
 /// The escape sequence that shows a desktop notification in the terminal we run in.
 /// `env` reads environment variables. tmux renames TERM_PROGRAM, so Tuni, and iTerm2 without LC_TERMINAL, get the bell there.
 pub fn sequence(title: &str, body: &str, env: impl Fn(&str) -> Option<String>) -> String {
@@ -86,5 +102,24 @@ mod tests {
     fn text_cannot_inject_escape_sequences() {
         let vars = env(&[("GHOSTTY_RESOURCES_DIR", "/g")]);
         assert_eq!(sequence("agent", "\nrm x\x1b]0;evil\x07; ok\nmore", vars), "\x1b]777;notify;agent;rm x]0,evil, ok\x07");
+    }
+
+    #[test]
+    fn terminal_vars_name_every_variable_read() {
+        let read = std::cell::RefCell::new(Vec::new());
+        let recording = |ghostty: bool| {
+            let read = &read;
+            move |name: &str| {
+                read.borrow_mut().push(name.to_string());
+                (ghostty && name == "GHOSTTY_RESOURCES_DIR").then(|| "/g".to_string())
+            }
+        };
+        for ghostty in [false, true] {
+            sequence("agent", "Done", recording(ghostty));
+            progress(true, recording(ghostty));
+        }
+        for name in read.into_inner() {
+            assert!(TERMINAL_VARS.contains(&name.as_str()), "{name}");
+        }
     }
 }

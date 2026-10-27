@@ -93,11 +93,11 @@ _Avoid_: Sibling, neighbour
 ## Remote sessions
 
 **Session server**:
-The `agent serve` process that owns and runs interactive sessions; terminals connect to it as clients.
+The `agent serve` process that runs one interactive session, its TUI included; terminals attach to it as clients.
 _Avoid_: Daemon, backend
 
 **Client**:
-A TUI attached to a session server, showing one of its sessions and sending input to it.
+A terminal attached to a session server: it sends its keys, mouse and size, and shows the frames the server draws.
 _Avoid_: Frontend, viewer
 
 **Attach**:

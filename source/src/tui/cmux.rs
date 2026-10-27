@@ -57,8 +57,9 @@ impl Cmux {
         }
     }
 
-    pub fn notify(&self, body: &str) {
-        self.send(strings(&["notify", "--title", "agent", "--body", body]));
+    /// `subtitle` is the kind of event in the words cmux's own agent hooks use: Completed, Error, Permission, Waiting.
+    pub fn notify(&self, subtitle: &str, body: &str) {
+        self.send(strings(&["notify", "--title", "agent", "--subtitle", subtitle, "--body", body]));
     }
 
     /// Clears the pill and spinner and waits for cmux to hear it; the resume binding stays for the next launch.
@@ -83,11 +84,12 @@ fn status_commands(previous: Option<Status>, status: Status) -> Vec<Vec<String>>
     };
     let mut commands = vec![strings(&["set-status", STATUS_KEY, value, "--icon", icon, "--color", color])];
     let loading = status == Status::Running;
-    if previous.is_some_and(|previous| (previous == Status::Running) != loading) || (previous.is_none() && loading) {
+    let starts_turn = loading && previous != Some(Status::Running);
+    if starts_turn || (previous == Some(Status::Running) && !loading) {
         commands.push(strings(&["workspace", "loading", if loading { "on" } else { "off" }, "--id", LOADER_ID]));
     }
-    // Work resumed, so the "needs you" notification of this surface is answered.
-    if loading && previous == Some(Status::NeedsInput) {
+    // A new turn answers whatever this surface asked for, like cmux's Claude prompt-submit hook.
+    if starts_turn {
         commands.push(strings(&["clear-notifications"]));
     }
     commands
@@ -112,11 +114,12 @@ mod tests {
     }
 
     #[test]
-    fn the_spinner_follows_running_and_resuming_clears_the_notification() {
+    fn the_spinner_follows_running_and_a_new_turn_clears_the_notifications() {
         assert_eq!(verbs(status_commands(None, Status::Idle)), ["set-status agent Idle"]);
-        assert_eq!(verbs(status_commands(None, Status::Running)), ["set-status agent Running", "workspace loading on"]);
+        assert_eq!(verbs(status_commands(None, Status::Running)), ["set-status agent Running", "workspace loading on", "clear-notifications"]);
         assert_eq!(verbs(status_commands(Some(Status::Running), Status::NeedsInput)), ["set-status agent Needs input", "workspace loading off"]);
         assert_eq!(verbs(status_commands(Some(Status::NeedsInput), Status::Running)), ["set-status agent Running", "workspace loading on", "clear-notifications"]);
+        assert_eq!(verbs(status_commands(Some(Status::Idle), Status::Running)), ["set-status agent Running", "workspace loading on", "clear-notifications"]);
         assert_eq!(verbs(status_commands(Some(Status::NeedsInput), Status::Idle)), ["set-status agent Idle"]);
     }
 }

@@ -7,11 +7,12 @@ One binary, no async runtime: threads and `mpsc` channels. HTTP is `ureq` with r
 | Module | Owns |
 |---|---|
 | `main.rs` | CLI parsing, `Setup`, the print/json/headless loops, `plugin`, `update`, `doctor` subcommands. |
+| `serve.rs` | `agent` and `agent attach` on the terminal side: start or find a session server and attach to it. |
 | `agent/` | `Agent`: the turn loop, messages, session journal, compaction, snapshots, permissions, subagents, workflows, cross-session messaging. |
 | `agent/prompt.rs` | System prompt assembly: `SYSTEM.md`, `AGENTS.md` files, skills, prompt templates, `/skill:` and `/prompt:` expansion. |
 | `api/` | `Client`: Anthropic Messages, OpenAI Codex, OpenRouter, GitHub Copilot and OpenAI-compatible custom providers; accounts, OAuth, model catalog, account choice and failover. |
 | `tools/` | Built-in tools, the anchor registry (`hashline.rs`), background shells (`bg.rs`), the bash guard, rtk, web tools. |
-| `tui/` | The interactive terminal: `App` state, panels, editor, markdown rendering, login flows, voice. |
+| `tui/` | The interactive session: `App` state, panels, editor, markdown rendering, login flows, voice, and the session server's socket (`server.rs`, `client.rs`, `wire.rs`). |
 | `mcp/` | MCP client over stdio and streamable HTTP, `mcp.json` config, OAuth with PKCE. |
 | `plugins.rs` | JSON-RPC plugins under `~/.agents/plugins/<name>/`. Protocol in `../../plugins/README.md`. |
 | `acp.rs` | `agent acp`: Agent Client Protocol server for editors. |
@@ -26,10 +27,10 @@ One binary, no async runtime: threads and `mpsc` channels. HTTP is `ureq` with r
 
 ## Threads
 
-The TUI (`tui::run`) owns the terminal and runs the event loop on the main thread. It spawns:
+The TUI (`tui::run`) runs in the session server, `agent serve`, with the event loop on the main thread; it draws into the attached terminals' sockets, not into a terminal of its own. It spawns:
 
 - **worker**: owns the `Agent`. Receives `Command`s (prompt, compact, resume, ...) over one channel and sends `Msg::Agent(Event)` back over another. Only this thread touches `agent.messages`.
-- **input**: reads crossterm events and forwards them as `Msg::Input`.
+- **clients**: a listener thread, and per attached terminal a reader that forwards its events as `Msg::Input` and a writer that sends it frames.
 - **update**, **on_start**, **headroom sync**: one-shot threads at start.
 - Per background shell, subagent, workflow, condense batch and session title: a thread that reports through the same `events` channel or through `Arc<Mutex<_>>` fields on `Agent` that the UI also reads (`todos`, `goal`, `plan`, `terminals`, `subagents`, `workflows`, `permission_mode`).
 

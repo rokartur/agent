@@ -9,6 +9,7 @@ mod image;
 mod mcp;
 mod plugins;
 mod process;
+mod serve;
 mod settings;
 mod tools;
 mod tui;
@@ -36,6 +37,7 @@ Usage:
   agent <command> [...args]
 
 Commands:
+  attach [id]                 Return to a running session, or open a saved one; lists the running ones without an id
   plugin install <name|path>  Copy a bundled plugin or a plugin directory into ~/.agents/plugins
   plugin remove <name>        Remove an installed plugin
   plugin list                 List bundled and installed plugins
@@ -103,6 +105,8 @@ struct Options {
     account: Option<(String, String)>,
     /// `agent acp`: serve the Agent Client Protocol instead of one run.
     acp: bool,
+    /// `agent serve`: run the interactive session for the terminals that attach to it; `agent` starts it.
+    serve: bool,
     /// --tools: the only tools this run may call.
     tools: Option<Vec<String>>,
     save: bool,
@@ -119,7 +123,7 @@ enum Resume {
     Pick,
 }
 
-fn home() -> Result<PathBuf, String> {
+pub(crate) fn home() -> Result<PathBuf, String> {
     std::env::var_os("HOME").map(PathBuf::from).ok_or_else(|| "HOME is not set.".into())
 }
 
@@ -188,6 +192,7 @@ fn main() {
         Some("plugin") => Some(plugin_command(&args[1..])),
         Some("doctor") => Some(doctor_command(&args[1..])),
         Some("update") => Some(update_command(&args[1..])),
+        Some("attach") => Some(serve::attach_command(&args[1..])),
         _ => None,
     };
     if let Some(result) = command {
@@ -197,14 +202,21 @@ fn main() {
         }
         return;
     }
-    let options = match parse_args(args) {
+    let options = match parse_args(args.clone()) {
         Ok(options) => options,
         Err(message) => {
             eprintln!("{message}\n{}", help(std::io::stderr().is_terminal()));
             std::process::exit(2);
         }
     };
-    if let Err(message) = run(options) {
+    let result = if options.serve {
+        home().and_then(|home| serve::redirect_output(&home)).and_then(|()| run(options))
+    } else if !(options.acp || options.headless || options.print || options.json) && std::io::stdout().is_terminal() {
+        open_session(&options, &args)
+    } else {
+        run(options)
+    };
+    if let Err(message) = result {
         eprintln!("error: {message}");
         std::process::exit(1);
     }
@@ -212,9 +224,10 @@ fn main() {
 
 fn parse_args(args: Vec<String>) -> Result<Options, String> {
     let acp = args.first().is_some_and(|command| command == "acp");
-    let mut options = Options { save: true, acp, ..Options::default() };
+    let serve = args.first().is_some_and(|command| command == "serve");
+    let mut options = Options { save: true, acp, serve, ..Options::default() };
     let mut words = Vec::new();
-    let mut args = args.into_iter().skip(usize::from(acp)).peekable();
+    let mut args = args.into_iter().skip(usize::from(acp || serve)).peekable();
     while let Some(arg) = args.next() {
         // `--model --print hi` must not set the model to `--print`.
         let mut value = |name: &str| args.next().filter(|value| !value.starts_with("--")).ok_or(format!("{name} needs a value."));
@@ -288,6 +301,9 @@ fn parse_args(args: Vec<String>) -> Result<Options, String> {
     if options.tools.is_some() && !(options.print || options.json || options.headless || options.acp) {
         return Err("--tools needs acp, -p, --json or --headless; /settings would reset the tool list.".into());
     }
+    if options.serve && (options.print || options.json || options.headless || options.parent.is_some()) {
+        return Err("serve runs an interactive session, so it takes no -p, --json, --headless or --parent.".into());
+    }
     let picks_session = matches!(options.resume, Some(Resume::Pick));
     if options.acp && (options.print || options.json || options.headless || options.prompt.is_some() || picks_session) {
         return Err("acp reads its messages from the editor, so it takes no message, -p, --json, --headless or -r without an id.".into());
@@ -343,9 +359,34 @@ fn styled_help(usage: &str) -> String {
     lines.join("\n")
 }
 
+/// Interactive `agent`: attaches to the running session `-r` or `-c` names, or starts a session server for it.
+fn open_session(options: &Options, args: &[String]) -> Result<(), String> {
+    // Piped stdin would become a message, which the session list has no place for.
+    if matches!(options.resume, Some(Resume::Pick)) && !std::io::stdin().is_terminal() {
+        return Err("--resume without an id opens the session list, so it needs a terminal.".into());
+    }
+    let home = home()?;
+    let resumed = match &options.resume {
+        Some(Resume::Id(id)) => Some(id.clone()),
+        Some(Resume::Latest) => Some(Session::latest(&home.join(".agents/sessions"), &std::env::current_dir().map_err(|e| format!("Cannot read the working directory: {e}"))?)?),
+        Some(Resume::Pick) | None => None,
+    };
+    if let Some(running) = resumed.map(|id| serve::find(&home, &id)).transpose()?.flatten() {
+        if options.prompt.is_some() || !std::io::stdin().is_terminal() {
+            return Err(format!("Session {} is running in another terminal; attach to it with `agent attach {}` and send the message there.", running.session, running.session));
+        }
+        return serve::show(serve::connect(&home, running.pid)?);
+    }
+    if !std::io::stdin().is_terminal() && std::io::stderr().is_terminal() {
+        // An inherited pipe that never closes (IDE task, ssh) would otherwise hang here silently.
+        eprintln!("Reading the message from stdin...");
+    }
+    serve::show(serve::start(&home, args)?)
+}
+
 fn run(options: Options) -> Result<(), String> {
     // Piped stdin would become a message, and without a terminal on stdout print mode runs instead of the TUI.
-    if matches!(options.resume, Some(Resume::Pick)) && !(std::io::stdin().is_terminal() && std::io::stdout().is_terminal()) {
+    if !options.serve && matches!(options.resume, Some(Resume::Pick)) && !(std::io::stdin().is_terminal() && std::io::stdout().is_terminal()) {
         return Err("--resume without an id opens the session list, so it needs a terminal.".into());
     }
     let home = home()?;
@@ -417,7 +458,7 @@ fn run(options: Options) -> Result<(), String> {
     } else if !options.acp && !std::io::stdin().is_terminal() {
         let mut piped = String::new();
         // An inherited pipe that never closes (IDE task, ssh) would otherwise hang here silently.
-        if std::io::stderr().is_terminal() {
+        if !options.serve && std::io::stderr().is_terminal() {
             eprintln!("Reading the message from stdin...");
         }
         std::io::stdin().read_to_string(&mut piped).map_err(|e| format!("Cannot read stdin: {e}"))?;
@@ -428,7 +469,7 @@ fn run(options: Options) -> Result<(), String> {
             });
         }
     }
-    if options.acp || options.headless || options.print || options.json || !std::io::stdout().is_terminal() {
+    if !options.serve {
         if let Some(error) = &modes_error {
             eprintln!("{error}");
         }
@@ -508,22 +549,25 @@ fn run(options: Options) -> Result<(), String> {
         return result;
     }
     agent.interactive = true;
-    // Without an inbox the session still works; it only cannot be messaged.
-    match agent::peers::open(&home, &agent.follow_ups) {
-        Ok(inbox) => {
-            agent.inbox = Some(inbox);
-            agent.describe_to_peers(false);
-        }
-        Err(error) => eprintln!("Cross-session messages are off: {error}"),
-    }
+    // Its card is how `agent attach` finds this session, so a session server without one would be unreachable.
+    agent.inbox = Some(agent::peers::open(&home, &agent.follow_ups).map_err(|error| format!("Cannot list this session for agent attach: {error}"))?);
+    agent.describe_to_peers(false);
     agent.snapshots = snapshots::Snapshots::open(&home, &agent.cwd);
-    tui::run(agent, tui::Setup { home, settings, prompt, pick_session: matches!(options.resume, Some(Resume::Pick)), modes_error, plugin_updates }, model_lists)
+    let socket = serve::socket(&home, std::process::id());
+    let result = tui::run(agent, tui::Setup { home: home.clone(), settings, prompt, pick_session: matches!(options.resume, Some(Resume::Pick)), modes_error, plugin_updates }, model_lists, &socket);
+    if result.is_ok() {
+        serve::remove_log(&home);
+    }
+    result
 }
 
 /// The panic hook's terminal restore does not run when a signal ends the process, so a `kill` would leave the shell in raw mode.
 fn clean_up_on_signal() {
     tools::remove_spills();
     let _ = std::fs::remove_dir_all(tools::web::store_dir());
+    if let Ok(home) = home() {
+        serve::remove_files(&home);
+    }
     if std::io::stdout().is_terminal() {
         tui::leave(&mut std::io::stdout());
     }

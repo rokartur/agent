@@ -1,5 +1,6 @@
 mod ask;
 mod btw;
+mod client;
 mod cmux;
 mod editor;
 mod history;
@@ -9,10 +10,14 @@ mod notify;
 mod panel;
 mod render;
 mod selection;
+mod server;
 mod voice;
+mod wire;
+
+pub use client::attach;
 
 use crossterm::event::{
-    self, DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste, EnableFocusChange, EnableMouseCapture, Event as Input, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
+    DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste, EnableFocusChange, EnableMouseCapture, Event as Input, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
     KeyboardEnhancementFlags, MouseButton, MouseEvent, MouseEventKind, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::execute;
@@ -50,7 +55,7 @@ use crate::tools::rtk::strip_ansi;
 use crate::tools::todo::{Status, Task, Todos};
 use crate::worktree::{self, Worktree};
 use editor::Editor;
-use render::{BRIGHT, Line, MUTED, PLAIN, Screen, Span, Style, line_width, link_at, overlay_center, overlay_right, plain_text, select, span, take_cursor, text_in, truncate, width, wrap};
+use render::{BRIGHT, Line, MUTED, PLAIN, Span, Style, line_width, link_at, overlay_center, overlay_right, plain_text, select, span, take_cursor, text_in, truncate, width, wrap};
 use selection::{Point, Selection};
 
 const WORKING: &str = "Working";
@@ -81,7 +86,10 @@ const PROMPT_BG: u8 = 237;
 const PROMPT: Style = BRIGHT.on(PROMPT_BG);
 
 enum Msg {
-    Input(Input),
+    Attached(server::Client),
+    /// A terminal event from the client with this id.
+    Input(u64, Input),
+    Detached(u64),
     Agent(Event),
     Done(Result<String, String>),
     /// The model the worker settled on with the notice of a swapped model, and the failed model lists.
@@ -438,6 +446,7 @@ const BUILTIN_COMMANDS: &[(&str, MidTurn, &str)] = &[
     ("login", MidTurn::Runs, "Add a Claude or ChatGPT account or an API key"),
     ("logout", MidTurn::Runs, "Remove a saved account"),
     ("account", MidTurn::Runs, "Show accounts and their usage; pick one to use until it reaches the switch threshold"),
+    ("detach", MidTurn::Runs, "Close this terminal's view and leave the session running; `agent attach` returns to it"),
     ("quit", MidTurn::Runs, "Quit agent"),
 ];
 const MENU_ROWS: [usize; 5] = [4, 6, 8, 10, 12];
@@ -605,8 +614,14 @@ struct App {
     retract: bool,
     recording: Option<voice::Recording>,
     transcribing: Option<Instant>,
-    /// None until the terminal reports focus or a key arrives; notifications go out unless it is Some(true).
-    focused: Option<bool>,
+    /// The attached terminals, each drawn the frame sized to the smallest of them.
+    clients: Vec<server::Client>,
+    /// The client the last input came from, which /detach lets go.
+    typing_client: Option<u64>,
+    /// The frame size of the last draw, for mouse events and layout checks outside `frame`.
+    size: (usize, usize),
+    /// The OSC 0 sequence of the current title, sent again to each terminal that attaches.
+    title: String,
     /// Some inside a cmux terminal, whose sidebar shows the turn's state.
     cmux: Option<cmux::Cmux>,
     prompt_usage: Usage,
@@ -701,8 +716,10 @@ pub struct Setup {
     pub plugin_updates: Vec<String>,
 }
 
-/// `model_lists` is the startup load of the account model lists; the worker settles the model on it before its first command.
-pub fn run(agent: Agent, setup: Setup, model_lists: JoinHandle<Vec<String>>) -> Result<(), String> {
+/// Runs the session for the terminals that attach on `socket`, until one quits or it idles unattached past
+/// `unload_idle_sessions_after_minutes`. `model_lists` is the startup load of the account model lists; the worker
+/// settles the model on it before its first command.
+pub fn run(agent: Agent, setup: Setup, model_lists: JoinHandle<Vec<String>>, socket: &Path) -> Result<(), String> {
     let prompt = setup.prompt.clone();
     let pick_session = setup.pick_session;
     let (events, inbox) = mpsc::channel();
@@ -724,16 +741,12 @@ pub fn run(agent: Agent, setup: Setup, model_lists: JoinHandle<Vec<String>>) -> 
     if app.settings.headroom && app.settings.headroom_url.is_empty() && crate::process::installed("headroom") {
         spawn_headroom_sync(app.home.clone(), app.settings.headroom_env.clone(), events.clone());
     }
-    spawn_input(events);
-    let mut out = std::io::stdout();
-    enter(&mut out).map_err(|e| format!("Cannot set up the terminal: {e}"))?;
-    report_cwd(&app.cwd);
-    set_terminal_title(&app.saved_title(&app.session_id).unwrap_or_else(|| unnamed_title(&app.cwd)));
+    server::listen(socket, events)?;
+    app.set_title(&app.saved_title(&app.session_id).unwrap_or_else(|| unnamed_title(&app.cwd)));
     let previous_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         // `panic = "abort"` skips Drop, so ffmpeg and bg terminals in their own sessions would outlive the agent.
         crate::process::hang_up_children();
-        leave(&mut std::io::stdout());
         previous_hook(info);
     }));
     if let Some(prompt) = prompt {
@@ -743,8 +756,8 @@ pub fn run(agent: Agent, setup: Setup, model_lists: JoinHandle<Vec<String>>) -> 
         app.open_resume();
     }
     app.offer_trust();
-    let result = event_loop(&mut app, &inbox, &mut out);
-    show_progress(false);
+    let result = event_loop(&mut app, &inbox);
+    app.show_progress(false);
     if let Some(cmux) = app.cmux.take() {
         cmux.finish();
     }
@@ -754,13 +767,14 @@ pub fn run(agent: Agent, setup: Setup, model_lists: JoinHandle<Vec<String>>) -> 
     if let Some(recording) = app.recording.take() {
         recording.cancel();
     }
-    leave(&mut out);
-    if let Some(path) = &app.session_path {
-        let has_messages = std::fs::read_to_string(path).is_ok_and(|text| text.contains(r#""type":"message""#));
-        if has_messages {
-            print!("{}", exit_summary(&app, Path::new(path)));
-        }
+    let summary = match &app.session_path {
+        Some(path) if std::fs::read_to_string(path).is_ok_and(|text| text.contains(r#""type":"message""#)) => exit_summary(&app, Path::new(path)),
+        _ => String::new(),
+    };
+    for client in std::mem::take(&mut app.clients) {
+        client.finish(&summary);
     }
+    let _ = std::fs::remove_file(socket);
     result
 }
 
@@ -1050,30 +1064,18 @@ fn tail(text: &str) -> String {
     lines[lines.len().saturating_sub(5)..].join("\n")
 }
 
-fn spawn_input(events: Sender<Msg>) {
-    std::thread::spawn(move || {
-        while let Ok(input) = event::read() {
-            if events.send(Msg::Input(input)).is_err() {
-                return;
-            }
-        }
-    });
-}
-
-fn event_loop(app: &mut App, inbox: &Receiver<Msg>, out: &mut Stdout) -> Result<(), String> {
-    let mut screen = Screen::new();
+fn event_loop(app: &mut App, inbox: &Receiver<Msg>) -> Result<(), String> {
     let mut progress_sent: Option<Instant> = None;
+    let mut unattended_since: Option<Instant> = None;
     loop {
         let busy = app.working.is_some() && app.settings.progress_bar;
         if let Some(show) = progress_due(busy, progress_sent, Instant::now()) {
             progress_sent = show.then(Instant::now);
-            show_progress(show);
+            app.show_progress(show);
         }
         app.report_to_cmux();
-        let (width, height) = terminal::size().map_err(|e| e.to_string())?;
-        let (rows, cursor) = app.frame(width as usize, height as usize);
-        screen.draw(out, rows, Some(cursor)).map_err(|e| e.to_string())?;
-        let wait = if app.edge_drag.is_some() {
+        app.draw();
+        let mut wait = if app.edge_drag.is_some() {
             EDGE_SCROLL
         } else if app.working.is_some()
             || app.hint.is_some()
@@ -1083,17 +1085,29 @@ fn event_loop(app: &mut App, inbox: &Receiver<Msg>, out: &mut Stdout) -> Result<
             ANIMATION_TICK
         } else if app.recording.is_some() {
             Duration::from_secs(1)
-        } else if app.terminals.lock().unwrap().running() > 0 || app.subagents.lock().unwrap().running() > 0 || app.workflows.lock().unwrap().iter().any(|run| run.is_running()) {
+        } else if app.background_running() {
             // A terminal, background subagent or workflow that ends while idle queues a follow-up that must start a turn.
             Duration::from_secs(1)
         } else {
             Duration::from_secs(3600)
         };
+        let unattended = app.clients.is_empty() && app.working.is_none() && !app.background_running();
+        unattended_since = if unattended { unattended_since.or(Some(Instant::now())) } else { None };
+        let unload_after = Duration::from_secs(app.settings.unload_idle_sessions_after_minutes.saturating_mul(60));
+        if let Some(since) = unattended_since
+            && !unload_after.is_zero()
+        {
+            let left = unload_after.saturating_sub(since.elapsed());
+            if left.is_zero() {
+                return Ok(());
+            }
+            wait = wait.min(left);
+        }
         match inbox.recv_timeout(wait) {
             Ok(msg) => {
-                app.handle(msg, &mut screen);
+                app.handle(msg);
                 while let Ok(msg) = inbox.try_recv() {
-                    app.handle(msg, &mut screen);
+                    app.handle(msg);
                 }
             }
             Err(RecvTimeoutError::Timeout) => {}
@@ -1143,7 +1157,10 @@ impl App {
             retract: false,
             recording: None,
             transcribing: None,
-            focused: None,
+            clients: Vec::new(),
+            typing_client: None,
+            size: (0, 0),
+            title: String::new(),
             cmux: cmux::Cmux::detect(),
             prompt_usage: Usage::default(),
             streamed_chars: 0,
@@ -1421,21 +1438,103 @@ impl App {
         plain_text(&rows)
     }
 
-    fn handle(&mut self, msg: Msg, screen: &mut Screen) {
-        match msg {
-            Msg::Input(Input::Key(key)) if key.kind != KeyEventKind::Release => {
+    fn add_client(&mut self, mut client: server::Client) {
+        client.queue(&cwd_sequence(&self.cwd));
+        client.queue(&self.title);
+        if self.working.is_some()
+            && self.settings.progress_bar
+            && let Some(sequence) = notify::progress(true, |name| client.env(name))
+        {
+            client.queue(&sequence);
+        }
+        self.clients.push(client);
+        self.invalidate_screens();
+    }
+
+    fn input(&mut self, id: u64, input: Input) {
+        self.typing_client = Some(id);
+        match input {
+            Input::Key(key) if key.kind != KeyEventKind::Release => {
                 // Typing proves focus, also in terminals that never report it.
-                self.focused = Some(true);
+                self.set_focus(id, true);
                 // A drag released outside the window sends no button-up, so a key stops its edge scroll.
                 self.edge_drag = None;
-                self.key(key, screen);
+                self.key(key);
             }
-            Msg::Input(Input::Paste(text)) => self.paste(&text),
-            Msg::Input(Input::Resize(..)) => screen.invalidate(),
-            Msg::Input(Input::Mouse(mouse)) => self.mouse(mouse),
-            Msg::Input(Input::FocusGained) => self.focused = Some(true),
-            Msg::Input(Input::FocusLost) => self.focused = Some(false),
-            Msg::Input(_) => {}
+            Input::Paste(text) => self.paste(&text),
+            Input::Resize(width, height) => {
+                if let Some(client) = self.clients.iter_mut().find(|client| client.id == id) {
+                    client.size = (width as usize, height as usize);
+                }
+                self.invalidate_screens();
+            }
+            // A terminal larger than the shared frame reports clicks outside it.
+            Input::Mouse(mouse) if usize::from(mouse.column) < self.size.0 && usize::from(mouse.row) < self.size.1 => self.mouse(mouse),
+            Input::FocusGained => self.set_focus(id, true),
+            Input::FocusLost => self.set_focus(id, false),
+            _ => {}
+        }
+    }
+
+    fn set_focus(&mut self, id: u64, focused: bool) {
+        if let Some(client) = self.clients.iter_mut().find(|client| client.id == id) {
+            client.focused = Some(focused);
+        }
+    }
+
+    /// /detach: lets go of the terminal that typed it; the session and its other terminals go on.
+    fn detach(&mut self) {
+        let Some(index) = self.clients.iter().position(|client| Some(client.id) == self.typing_client) else { return };
+        let client = self.clients.remove(index);
+        client.finish(&format!("Detached; the session keeps running. Return to it with: agent attach {}\n", self.session_id));
+        self.invalidate_screens();
+    }
+
+    /// One frame at the smallest attached size, sent to every client; a session without clients draws nothing.
+    fn draw(&mut self) {
+        let Some(width) = self.clients.iter().map(|client| client.size.0).min() else { return };
+        let height = self.clients.iter().map(|client| client.size.1).min().expect("a width means a client");
+        self.size = (width, height);
+        let (rows, cursor) = self.frame(width, height);
+        for client in &mut self.clients {
+            client.draw(rows.clone(), cursor);
+        }
+    }
+
+    fn invalidate_screens(&mut self) {
+        for client in &mut self.clients {
+            client.invalidate();
+        }
+    }
+
+    fn background_running(&self) -> bool {
+        self.terminals.lock().unwrap().running() > 0 || self.subagents.lock().unwrap().running() > 0 || self.workflows.lock().unwrap().iter().any(|run| run.is_running())
+    }
+
+    /// OSC 0 sets the terminal's window and tab title.
+    fn set_title(&mut self, title: &str) {
+        self.title = format!("\x1b]0;{}\x07", notify::printable(title));
+        for client in &mut self.clients {
+            client.queue(&self.title);
+        }
+    }
+
+    fn show_progress(&mut self, busy: bool) {
+        for client in &mut self.clients {
+            if let Some(sequence) = notify::progress(busy, |name| client.env(name)) {
+                client.queue(&sequence);
+            }
+        }
+    }
+
+    fn handle(&mut self, msg: Msg) {
+        match msg {
+            Msg::Attached(client) => self.add_client(client),
+            Msg::Detached(id) => {
+                self.clients.retain(|client| client.id != id);
+                self.invalidate_screens();
+            }
+            Msg::Input(id, input) => self.input(id, input),
             Msg::Agent(event) => self.agent_event(event),
             Msg::Done(result) => self.done(result),
             Msg::ModelSettled { model, failures } => {
@@ -1459,7 +1558,7 @@ impl App {
                 self.entries.truncate(self.header_len);
                 self.push_history(&messages);
                 let title = self.saved_title(&id).unwrap_or_else(|| id.clone());
-                set_terminal_title(&title);
+                self.set_title(&title);
                 self.system("session", format!("Resumed {title}"));
                 if let Some(notice) = notice {
                     self.system("session", notice);
@@ -1606,7 +1705,7 @@ impl App {
         }
     }
 
-    fn key(&mut self, key: KeyEvent, screen: &mut Screen) {
+    fn key(&mut self, key: KeyEvent) {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
@@ -1639,23 +1738,23 @@ impl App {
                 }
                 KeyCode::Tab => self.accept_slash(false),
                 KeyCode::Enter => self.accept_slash(true),
-                _ => self.edit(key, ctrl, alt, shift, screen),
+                _ => self.edit(key, ctrl, alt, shift),
             }
             return;
         }
-        self.edit(key, ctrl, alt, shift, screen);
+        self.edit(key, ctrl, alt, shift);
     }
 
-    fn edit(&mut self, key: KeyEvent, ctrl: bool, alt: bool, shift: bool, screen: &mut Screen) {
+    fn edit(&mut self, key: KeyEvent, ctrl: bool, alt: bool, shift: bool) {
         let before = self.editor.text();
-        self.edit_key(key, ctrl, alt, shift, screen);
+        self.edit_key(key, ctrl, alt, shift);
         if self.editor.text() != before {
             self.menu_index = 0;
             self.input_selection = Selection::default();
         }
     }
 
-    fn edit_key(&mut self, key: KeyEvent, ctrl: bool, alt: bool, shift: bool, screen: &mut Screen) {
+    fn edit_key(&mut self, key: KeyEvent, ctrl: bool, alt: bool, shift: bool) {
         match key.code {
             KeyCode::Enter if shift || (alt && self.working.is_none()) => self.editor.newline(),
             KeyCode::Char('j') if ctrl => self.editor.newline(),
@@ -1696,7 +1795,7 @@ impl App {
             KeyCode::Char('o') if ctrl => {
                 self.expanded = !self.expanded;
             }
-            KeyCode::Char('l') if ctrl => screen.invalidate(),
+            KeyCode::Char('l') if ctrl => self.invalidate_screens(),
             KeyCode::Char('r') if ctrl => self.open_history(),
             KeyCode::BackTab => self.cycle_thinking(),
             KeyCode::Char('p') if ctrl => self.cycle_model(),
@@ -2140,6 +2239,7 @@ impl App {
         let (name, args) = trimmed.strip_prefix('/').map_or(("", ""), |rest| rest.split_once(' ').map_or((rest, ""), |(name, args)| (name, args.trim())));
         match name {
             "quit" | "exit" => self.quit = true,
+            "detach" => self.detach(),
             "compact" => {
                 self.system("compact", "Compacting context...");
                 self.start(Command::Compact(Some(args.to_string()).filter(|focus| !focus.is_empty())));
@@ -2157,7 +2257,7 @@ impl App {
             "rename-title" if args.is_empty() => self.push(Item::Error("Usage: /rename-title <name>".into())),
             "rename-title" => {
                 let _ = self.commands.send(Command::Rename(args.to_string()));
-                set_terminal_title(args);
+                self.set_title(args);
                 self.system("session", format!("Renamed to {args}"));
             }
             "rename-title-ai" => _ = self.commands.send(Command::RenameTitle),
@@ -2563,7 +2663,7 @@ impl App {
                     KeyCode::Char('r') => self.mcp.reconnect(&view.name),
                     KeyCode::Char('l') if view.http => self.mcp.login(&view.name),
                     // An entry the panel cuts is approved on the second press, after the user has read the file.
-                    KeyCode::Char(' ') if view.approval.is_some() && !*confirm && terminal::size().map_or(true, |(width, _)| mcp_entry(&view.entry, width as usize).1) => *confirm = true,
+                    KeyCode::Char(' ') if view.approval.is_some() && !*confirm && mcp_entry(&view.entry, self.size.0).1 => *confirm = true,
                     // A server `mcp.json` turns off stays off; only the file can turn it on.
                     KeyCode::Char(' ') if view.enabled => {
                         *confirm = false;
@@ -4209,7 +4309,7 @@ impl App {
             Event::Steered(text) => self.push(Item::User(text)),
             // Only headless subagents emit it.
             Event::Outbox { .. } => {}
-            Event::Push(text) => self.notify(&text),
+            Event::Push(text) => self.notify("", &text),
             // The output tail went to the model; /tasks shows it in full.
             Event::FollowUp { source, text } => self.system(&source, text.split_once('\n').map_or(text.as_str(), |(head, _)| head)),
             Event::TurnEnd { usage, context_tokens } => {
@@ -4219,29 +4319,32 @@ impl App {
                 self.streamed_chars = 0;
                 self.read_session_usage();
             }
-            Event::Titled(title) => set_terminal_title(&title),
+            Event::Titled(title) => self.set_title(&title),
             Event::SessionStarted { id, path } => {
                 self.session_id = id;
                 self.session_path = path;
                 self.spent = Spent::default();
                 self.session_usage = Vec::new();
-                set_terminal_title(&unnamed_title(&self.cwd));
+                self.set_title(&unnamed_title(&self.cwd));
                 self.system("session", "Started a fresh conversation");
             }
             Event::Moved { id, path, cwd } => {
                 self.system("session", format!("Session moved from {} to {}", self.cwd.display(), cwd.display()));
-                report_cwd(&cwd);
+                let sequence = cwd_sequence(&cwd);
+                for client in &mut self.clients {
+                    client.queue(&sequence);
+                }
                 self.git = git_info(&cwd);
                 self.cwd = cwd;
                 self.session_id = id;
                 self.session_path = path;
             }
             Event::Permission { request, reply } => {
-                self.notify(&format!("{} {}", request.question, request.detail));
+                self.notify("Permission", &format!("{} {}", request.question, request.detail));
                 self.open_agent_panel(Panel::Permission { request, reply, index: 0, opened: Instant::now() });
             }
             Event::Ask { questions, reply } => {
-                self.notify(&questions.first().map_or(String::new(), |question| question.question.clone()));
+                self.notify("Waiting", &questions.first().map_or(String::new(), |question| question.question.clone()));
                 self.open_agent_panel(Panel::Ask(ask::AskPanel::new(questions, reply)));
             }
             Event::Reviewed { allowed, detail, reason } => {
@@ -4298,26 +4401,27 @@ impl App {
     }
 
     /// Desktop notification, sent only while the terminal is in the background; cmux decides that itself and also lists it in its sidebar.
-    fn notify(&self, body: &str) {
+    fn notify(&mut self, subtitle: &str, body: &str) {
         if !self.settings.notifications {
             return;
         }
         if let Some(cmux) = &self.cmux {
-            cmux.notify(&notify::printable(body));
+            cmux.notify(subtitle, &notify::printable(body));
             return;
         }
-        if self.focused == Some(true) {
-            return;
+        for client in self.clients.iter_mut().filter(|client| client.focused != Some(true)) {
+            let sequence = notify::sequence("agent", body, |name| client.env(name));
+            client.queue(&sequence);
         }
-        print!("{}", notify::sequence("agent", body, |name| std::env::var(name).ok()));
-        let _ = std::io::stdout().flush();
     }
 
     fn done(&mut self, result: Result<String, String>) {
         match &result {
-            Ok(answer) if answer.trim().is_empty() => self.notify("Done"),
-            Ok(answer) => self.notify(answer),
-            Err(error) => self.notify(&format!("Failed: {error}")),
+            // Esc aborted it, so the user is at the keyboard already; an aborted turn often still returns Ok.
+            _ if self.abort.load(Ordering::Relaxed) => {}
+            Ok(answer) if answer.trim().is_empty() => self.notify("Completed", "Done"),
+            Ok(answer) => self.notify("Completed", answer),
+            Err(error) => self.notify("Error", &format!("Failed: {error}")),
         }
         if std::mem::take(&mut self.retract) {
             match &result {
@@ -4836,7 +4940,7 @@ fn command_args<'a>(text: &'a str, name: &str) -> Option<&'a str> {
 }
 
 /// OSC 7 tells Ghostty the cwd, so new splits open in the worktree this session moved to.
-fn report_cwd(cwd: &Path) {
+fn cwd_sequence(cwd: &Path) -> String {
     // Control characters too: an ESC or BEL in a directory name would end the sequence early.
     let mut url = String::new();
     for c in cwd.display().to_string().chars() {
@@ -4846,8 +4950,7 @@ fn report_cwd(cwd: &Path) {
             url.push(c);
         }
     }
-    print!("\x1b]7;file://{url}\x1b\\");
-    let _ = std::io::stdout().flush();
+    format!("\x1b]7;file://{url}\x1b\\")
 }
 
 /// Ghostty drops a progress bar that sees no update for 15 s, so a long turn resends it.
@@ -4862,22 +4965,9 @@ fn progress_due(busy: bool, sent: Option<Instant>, now: Instant) -> Option<bool>
     }
 }
 
-fn show_progress(busy: bool) {
-    if let Some(sequence) = notify::progress(busy, |name| std::env::var(name).ok()) {
-        print!("{sequence}");
-        let _ = std::io::stdout().flush();
-    }
-}
-
 fn unnamed_title(cwd: &Path) -> String {
     let project = cwd.file_name().map(|name| name.to_string_lossy()).unwrap_or_default();
     format!("agent | {project}")
-}
-
-/// OSC 0 sets the terminal's window and tab title.
-fn set_terminal_title(title: &str) {
-    print!("\x1b]0;{}\x07", notify::printable(title));
-    let _ = std::io::stdout().flush();
 }
 
 const TODO_ROWS: usize = 5;
