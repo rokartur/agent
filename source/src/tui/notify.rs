@@ -1,11 +1,11 @@
 /// The escape sequence that shows a desktop notification in the terminal we run in.
-/// `env` reads environment variables; the ones checked survive tmux, which renames TERM_PROGRAM.
+/// `env` reads environment variables. tmux renames TERM_PROGRAM, so Tuni, and iTerm2 without LC_TERMINAL, get the bell there.
 pub fn sequence(title: &str, body: &str, env: impl Fn(&str) -> Option<String>) -> String {
     let (title, body) = (printable(title), printable(body));
     let is = |name: &str, value: &str| env(name).is_some_and(|found| found == value);
     let raw = if env("KITTY_WINDOW_ID").is_some() || is("TERM", "xterm-kitty") {
         format!("\x1b]99;;{title}: {body}\x1b\\")
-    } else if env("GHOSTTY_RESOURCES_DIR").is_some() || env("WEZTERM_EXECUTABLE").is_some() || env("VTE_VERSION").is_some() || is("TERM", "foot") {
+    } else if env("GHOSTTY_RESOURCES_DIR").is_some() || env("WEZTERM_EXECUTABLE").is_some() || env("VTE_VERSION").is_some() || is("TERM", "foot") || is("TERM_PROGRAM", "tuni") {
         format!("\x1b]777;notify;{title};{body}\x07")
     } else if is("LC_TERMINAL", "iTerm2") || is("TERM_PROGRAM", "iTerm.app") {
         format!("\x1b]9;{title}: {body}\x07")
@@ -22,7 +22,7 @@ pub fn progress(busy: bool, env: impl Fn(&str) -> Option<String>) -> Option<Stri
     let is = |name: &str, value: &str| env(name).is_some_and(|found| found == value);
     let iterm_version = env("LC_TERMINAL_VERSION").or_else(|| env("TERM_PROGRAM_VERSION")).unwrap_or_default();
     let iterm_supports = (is("LC_TERMINAL", "iTerm2") || is("TERM_PROGRAM", "iTerm.app")) && version(&iterm_version) >= vec![3, 6, 6];
-    let supported = env("GHOSTTY_RESOURCES_DIR").is_some() || env("WT_SESSION").is_some() || env("ConEmuANSI").is_some() || iterm_supports;
+    let supported = env("GHOSTTY_RESOURCES_DIR").is_some() || env("WT_SESSION").is_some() || env("ConEmuANSI").is_some() || is("TERM_PROGRAM", "tuni") || iterm_supports;
     if !supported {
         return None;
     }
@@ -62,6 +62,7 @@ mod tests {
         assert_eq!(sequence("agent", "Done", env(&[("KITTY_WINDOW_ID", "1")])), "\x1b]99;;agent: Done\x1b\\");
         assert_eq!(sequence("agent", "Done", env(&[("TERM_PROGRAM", "iTerm.app")])), "\x1b]9;agent: Done\x07");
         assert_eq!(sequence("agent", "Done", env(&[("TERM_PROGRAM", "Apple_Terminal")])), "\x07");
+        assert_eq!(sequence("agent", "Done", env(&[("TERM_PROGRAM", "tuni")])), "\x1b]777;notify;agent;Done\x07");
     }
 
     #[test]
@@ -76,6 +77,7 @@ mod tests {
         assert_eq!(progress(false, env(&[("GHOSTTY_RESOURCES_DIR", "/g")])).as_deref(), Some("\x1b]9;4;0\x07"));
         assert_eq!(progress(true, env(&[("LC_TERMINAL", "iTerm2"), ("LC_TERMINAL_VERSION", "3.6.6")])).as_deref(), Some("\x1b]9;4;3\x07"));
         assert_eq!(progress(true, env(&[("LC_TERMINAL", "iTerm2"), ("LC_TERMINAL_VERSION", "3.5.14")])), None);
+        assert_eq!(progress(true, env(&[("TERM_PROGRAM", "tuni")])).as_deref(), Some("\x1b]9;4;3\x07"));
         assert_eq!(progress(true, env(&[("WEZTERM_EXECUTABLE", "/w")])), None);
         assert_eq!(progress(true, env(&[("GHOSTTY_RESOURCES_DIR", "/g"), ("TMUX", "/t")])).as_deref(), Some("\x1bPtmux;\x1b\x1b]9;4;3\x07\x1b\\"));
     }
