@@ -390,6 +390,10 @@ fn run(options: Options) -> Result<(), String> {
             let (home, ponytail, caveman) = (home.clone(), settings.ponytail.clone(), settings.caveman.clone());
             move || modes::fetch(&home, &ponytail, &caveman, true)
         });
+        std::thread::spawn({
+            let home = home.clone();
+            move || snapshots::prune(&home)
+        });
     }
     if let Some(max_age) = settings.prune_sessions_after() {
         Session::prune(&sessions_dir, max_age);
