@@ -45,6 +45,8 @@ Known names fill in the URL and the key variable: `ollama`, `lmstudio`, `groq`, 
 
 **You choose how much it does alone.** Ask before every change, let a reviewer model approve, or `--yolo`.
 
+**Sessions outlive the terminal.** Close it mid-turn and the turn finishes anyway. `agent attach` picks the session up again in any terminal, and two terminals on one session see the same screen.
+
 ## Compared with jcode and pi
 
 Same model (Claude Opus 5.5, medium thinking), same prompt, two coding tasks, 6 runs each, averages. Every run of every harness passed all hidden tests. A: fix a CSV parser and write a CLI (39 tests). B: port semver range matching with no dependencies (2550 cases).

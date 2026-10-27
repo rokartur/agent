@@ -4,13 +4,19 @@
 
 | Mode | Flag | Output | Tools needing the user |
 |---|---|---|---|
-| interactive | none | TUI, `tui::run` | ask in the terminal |
+| interactive | none | TUI in a session server, `tui::run` | ask in any attached terminal |
 | print | `-p` | the answer on stdout | fail: `Agent.interactive` is false |
 | json | `--json` | the answer, then one JSON summary | fail |
 | headless | `--headless` | JSONL: `tool`, `session`, `usage`, `done`, `error` | fail |
 | acp | `agent acp` | JSON-RPC 2.0 lines, `acp.rs` | forwarded to the editor |
 
-`-c` and `-r` resume in every mode; `--no-session` skips the journal; `--tools` narrows the tool list; `--account` pins an account; `--trust` trusts the project for the run.
+`-c` and `-r` resume in every mode, and in the interactive one attach to the session when its server still runs; `--no-session` skips the journal; `--tools` narrows the tool list; `--account` pins an account; `--trust` trusts the project for the run.
+
+## Session servers
+
+An interactive `agent` starts `agent serve` with the same flags (`serve.rs`) and attaches to it. The server runs the session and the whole TUI, and listens on `~/.agents/serve/<pid>.sock`, mode `0600` in a private directory. Each terminal sends a hello with its size and terminal variables, then one JSON line per key, mouse, paste, resize or focus event; the server answers with `{"output": ...}` frames and, at the end, `{"exit": ...}` with the text the terminal prints after leaving the screen (`tui/wire.rs`, `tui/server.rs`, `tui/client.rs`). Every attached terminal gets the same frame, sized to the smallest of them, and shares one editor; a permission prompt answered in one closes in all.
+
+Closing a terminal detaches it, and so does `/detach`; quitting (`/quit`, Ctrl+C twice, Ctrl+D) ends the session for every terminal. `agent attach [id]` lists the running sessions from their cross-session cards and attaches to one; with an id no server holds it opens the saved session like `agent -r <id>`. A server with no terminal, no turn and no background work exits after `unload_idle_sessions_after_minutes` (default 30, 0 never). Its stdout and stderr go to `~/.agents/serve/<pid>.log`, removed on a clean exit and kept for a week after a crash.
 
 ## Subagents
 
@@ -24,10 +30,10 @@ A background run's answer queues as a `FollowUp` for the next turn; `WaitForAgen
 
 ## Cross-session messaging
 
-Each interactive session listens on `~/.agents/peers/<pid>.sock` and describes itself in `<pid>.json` (`agent/peers.rs`). `ListAgents` reads the json files; `SendMessage` to a session writes one JSON line to its socket, which arrives as a message or, with `notify_when_idle`, as a notice when that session goes idle.
+Each session server listens on `~/.agents/peers/<pid>.sock` and describes itself in `<pid>.json` (`agent/peers.rs`). `ListAgents` reads the json files; `SendMessage` to a session writes one JSON line to its socket, which arrives as a message or, with `notify_when_idle`, as a notice when that session goes idle.
 
 ## TUI
 
-`tui/mod.rs`: `App` holds the transcript, the editor, the open `Panel` and the settings. The event loop takes `Msg` from one channel (input events, agent events, worker results, plugin and MCP changes) and sends `Command`s to the worker. Slash commands are the `COMMANDS` table: each is `MidTurn::Runs` (works while the agent works) or `MidTurn::Waits` (queued until the turn ends). `/hotkeys` prints the key table from the same source the handler uses.
+`tui/mod.rs`: `App` holds the transcript, the editor, the open `Panel` and the settings. The event loop takes `Msg` from one channel (attached terminals and their input events, agent events, worker results, plugin and MCP changes) and sends `Command`s to the worker. Slash commands are the `COMMANDS` table: each is `MidTurn::Runs` (works while the agent works) or `MidTurn::Waits` (queued until the turn ends). `/hotkeys` prints the key table from the same source the handler uses.
 
 Trying a change without touching your own setup: `cargo build && tui run t "env HOME=/tmp/agent-home $PWD/target/debug/agent"`.

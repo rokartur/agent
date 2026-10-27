@@ -30,7 +30,7 @@ pub struct Peer {
     pub title: String,
     pub cwd: String,
     pub busy: bool,
-    socket: PathBuf,
+    pub socket: PathBuf,
 }
 
 impl Peer {

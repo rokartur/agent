@@ -57,6 +57,7 @@
     "copy_on_select": { "type": "boolean", "default": true },
     "update_channel": { "enum": ["latest", "pre-release", "off"], "default": "latest" },
     "prune_sessions": { "enum": ["never", "24h", "3d", "7d", "14d", "30d"], "default": "never", "description": "Delete saved sessions untouched this long, at start." },
+    "unload_idle_sessions_after_minutes": { "type": "integer", "minimum": 0, "default": 30, "description": "Minutes a session with no terminal attached and no running turn or background work stays in memory; then its session server exits and `agent attach` or `agent -r` loads it from disk again. 0 keeps it until you quit it." },
     "mid_turn": { "enum": ["steering", "queued"], "default": "steering", "description": "A message sent while the agent works: steering reaches the model at its next tool call, queued waits for the turn to end and runs as the next prompt." },
     "on_start": { "type": "array", "items": { "type": "string" }, "default": [], "description": "Shell commands the TUI runs in the background at start." },
     "custom_providers": {

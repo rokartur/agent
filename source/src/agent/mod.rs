@@ -1792,6 +1792,8 @@ impl Agent {
 
     /// Tells plugins the session started; needs the settled model for the context's provider.
     pub fn announce_session(&self) {
+        // `agent attach` and `agent -r` find a running session by the id on its card.
+        self.describe_to_peers(false);
         self.plugins.event(json!({"type": "session_start", "context": self.plugin_context()}));
     }
 
