@@ -4602,6 +4602,10 @@ impl App {
             Plan::Drafting => left.push(span(" plan", WARN)),
             Plan::Ready(_) => left.push(span(" plan ready", WARN)),
         }
+        let profiles: Vec<&str> = self.settings.active_profiles.iter().filter(|profile| self.settings.skill_profiles.contains_key(*profile)).map(String::as_str).collect();
+        if !profiles.is_empty() {
+            left.push(span(format!(" profile {}", profiles.join(",")), MUTED));
+        }
         let percent = (self.context_tokens * 100).checked_div(self.context_window()).unwrap_or(0);
         let mut right = Line::default();
         for status in self.plugins.statuses() {
