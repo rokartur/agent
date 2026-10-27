@@ -1038,7 +1038,10 @@ fn settle_model(agent: &mut Agent, settings: &mut Settings, failures: Vec<String
 fn spawn_update(home: PathBuf, channel: String, events: Sender<Msg>) {
     std::thread::spawn(move || {
         let notice = match crate::update::install_latest(&home, &channel) {
-            Ok(Some(version)) => format!("Updated to v{version}. Restart agent to use it."),
+            Ok(Some(version)) => match crate::service::restart_if_installed(&home) {
+                Ok(_) => format!("Updated to v{version}. Restart agent to use it."),
+                Err(error) => format!("Updated to v{version}. Restart agent to use it. The listener still runs the old release: {error}"),
+            },
             Ok(None) => return,
             Err(error) => format!("Update failed: {error}"),
         };

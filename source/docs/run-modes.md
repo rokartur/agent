@@ -24,6 +24,8 @@ Closing a terminal detaches it, and so does `/detach`; quitting (`/quit`, Ctrl+C
 
 `--on`, `default_environment`, `/env` and `agent attach` are the client side (`serve.rs`). The hello names the terminal's environment and its `environments`; `/env <name>` answers `{"switch": name}`, and the client starts a new session there. A session that never got a message and has no other terminal ends at that point. `agent attach` asks every environment in parallel and saves each answer to `~/.agents/environments.json`, so an environment that does not answer still lists its last sessions, greyed out and not selectable.
 
+`agent service` (`service.rs`) writes a launchd agent (macOS) or a systemd user unit with lingering (Linux) that runs `agent serve --tailnet` with the installing shell's `PATH` and starts it again when it exits. Session servers run in their own process group (`process::command`), and the unit sets `KillMode=process`, so a restart ends only the listener. An update calls `service::restart_if_installed`, so the listener runs the release its clients do.
+
 ## Subagents
 
 `Agent` and `Workflow` run child processes of the same binary with `--parent <id> --headless`, the task as JSON string lines on stdin (`agent/subagent.rs`). A child has no `Agent`, `Task*`, web, `AskUserQuestion`, plan or worktree tools; `--explore` leaves only read and `rg`, `--web` keeps the web tools. The swarm prompt (`.agents/swarm-prompt.md` up to the git root, then `~/.agents/swarm-prompt.md`, then the built-in) goes ahead of every task. A child's session file carries a `parent` entry, so `/resume` hides it and `/tasks` opens it.

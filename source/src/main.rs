@@ -10,6 +10,7 @@ mod mcp;
 mod plugins;
 mod process;
 mod serve;
+mod service;
 mod settings;
 mod tailnet;
 mod tools;
@@ -40,6 +41,7 @@ Usage:
 Commands:
   attach [id]                 Return to a running session, or open a saved one; lists the running ones without an id
   serve --tailnet             Accept sessions from your other computers over Tailscale; needs "serve_tailnet": true
+  service install             Run serve --tailnet now and after every login; status, restart and uninstall manage it
   plugin install <name|path>  Copy a bundled plugin or a plugin directory into ~/.agents/plugins
   plugin remove <name>        Remove an installed plugin
   plugin list                 List bundled and installed plugins
@@ -159,8 +161,14 @@ fn update_command(args: &[String]) -> Result<(), String> {
         return Err("Only release builds update themselves. Rebuild from source instead.".into());
     }
     // `off` only stops the automatic check, so an explicit update with it follows stable releases.
-    match update::install_now(&settings::load(&home()?)?.update_channel)? {
-        Some(version) => println!("Updated to v{version}."),
+    let home = home()?;
+    match update::install_now(&settings::load(&home)?.update_channel)? {
+        Some(version) => {
+            println!("Updated to v{version}.");
+            if service::restart_if_installed(&home)? {
+                println!("Restarted the listener, so it runs v{version} too.");
+            }
+        }
         None => println!("agent v{} is up to date.", env!("CARGO_PKG_VERSION")),
     }
     Ok(())
@@ -200,6 +208,7 @@ fn main() {
         Some("doctor") => Some(doctor_command(&args[1..])),
         Some("update") => Some(update_command(&args[1..])),
         Some("attach") => Some(serve::attach_command(&args[1..])),
+        Some("service") => Some(service::command(&args[1..])),
         Some("serve") if args.get(1).is_some_and(|arg| arg == "--tailnet") => Some(tailnet::serve_command(&args[2..])),
         _ => None,
     };
