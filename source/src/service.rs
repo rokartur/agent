@@ -8,6 +8,8 @@ use crate::process;
 
 const LABEL: &str = "com.rokartur.agent.tailnet";
 const UNIT: &str = "agent-tailnet.service";
+const LOG: &str = ".agents/tailnet.log";
+const LOG_LIMIT: u64 = 1 << 20;
 /// launchd sends SIGTERM and SIGKILL after its 20 s ExitTimeOut.
 const UNLOAD_TIMEOUT: Duration = Duration::from_secs(25);
 const USAGE: &str = "Usage: agent service install|status|restart|uninstall.";
@@ -52,7 +54,16 @@ fn file(home: &Path) -> PathBuf {
 }
 
 fn log(home: &Path) -> String {
-    if launchd() { home.join(".agents/tailnet.log").display().to_string() } else { format!("journalctl --user -u {UNIT}") }
+    if launchd() { home.join(LOG).display().to_string() } else { format!("journalctl --user -u {UNIT}") }
+}
+
+/// launchd never rotates the log, and while Tailscale is down every restart adds a line, one each 10 s.
+/// launchd opens it with O_APPEND, so emptying it under the open descriptor is safe.
+pub fn trim_log(home: &Path) {
+    let log = home.join(LOG);
+    if std::fs::metadata(&log).is_ok_and(|meta| meta.len() > LOG_LIMIT) {
+        _ = std::fs::File::create(&log);
+    }
 }
 
 /// Writes the startup file anew and reloads it, so running it again also repairs a moved binary or a changed PATH.
@@ -248,5 +259,23 @@ mod tests {
         assert_eq!(pid("gui/501/com.rokartur.agent.tailnet = {\n\tstate = not running\n\tlast exit code = 1\n}"), None);
         assert_eq!(pid("MainPID=4242\n"), Some(4242));
         assert_eq!(pid("MainPID=0\n"), None);
+    }
+
+    #[test]
+    fn a_log_past_its_limit_is_emptied_under_the_appending_writer() {
+        use std::io::Write;
+        let home = std::env::temp_dir().join(format!("agent-service-log-{}", std::process::id()));
+        std::fs::create_dir_all(home.join(".agents")).unwrap();
+        let log = home.join(LOG);
+        let mut writer = std::fs::OpenOptions::new().create(true).append(true).open(&log).unwrap();
+        writer.write_all(&vec![b'x'; LOG_LIMIT as usize]).unwrap();
+        trim_log(&home);
+        assert_eq!(std::fs::metadata(&log).unwrap().len(), LOG_LIMIT, "a log at its limit stays");
+        writer.write_all(b"x").unwrap();
+        trim_log(&home);
+        writer.write_all(b"after\n").unwrap();
+        let text = std::fs::read_to_string(&log).unwrap();
+        std::fs::remove_dir_all(&home).unwrap();
+        assert_eq!(text, "after\n");
     }
 }
