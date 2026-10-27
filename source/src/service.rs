@@ -12,7 +12,8 @@ const LOG: &str = ".agents/tailnet.log";
 const LOG_LIMIT: u64 = 1 << 20;
 /// launchd sends SIGTERM and SIGKILL after its 20 s ExitTimeOut.
 const UNLOAD_TIMEOUT: Duration = Duration::from_secs(25);
-const USAGE: &str = "Usage: agent service install|status|restart|uninstall.";
+const USAGE: &str = "Usage: agent service install [--on <host>]|status|restart|uninstall.";
+const INSTALLER: &str = "https://agent.rokartur.com/install.sh";
 
 fn launchd() -> bool {
     cfg!(target_os = "macos")
@@ -22,6 +23,7 @@ pub fn command(args: &[String]) -> Result<(), String> {
     let home = crate::home()?;
     match args {
         [action] if action == "install" => install(&home),
+        [action, on, host] if action == "install" && on == "--on" && !host.starts_with('-') => install_on(host),
         [action] if action == "status" => status(&home),
         [action] if action == "restart" => {
             if !file(&home).exists() {
@@ -68,8 +70,12 @@ pub fn trim_log(home: &Path) {
 
 /// Writes the startup file anew and reloads it, so running it again also repairs a moved binary or a changed PATH.
 fn install(home: &Path) -> Result<(), String> {
-    if !crate::settings::load(home)?.serve_tailnet {
-        return Err("Turn the listener on first: set \"serve_tailnet\": true in ~/.agents/settings.json.".into());
+    let settings = crate::settings::load(home)?;
+    if !settings.serve_tailnet {
+        // Installing the listener is the opt-in to a network port.
+        let after = crate::settings::Settings { serve_tailnet: true, ..settings.clone() };
+        crate::settings::save_change(home, &settings, &after)?;
+        println!("Turned on \"serve_tailnet\" in ~/.agents/settings.json.");
     }
     let exe = std::env::current_exe().map_err(|e| format!("Cannot find the agent binary: {e}"))?;
     let exe = exe.to_str().ok_or("The agent binary's path is not UTF-8.")?;
@@ -94,6 +100,28 @@ fn install(home: &Path) -> Result<(), String> {
     }
     println!("Installed {}. The listener runs now and after every login; its log: {}.", file.display(), log(home));
     Ok(())
+}
+
+/// `agent service install --on <host>`: over one `ssh <host>`, installs agent there when it is missing, then runs
+/// `agent service install` there. The host's output shows here, and its exit status is this command's.
+fn install_on(host: &str) -> Result<(), String> {
+    let status = process::command("ssh").args([host, &remote_install()]).stdin(std::process::Stdio::inherit()).status().map_err(|e| format!("Cannot run ssh: {e}"))?;
+    match status.code() {
+        Some(0) => Ok(()),
+        // ssh exits 255 for its own failures, which it has printed.
+        Some(255) => Err(format!("ssh {host} failed. agent service install --on needs `ssh {host}` to work from this computer.")),
+        _ => Err(format!("agent service install failed on {host}: {status}.")),
+    }
+}
+
+/// The script `ssh` runs on the host. Through `sh -c`, so a fish or other login shell runs it the same way; the final
+/// install runs in the login shell again, since the PATH it records is the one sessions there get. A release older
+/// than `agent service` would take `service install` as a message and run an agent turn, so it is refused first.
+fn remote_install() -> String {
+    let script = format!(
+        r#"bin=$(command -v agent || echo "$HOME/.local/bin/agent"); if [ ! -x "$bin" ]; then echo "Installing agent..."; curl -fsSL {INSTALLER} | sh || exit 1; bin="$HOME/.local/bin/agent"; fi; if ! "$bin" --help | grep -q "service install"; then echo "$("$bin" --version) here has no agent service; run agent update here, then try again." >&2; exit 1; fi; exec "${{SHELL:-/bin/sh}}" -lc "'$bin' service install""#
+    );
+    format!("sh -c '{}'", script.replace('\'', r"'\''"))
 }
 
 fn status(home: &Path) -> Result<(), String> {
@@ -277,5 +305,26 @@ mod tests {
         let text = std::fs::read_to_string(&log).unwrap();
         std::fs::remove_dir_all(&home).unwrap();
         assert_eq!(text, "after\n");
+    }
+
+    #[test]
+    fn the_remote_install_runs_the_hosts_agent_in_its_login_shell_and_refuses_an_old_release() {
+        let home = std::env::temp_dir().join(format!("agent-service-remote-{}", std::process::id()));
+        let bin = home.join(".local/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        // The command line ssh hands the host's login shell, run here by sh with no agent on PATH.
+        let run_with = |help: &str| {
+            std::fs::write(bin.join("agent"), format!("#!/bin/sh\ncase \"$1\" in --help) echo '{help}';; --version) echo 'agent 0.0.1';; *) echo \"ran: $*\";; esac\n")).unwrap();
+            std::fs::set_permissions(bin.join("agent"), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+            process::command("/bin/sh").args(["-c", &remote_install()]).env("HOME", &home).env("PATH", "/usr/bin:/bin").env("SHELL", "/bin/sh").output().unwrap()
+        };
+        let current = run_with("  service install   Run serve --tailnet");
+        let old = run_with("  attach [id]");
+        std::fs::remove_dir_all(&home).unwrap();
+        assert_eq!(String::from_utf8_lossy(&current.stdout), "ran: service install\n", "{}", String::from_utf8_lossy(&current.stderr));
+        assert!(current.status.success());
+        assert_eq!(String::from_utf8_lossy(&old.stdout), "");
+        assert_eq!(String::from_utf8_lossy(&old.stderr), "agent 0.0.1 here has no agent service; run agent update here, then try again.\n");
+        assert!(!old.status.success());
     }
 }

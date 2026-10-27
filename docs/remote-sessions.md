@@ -7,19 +7,15 @@ The examples call the host `studio`. Use its Tailscale name, as `tailscale statu
 ## On the host
 
 1. Install agent and log in to your providers there. A remote session uses the host's accounts, not the ones on your laptop.
-2. In the host's `~/.agents/settings.json`, turn on the listener:
-
-   ```json
-   { "serve_tailnet": true }
-   ```
-
-3. Start the listener, now and after every login:
+2. Start the listener, now and after every login:
 
    ```sh
    agent service install
    ```
 
-   It listens only on the host's Tailscale addresses, never on `0.0.0.0`, on port 24368 (`tailnet_port` changes it). It accepts a device only when `tailscale whois` reports your own login for it. Tagged devices and devices of other users of a shared tailnet are refused. A computer without `"serve_tailnet": true` opens no network port.
+   This turns on `"serve_tailnet": true` in the host's `~/.agents/settings.json`. The listener listens only on the host's Tailscale addresses, never on `0.0.0.0`, on port 24368 (`tailnet_port` changes it). It accepts a device only when `tailscale whois` reports your own login for it. Tagged devices and devices of other users of a shared tailnet are refused. A computer without `"serve_tailnet": true` opens no network port.
+
+   From the computer you type on, `agent service install --on <host>` does steps 1 and 2 over one `ssh <host>`: it installs agent there when it is not found, then runs `agent service install` in the host's login shell. `<host>` is any name `ssh` accepts, such as an alias from `~/.ssh/config`; with Tailscale SSH no keys are needed. Log in to your providers on the host afterwards.
 
 On macOS this loads a launchd agent, `~/Library/LaunchAgents/com.rokartur.agent.tailnet.plist`, which logs to `~/.agents/tailnet.log`; the listener empties that log when it starts and finds it over 1 MB. It starts when you log in, so a Mac without a screen needs automatic login (System Settings > Users & Groups). Also turn off VPN On Demand in the Tailscale app's settings there: with it on, Tailscale can stay "Not Connected" after a restart and its menu cannot turn it on. On Linux it enables a systemd user unit, `~/.config/systemd/user/agent-tailnet.service`, and turns on lingering, so it starts at boot without a login; its log is in `journalctl --user -u agent-tailnet.service`. Either way it starts the listener again when it exits, for example while Tailscale is not up yet.
 
