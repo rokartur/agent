@@ -21,6 +21,8 @@ use crate::settings::Settings;
 use crate::tui::{PROTOCOL, SILENCE};
 
 pub const LOCAL: &str = "local";
+/// `--on auto`: the least loaded environment that has the directory, see `place`.
+pub const AUTO: &str = "auto";
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Reached through the Mac app when its CLI is not on PATH, as under launchd.
 const MACOS_APP_CLI: &str = "/Applications/Tailscale.app/Contents/MacOS/Tailscale";
@@ -72,7 +74,7 @@ fn discovered(status: &Value) -> Vec<String> {
 }
 
 pub fn check(settings: &Settings, name: &str) -> Result<(), String> {
-    if name == LOCAL {
+    if name == LOCAL || name == AUTO {
         return Ok(());
     }
     let names = environments(settings);
@@ -94,6 +96,46 @@ pub fn message(settings: &Settings, environment: &str, to: &str, from: &str, fro
     let (_, _, reply) = request(settings, environment, body, MESSAGE_REPLY_TIMEOUT)?;
     let sent = reply["sent"].as_str().ok_or_else(|| format!("{environment} sent no answer to the message."))?;
     Ok(format!("{sent} (on {environment})"))
+}
+
+/// Where `--on auto` starts a session in `cwd`, and why: of `local` and the environments that answer and have `cwd`,
+/// the one with the lowest load per CPU. All are asked at once, so one that does not answer costs at most
+/// `LIST_TIMEOUT`.
+pub fn place(settings: &Settings, cwd: &Path) -> (String, String) {
+    let remote = &environments(settings)[1..];
+    let mut loads = vec![(LOCAL.to_string(), load())];
+    std::thread::scope(|scope| {
+        let asked: Vec<_> = remote.iter().map(|environment| (environment, scope.spawn(move || request(settings, environment, json!({"list": true, "cwd": cwd}), LIST_TIMEOUT)))).collect();
+        for (environment, answer) in asked {
+            let Ok((_, _, reply)) = answer.join().expect("the load thread") else { continue };
+            // A listener older than `--on auto` sends neither, and is left out.
+            if let Some(load) = reply["load"].as_f64().filter(|_| reply["has_cwd"] == true) {
+                loads.push((environment.clone(), load));
+            }
+        }
+    });
+    let (chosen, _) = least_loaded(&loads);
+    let shown: Vec<String> = loads.iter().map(|(environment, load)| format!("{environment} {load:.2}")).collect();
+    (chosen.clone(), format!("Auto placement started this session on {chosen}, the least loaded computer with {}; load per CPU: {}.", cwd.display(), shown.join(", ")))
+}
+
+/// The first of `loads` with the lowest load, so `local`, listed first, wins a tie.
+fn least_loaded(loads: &[(String, f64)]) -> &(String, f64) {
+    let mut least = &loads[0];
+    for candidate in &loads[1..] {
+        if candidate.1 < least.1 {
+            least = candidate;
+        }
+    }
+    least
+}
+
+/// This computer's 1-minute load average per CPU.
+fn load() -> f64 {
+    let mut averages = [0.0];
+    // SAFETY: getloadavg writes at most the one sample asked for into `averages`.
+    unsafe { libc::getloadavg(averages.as_mut_ptr(), 1) };
+    averages[0] / std::thread::available_parallelism().map_or(1, usize::from) as f64
 }
 
 pub fn attach(settings: &Settings, environment: &str, session: &str) -> Result<Stream, String> {
@@ -310,8 +352,7 @@ fn handle(stream: TcpStream, home: &Path, device: &str) {
     let _ = stream.set_read_timeout(None);
     let request = serde_json::from_str(&line).unwrap_or(Value::Null);
     match answer(home, device, &request) {
-        Ok(Answer::Sessions(sessions)) => reply(&stream, json!({"sessions": sessions})),
-        Ok(Answer::Sent(sent)) => reply(&stream, json!({"ok": true, "sent": sent})),
+        Ok(Answer::Reply(answer)) => reply(&stream, answer),
         Ok(Answer::Session(socket)) => {
             reply(&stream, json!({"ok": true}));
             relay(reader, stream, socket);
@@ -321,8 +362,7 @@ fn handle(stream: TcpStream, home: &Path, device: &str) {
 }
 
 enum Answer {
-    Sessions(Vec<Value>),
-    Sent(String),
+    Reply(Value),
     Session(UnixStream),
 }
 
@@ -331,7 +371,12 @@ fn answer(home: &Path, device: &str, request: &Value) -> Result<Answer, String> 
         return Err(format!("This computer runs agent v{VERSION}, which cannot talk to agent v{}.", request["version"].as_str().unwrap_or("unknown")));
     }
     if request["list"] == true {
-        return Ok(Answer::Sessions(serve::live(home).into_iter().map(|peer| json!({"session": peer.session, "title": peer.title, "cwd": peer.cwd, "busy": peer.busy})).collect()));
+        let sessions: Vec<Value> = serve::live(home).into_iter().map(|peer| json!({"session": peer.session, "title": peer.title, "cwd": peer.cwd, "busy": peer.busy})).collect();
+        let mut listed = json!({"sessions": sessions, "load": load()});
+        if let Some(cwd) = request["cwd"].as_str() {
+            listed["has_cwd"] = json!(Path::new(cwd).is_absolute() && Path::new(cwd).is_dir());
+        }
+        return Ok(Answer::Reply(listed));
     }
     if let Some(prefix) = request["attach"].as_str() {
         let peer = serve::find(home, prefix)?.ok_or_else(|| format!("No session {prefix} runs here."))?;
@@ -346,7 +391,7 @@ fn answer(home: &Path, device: &str, request: &Value) -> Result<Answer, String> 
         return start_here(home, &request["start"]).map(Answer::Session);
     }
     if request["message"].is_object() {
-        return deliver_here(home, device, &request["message"]).map(Answer::Sent);
+        return deliver_here(home, device, &request["message"]).map(|sent| Answer::Reply(json!({"ok": true, "sent": sent})));
     }
     Err("This computer's agent does not know that request.".into())
 }
@@ -476,6 +521,29 @@ mod tests {
     }
 
     #[test]
+    fn auto_picks_the_least_loaded_computer_and_local_on_a_tie() {
+        let loads = |pairs: &[(&str, f64)]| pairs.iter().map(|(name, load)| (name.to_string(), *load)).collect::<Vec<_>>();
+        assert_eq!(least_loaded(&loads(&[("local", 0.9), ("studio", 0.2), ("box", 0.5)])).0, "studio");
+        assert_eq!(least_loaded(&loads(&[("local", 0.3), ("studio", 0.3)])).0, "local");
+        assert_eq!(least_loaded(&loads(&[("local", 0.0)])).0, "local");
+    }
+
+    #[test]
+    fn a_listing_says_the_load_and_whether_the_asked_directory_is_here() {
+        let home = std::env::temp_dir().join(format!("agent-tailnet-load-{}", std::process::id()));
+        let list = |cwd: Value| match answer(&home, "laptop", &json!({"protocol": PROTOCOL, "list": true, "cwd": cwd})) {
+            Ok(Answer::Reply(reply)) => reply,
+            _ => panic!("no listing"),
+        };
+        let here = list(json!(std::env::temp_dir()));
+        assert!(here["load"].as_f64().is_some_and(|load| load >= 0.0), "{here}");
+        assert_eq!(here["has_cwd"], true);
+        assert_eq!(list(json!("/no/such/agent/dir"))["has_cwd"], false);
+        assert_eq!(list(json!("relative"))["has_cwd"], false);
+        assert!(list(Value::Null).get("has_cwd").is_none());
+    }
+
+    #[test]
     fn a_message_from_another_computer_reaches_a_session_here_named_by_that_computer() {
         let home = std::env::temp_dir().join(format!("agent-tailnet-message-{}", std::process::id()));
         let follow_ups = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -486,8 +554,8 @@ mod tests {
         std::fs::rename(inbox.socket(), dir.join(format!("{parent}.sock"))).unwrap();
         std::fs::write(dir.join(format!("{parent}.json")), json!({"pid": parent, "session": "abc123", "title": "api", "cwd": "/repo", "busy": false}).to_string()).unwrap();
         let ask = |message: Value| answer(&home, "laptop", &json!({"protocol": PROTOCOL, "message": message}));
-        let Ok(Answer::Sent(sent)) = ask(json!({"to": "abc", "from": "def456", "from_cwd": "/src", "text": "hi"})) else { panic!("the message was not sent") };
-        assert_eq!(sent, "Sent to session abc123 in /repo.");
+        let Ok(Answer::Reply(sent)) = ask(json!({"to": "abc", "from": "def456", "from_cwd": "/src", "text": "hi"})) else { panic!("the message was not sent") };
+        assert_eq!(sent["sent"], "Sent to session abc123 in /repo.");
         let text = follow_ups.lock().unwrap()[0].text.clone();
         assert!(text.starts_with("Message from another agent session laptop:def456 in /src, not from the user.") && text.ends_with("hi"), "{text}");
         assert_eq!(ask(json!({"to": "zzz", "text": "hi"})).err(), Some("No session zzz runs here.".into()));

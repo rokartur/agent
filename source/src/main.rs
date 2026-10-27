@@ -57,7 +57,7 @@ Flags:
   --headless                  Run the message, print JSONL events (tool, session, usage, done, error)
   -c, --continue              Continue the latest session in this directory
   -r, --resume [id]           Open a session by id or id prefix, or pick one from the list
-  --on <environment>          Run the session on that computer from "environments", or local
+  --on <environment>          Run the session on one of your computers, local, or auto for the least loaded one
   --add-dir <path>            Also work in this directory; repeat for more, /workspace changes the list
   --no-session                Do not save the session
   --auto                      Let a reviewer model approve tool calls
@@ -123,6 +123,8 @@ struct Options {
     add_dirs: Vec<String>,
     /// `agent serve` only: the directory a remote start asked for, which is not on this computer.
     missing_cwd: Option<PathBuf>,
+    /// `agent serve` only: why `--on auto` started the session on this computer.
+    placed: Option<String>,
 }
 
 enum Resume {
@@ -282,6 +284,7 @@ fn parse_args(args: Vec<String>) -> Result<Options, String> {
             "--parent" => options.parent = Some(value("--parent")?),
             "--add-dir" => options.add_dirs.push(value("--add-dir")?),
             "--missing-cwd" => options.missing_cwd = Some(value("--missing-cwd")?.into()),
+            "--placed" => options.placed = Some(value("--placed")?),
             "--on" => options.on = Some(value("--on")?),
             "--explore" => options.explore = true,
             "--web" => options.web = true,
@@ -390,23 +393,34 @@ fn open_session(options: &Options, args: &[String]) -> Result<(), String> {
     }
     let home = home()?;
     let settings = settings::load(&home)?;
-    let environment = options.on.clone().unwrap_or_else(|| settings.default_environment.clone());
+    let mut environment = options.on.clone().unwrap_or_else(|| settings.default_environment.clone());
     tailnet::check(&settings, &environment)?;
     let cwd = std::env::current_dir().map_err(|e| format!("Cannot read the working directory: {e}"))?;
+    let mut args = args.to_vec();
+    if environment == tailnet::AUTO {
+        // A piped message reaches only a session here.
+        environment = if piped {
+            tailnet::LOCAL.to_string()
+        } else {
+            let (chosen, why) = tailnet::place(&settings, &cwd);
+            args.extend(["--placed".to_string(), why]);
+            chosen
+        };
+    }
     if piped {
         if environment != tailnet::LOCAL {
             return Err(format!("A piped message cannot reach a session on {environment}; pass it as words after the flags."));
         }
         // Started before the screen, so "Reading the message from stdin..." stays visible.
-        let stream = serve::Stream::Local(local_session(&home, options, args, &cwd, piped)?);
+        let stream = serve::Stream::Local(local_session(&home, options, &args, &cwd, piped)?);
         read_keys_from_the_terminal()?;
         return serve::show(&home, &settings, &environment, || Ok(stream));
     }
     serve::show(&home, &settings, &environment, || {
         if environment == tailnet::LOCAL {
-            return Ok(serve::Stream::Local(local_session(&home, options, args, &cwd, false)?));
+            return Ok(serve::Stream::Local(local_session(&home, options, &args, &cwd, false)?));
         }
-        tailnet::start(&settings, &environment, &cwd, args)
+        tailnet::start(&settings, &environment, &cwd, &args)
     })
 }
 
@@ -624,7 +638,16 @@ fn run(options: Options) -> Result<(), String> {
     let socket = serve::socket(&home, std::process::id());
     let result = tui::run(
         agent,
-        tui::Setup { home: home.clone(), settings, prompt, pick_session: matches!(options.resume, Some(Resume::Pick)), modes_error, plugin_updates, missing_cwd: options.missing_cwd },
+        tui::Setup {
+            home: home.clone(),
+            settings,
+            prompt,
+            pick_session: matches!(options.resume, Some(Resume::Pick)),
+            modes_error,
+            plugin_updates,
+            missing_cwd: options.missing_cwd,
+            placed: options.placed,
+        },
         model_lists,
         &socket,
     );

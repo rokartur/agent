@@ -42,7 +42,8 @@ Your other computers online on the tailnet show up as environments by their Tail
 Then:
 
 - `agent --on studio` starts a session on `studio`. Flags and a message work as they do locally: `agent --on studio -c`, `agent --on studio fix the failing test`. A piped message does not reach a remote session.
-- `"default_environment": "studio"` makes `agent` start every session there. `agent --on local` still starts one here.
+- `agent --on auto` starts the session on the least loaded of your computers that has the same directory, this one included: the lowest 1-minute load average per CPU, this computer on a tie. The session says where it started and why. A computer that does not answer within 5 s is left out.
+- `"default_environment": "studio"` makes `agent` start every session there, and `"auto"` places each one as `--on auto` does. `agent --on local` still starts one here.
 - `/env` lists the environments. `/env studio` starts a new session on `studio` in this terminal, and the session you leave keeps running.
 - `agent attach` lists the running sessions of every environment, tagged with the computer. A computer in `environments` that does not answer shows the sessions it had when it last answered, greyed out; a discovered one that does not answer is left out. `agent attach <id>` finds the session on any of them.
 

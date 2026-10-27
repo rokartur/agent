@@ -735,6 +735,8 @@ pub struct Setup {
     pub plugin_updates: Vec<String>,
     /// The directory a remote start asked for, which is not on this computer, so the session started in home.
     pub missing_cwd: Option<PathBuf>,
+    /// Why `--on auto` started the session on this computer.
+    pub placed: Option<String>,
 }
 
 /// Runs the session for the terminals that attach on `socket`, until one quits or it idles unattached past
@@ -1169,7 +1171,7 @@ fn event_loop(app: &mut App, inbox: &Receiver<Msg>) -> Result<(), String> {
 
 impl App {
     fn new(agent: &Agent, setup: Setup, commands: Sender<Command>, events: Sender<Msg>) -> App {
-        let Setup { home, settings, modes_error, plugin_updates, missing_cwd, .. } = setup;
+        let Setup { home, settings, modes_error, plugin_updates, missing_cwd, placed, .. } = setup;
         let mut recent_prompts: Vec<String> = history::load(&home.join(".agents")).into_iter().map(|entry| entry.prompt).collect();
         recent_prompts.drain(..recent_prompts.len().saturating_sub(100));
         let slash_commands: Vec<(String, String)> = BUILTIN_COMMANDS.iter().map(|(name, _, description)| (name.to_string(), description.to_string())).collect();
@@ -1264,6 +1266,9 @@ impl App {
             let notice =
                 format!("{} is not on this computer, so this session started in {}. Move it with !cd <dir>, then /worktree to pick a branch or worktree.", missing.display(), app.cwd.display());
             app.system("session", notice);
+        }
+        if let Some(placed) = placed {
+            app.system("session", placed);
         }
         app.header_len = app.entries.len();
         app.push_history(&agent.messages);

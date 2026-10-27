@@ -61,7 +61,7 @@
     "serve_tailnet": { "type": "boolean", "default": false, "description": "Let `agent serve --tailnet` accept sessions from your other computers on this computer's Tailscale address. Off, agent opens no network port." },
     "tailnet_port": { "type": "integer", "minimum": 1, "maximum": 65535, "default": 24368, "description": "The TCP port `agent serve --tailnet` listens on, and the port other environments are reached on." },
     "environments": { "type": "array", "items": { "type": "string" }, "default": [], "description": "Tailscale names of your other computers that run `agent serve --tailnet`, offered even while offline. Your computers online on the tailnet are offered without it; `agent --on <name>` and /env start sessions there." },
-    "default_environment": { "type": "string", "default": "local", "description": "Where `agent` starts a session without --on: `local` or another environment." },
+    "default_environment": { "type": "string", "default": "local", "description": "Where `agent` starts a session without --on: `local`, another environment, or `auto` for the least loaded computer that has the directory." },
     "mid_turn": { "enum": ["steering", "queued"], "default": "steering", "description": "A message sent while the agent works: steering reaches the model at its next tool call, queued waits for the turn to end and runs as the next prompt." },
     "on_start": { "type": "array", "items": { "type": "string" }, "default": [], "description": "Shell commands the TUI runs in the background at start." },
     "custom_providers": {
