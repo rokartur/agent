@@ -196,6 +196,7 @@ pub fn serve_command(args: &[String]) -> Result<(), String> {
         return Err("Usage: agent serve --tailnet.".into());
     }
     let home = crate::home()?;
+    crate::service::trim_log(&home);
     let settings = crate::settings::load(&home)?;
     if !settings.serve_tailnet {
         return Err("agent serve --tailnet runs only with \"serve_tailnet\": true in ~/.agents/settings.json.".into());
