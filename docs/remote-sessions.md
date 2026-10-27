@@ -13,51 +13,23 @@ The examples call the host `studio`. Use its Tailscale name, as `tailscale statu
    { "serve_tailnet": true }
    ```
 
-3. Run the listener:
+3. Start the listener, now and after every login:
 
    ```sh
-   agent serve --tailnet
+   agent service install
    ```
 
    It listens only on the host's Tailscale addresses, never on `0.0.0.0`, on port 24368 (`tailnet_port` changes it). It accepts a device only when `tailscale whois` reports your own login for it. Tagged devices and devices of other users of a shared tailnet are refused. A computer without `"serve_tailnet": true` opens no network port.
 
-To start the listener at login on macOS, save this as `~/Library/LaunchAgents/com.rokartur.agent.tailnet.plist`, change the paths to yours, and run `launchctl load ~/Library/LaunchAgents/com.rokartur.agent.tailnet.plist`:
+On macOS this loads a launchd agent, `~/Library/LaunchAgents/com.rokartur.agent.tailnet.plist`, which logs to `~/.agents/tailnet.log`. It starts when you log in, so a Mac without a screen needs automatic login (System Settings > Users & Groups). On Linux it enables a systemd user unit, `~/.config/systemd/user/agent-tailnet.service`, and turns on lingering, so it starts at boot without a login; its log is in `journalctl --user -u agent-tailnet.service`. Either way it starts the listener again when it exits, for example while Tailscale is not up yet.
 
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key><string>com.rokartur.agent.tailnet</string>
-  <key>ProgramArguments</key>
-  <array><string>/Users/you/.local/bin/agent</string><string>serve</string><string>--tailnet</string></array>
-  <key>EnvironmentVariables</key>
-  <dict><key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string></dict>
-  <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><true/>
-  <key>StandardErrorPath</key><string>/Users/you/Library/Logs/agent-tailnet.log</string>
-</dict>
-</plist>
-```
+Sessions get the listener's environment, and `install` gives it the `PATH` of the shell you run it in, so run it where your tools (git, rg, compilers) are found. Run `agent service install` again after you move agent or change `PATH`. With the macOS firewall on, allow incoming connections for `agent` when macOS asks.
 
-Sessions get the listener's environment, so put every directory that holds the tools you use (git, rg, compilers) in `PATH`. With the macOS firewall on, allow incoming connections for `agent` when macOS asks.
+- `agent service status` says whether the listener runs and where its log is.
+- `agent service restart` starts it again. An update of agent does this itself, so the listener runs the new release.
+- `agent service uninstall` stops it and removes it from startup. Sessions that run keep running; `agent attach` on the host reaches them.
 
-On Linux, use a systemd user unit, `~/.config/systemd/user/agent-tailnet.service`, then run `systemctl --user enable --now agent-tailnet` and `loginctl enable-linger` so it runs without a login:
-
-```ini
-[Unit]
-Description=agent sessions over Tailscale
-After=network-online.target tailscaled.service
-
-[Service]
-ExecStart=%h/.local/bin/agent serve --tailnet
-Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=default.target
-```
+To run the listener without the service, for example to watch its output, run `agent service uninstall` first, then `agent serve --tailnet` in a terminal; two listeners cannot share the port.
 
 ## On the computer you type on
 

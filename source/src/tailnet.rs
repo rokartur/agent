@@ -368,7 +368,8 @@ fn owned_by(whois: &Value, owner: u64) -> Result<(), String> {
 
 fn tailscale(args: &[&str]) -> Result<Value, String> {
     let program = if crate::process::installed("tailscale") || !Path::new(MACOS_APP_CLI).exists() { "tailscale" } else { MACOS_APP_CLI };
-    let output = crate::process::command(program).args(args).output().map_err(|e| format!("Cannot run tailscale: {e}"))?;
+    // Without TERM, as under launchd, the app's binary starts its GUI instead unless TAILSCALE_BE_CLI is set.
+    let output = crate::process::command(program).args(args).env("TAILSCALE_BE_CLI", "1").output().map_err(|e| format!("Cannot run tailscale: {e}"))?;
     if !output.status.success() {
         return Err(format!("tailscale {} failed: {}", args.join(" "), String::from_utf8_lossy(&output.stderr).trim()));
     }
