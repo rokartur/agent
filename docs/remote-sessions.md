@@ -74,7 +74,9 @@ Then:
 - `/env` lists the environments. `/env studio` starts a new session on `studio` in this terminal, and the session you leave keeps running.
 - `agent attach` lists the running sessions of every environment, tagged with the computer. A computer that does not answer shows the sessions it had when it last answered, greyed out. `agent attach <id>` finds the session on any of them.
 
-A new remote session starts in the same directory path as your terminal. When that directory does not exist on the host, it starts in the host's home directory.
+A new remote session starts in the same directory path as your terminal. When that directory does not exist on the host, it starts in the host's home directory and says so. Move it with `!cd <dir>`, then use `/worktree` to pick a branch or a worktree there.
+
+The project is the host's: `@` file completion, `!` commands, git status and diffs all come from the host. What you do on your own computer stays there: Ctrl+V pastes an image from your clipboard, a file you drag into the terminal is read from your disk, and `/copy`, copied selections and links you click use your clipboard and your browser.
 
 Several computers can attach to one session at once, as terminals on one computer can. `/model` lists the host's models. To change the host's settings or log in to a provider there, do it on the host.
 

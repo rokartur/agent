@@ -2,12 +2,16 @@
 //! Client to server: a hello, then `{"input": ..}` per terminal event. Server to client: `{"output": ..}` with terminal
 //! bytes, then `{"exit": ..}` with the text to print after leaving the screen, `{"switch": environment}` when /env moves
 //! the terminal to a new session there, or `{"error": ..}`.
+//! The terminal's computer may not be the session's, so the server asks the terminal to `{"copy": text}`,
+//! `{"open": url}` or `{"paste_image": true}`; the terminal answers `{"image": ..}` or `{"failed": error}`, and sends a
+//! dropped image file's bytes in the `image` of its paste.
 
 use crossterm::event::{Event as Input, KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use serde_json::{Value, json};
+use std::path::Path;
 
 /// Bumped when a message changes shape, so a client and a server of different releases refuse each other plainly.
-pub const PROTOCOL: u64 = 1;
+pub const PROTOCOL: u64 = 2;
 
 const NAMED_KEYS: [(&str, KeyCode); 21] = [
     ("Backspace", KeyCode::Backspace),
@@ -47,6 +51,26 @@ pub fn hello(size: (u16, u16), place: &Place) -> Value {
 pub struct Place {
     pub environment: String,
     pub environments: Vec<String>,
+}
+
+/// A pasted image as the terminal sends it: the base64 bytes of the block it read, and the dropped file's path.
+pub fn image(block: Result<Value, String>, path: Option<&Path>) -> Value {
+    match block {
+        Ok(block) => json!({"data": block["source"]["data"], "path": path.map(|path| path.display().to_string())}),
+        Err(error) => json!({"error": error}),
+    }
+}
+
+/// The API block an `image` carries, rebuilt from its bytes so a broken one never reaches the model.
+pub fn decode_image(image: &Value) -> Result<Value, String> {
+    if let Some(error) = image["error"].as_str() {
+        return Err(error.to_string());
+    }
+    let mut block = crate::image::from_base64(image["data"].as_str().ok_or("The terminal sent an image without data.")?)?;
+    if let Some(path) = image["path"].as_str() {
+        block[super::DROPPED_PATH] = path.into();
+    }
+    Ok(block)
 }
 
 /// None for keys the TUI never asks the terminal to report: media and lone modifier keys.
@@ -185,5 +209,19 @@ mod tests {
         assert_eq!(decode(&json!({"type": "key", "mods": 0, "kind": "press", "state": 0, "code": "Launch"})), None);
         assert_eq!(decode(&json!({"type": "resize", "size": [0, 40]})), None);
         assert_eq!(decode(&json!({"type": "shell", "mods": 0})), None);
+    }
+
+    #[test]
+    fn an_image_survives_the_wire_and_a_broken_one_is_refused() {
+        let path = std::env::temp_dir().join(format!("agent-wire-{}.png", std::process::id()));
+        std::fs::write(&path, crate::image::tests::PIXEL).unwrap();
+        let sent = crate::image::block(&path);
+        std::fs::remove_file(&path).unwrap();
+        let mut received = decode_image(&image(sent.clone(), Some(&path))).unwrap();
+        assert_eq!(received.as_object_mut().unwrap().remove(super::super::DROPPED_PATH), Some(json!(path.display().to_string())));
+        assert_eq!(received, sent.unwrap());
+        assert_eq!(decode_image(&image(Err("No image in the clipboard".into()), None)), Err("No image in the clipboard".into()));
+        assert!(decode_image(&json!({"data": "not base64!"})).is_err());
+        assert!(decode_image(&json!({"data": "aGVsbG8="})).is_err());
     }
 }

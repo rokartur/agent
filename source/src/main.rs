@@ -119,6 +119,8 @@ struct Options {
     prompt: Option<String>,
     /// --add-dir, repeatable: directories outside cwd the task also works in.
     add_dirs: Vec<String>,
+    /// `agent serve` only: the directory a remote start asked for, which is not on this computer.
+    missing_cwd: Option<PathBuf>,
 }
 
 enum Resume {
@@ -270,6 +272,7 @@ fn parse_args(args: Vec<String>) -> Result<Options, String> {
             "--headless" => options.headless = true,
             "--parent" => options.parent = Some(value("--parent")?),
             "--add-dir" => options.add_dirs.push(value("--add-dir")?),
+            "--missing-cwd" => options.missing_cwd = Some(value("--missing-cwd")?.into()),
             "--on" => options.on = Some(value("--on")?),
             "--explore" => options.explore = true,
             "--web" => options.web = true,
@@ -585,7 +588,12 @@ fn run(options: Options) -> Result<(), String> {
     agent.describe_to_peers(false);
     agent.snapshots = snapshots::Snapshots::open(&home, &agent.cwd);
     let socket = serve::socket(&home, std::process::id());
-    let result = tui::run(agent, tui::Setup { home: home.clone(), settings, prompt, pick_session: matches!(options.resume, Some(Resume::Pick)), modes_error, plugin_updates }, model_lists, &socket);
+    let result = tui::run(
+        agent,
+        tui::Setup { home: home.clone(), settings, prompt, pick_session: matches!(options.resume, Some(Resume::Pick)), modes_error, plugin_updates, missing_cwd: options.missing_cwd },
+        model_lists,
+        &socket,
+    );
     if result.is_ok() {
         serve::remove_log(&home);
     }
