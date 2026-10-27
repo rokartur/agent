@@ -124,9 +124,14 @@ pub fn connect(home: &Path, pid: u32) -> Result<UnixStream, String> {
 /// Shows the session until it ends or this terminal detaches, then prints what the server said goodbye with. /env
 /// leaves it for a new session in another environment, which this terminal then shows. A remote session whose
 /// connection drops stays on screen while this terminal reconnects to it.
-pub fn show(home: &Path, settings: &Settings, environment: &str, stream: Stream) -> Result<(), String> {
+/// `connect` runs in raw mode: keys typed meanwhile would otherwise reach the session cooked, Enter as the LF that
+/// raw mode reads as Ctrl+J, a newline in the editor.
+pub fn show(home: &Path, settings: &Settings, environment: &str, connect: impl FnOnce() -> Result<Stream, String>) -> Result<(), String> {
     let fullscreen = crate::tui::Fullscreen::enter()?;
-    let (mut environment, mut stream) = (environment.to_string(), stream);
+    if environment != LOCAL {
+        crate::tui::notice(&format!("Connecting to {environment}..."))?;
+    }
+    let (mut environment, mut stream) = (environment.to_string(), connect()?);
     loop {
         let place = Place { environment: environment.clone(), environments: tailnet::environments(settings) };
         let ending = match stream {
@@ -207,18 +212,18 @@ pub fn attach_command(args: &[String]) -> Result<(), String> {
             Some(listed) => listed,
             None => {
                 let cwd = std::env::current_dir().map_err(|e| format!("Cannot read the working directory: {e}"))?;
-                return show(&home, &settings, LOCAL, Stream::Local(start(&home, &["--resume".to_string(), id.clone()], &cwd, false)?));
+                return show(&home, &settings, LOCAL, || Ok(Stream::Local(start(&home, &["--resume".to_string(), id.clone()], &cwd, false)?)));
             }
         },
         _ => return Err("Usage: agent attach [session id].".into()),
     };
-    let stream = if listed.environment == LOCAL {
+    show(&home, &settings, &listed.environment, || {
+        if listed.environment != LOCAL {
+            return tailnet::attach(&settings, &listed.environment, &listed.session);
+        }
         let peer = find(&home, &listed.session)?.ok_or_else(|| format!("Session {} has just ended.", listed.session))?;
-        Stream::Local(connect(&home, peer.pid)?)
-    } else {
-        tailnet::attach(&settings, &listed.environment, &listed.session)?
-    };
-    show(&home, &settings, &listed.environment, stream)
+        Ok(Stream::Local(connect(&home, peer.pid)?))
+    })
 }
 
 /// Running sessions here, then in each environment; the reasons environments did not answer go to stderr.

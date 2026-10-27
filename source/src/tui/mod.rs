@@ -823,6 +823,9 @@ fn exit_summary(app: &App, session_path: &Path) -> String {
 
 fn enter(out: &mut Stdout) -> std::io::Result<()> {
     terminal::enable_raw_mode()?;
+    // Keys typed before raw mode sit in the tty cooked, Enter as the LF raw mode reads as Ctrl+J, so they go.
+    // Fails harmlessly with ENOTTY when stdin is a pipe.
+    unsafe { libc::tcflush(libc::STDIN_FILENO, libc::TCIFLUSH) };
     execute!(out, EnterAlternateScreen, EnableBracketedPaste, EnableMouseCapture, EnableFocusChange, PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES))
 }
 

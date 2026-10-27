@@ -11,3 +11,4 @@ A session server accepts remote clients only on its tailnet address, over plain 
 - A cloud relay like T3 Connect: reachable from anywhere, but a service to host and trust.
 - Pairing tokens on top of Tailscale: per-device revocation, but a second identity system for the same set of computers.
 - TLS and WebSocket: needed only by a browser client, which is out of scope.
+- Per-client permission scopes, as t3code's pairing scopes: every client is an untagged device of the host's own login and all clients share one TUI (ADR 0001), so a scope would only separate the user from themselves. See #77.
