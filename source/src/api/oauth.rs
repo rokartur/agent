@@ -351,10 +351,23 @@ mod tests {
         let url = format!("http://{}/", listener.local_addr().unwrap());
         std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            let _ = stream.read(&mut [0; 4096]);
+            read_request(&mut BufReader::new(&stream));
             stream.write_all(response.as_bytes()).unwrap();
         });
         url
+    }
+
+    /// Reads the whole request: closing a socket with its body unread resets it, and macOS then fails the client with EINVAL.
+    fn read_request(reader: &mut impl BufRead) {
+        let mut length = 0;
+        let mut header = String::new();
+        while reader.read_line(&mut header).unwrap() > 2 {
+            if let Some(value) = header.to_lowercase().strip_prefix("content-length:") {
+                length = value.trim().parse().unwrap();
+            }
+            header.clear();
+        }
+        reader.read_exact(&mut vec![0; length]).unwrap();
     }
 
     #[test]

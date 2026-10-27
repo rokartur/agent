@@ -799,7 +799,17 @@ mod tests {
         let api_base = format!("http://{}", api.local_addr().unwrap());
         std::thread::spawn(move || {
             let (mut stream, _) = api.accept().unwrap();
-            _ = std::io::Read::read(&mut stream, &mut [0; 4096]);
+            // Read the whole request: closing a socket with its body unread resets it, and macOS then fails the client with EINVAL.
+            let mut reader = std::io::BufReader::new(&stream);
+            let mut length = 0;
+            let mut header = String::new();
+            while std::io::BufRead::read_line(&mut reader, &mut header).unwrap() > 2 {
+                if let Some(value) = header.to_lowercase().strip_prefix("content-length:") {
+                    length = value.trim().parse().unwrap();
+                }
+                header.clear();
+            }
+            std::io::Read::read_exact(&mut reader, &mut vec![0; length]).unwrap();
             let reply = format!("HTTP/1.1 302 Found\r\nlocation: {location}\r\ncontent-length: 0\r\nconnection: close\r\n\r\n");
             _ = std::io::Write::write_all(&mut stream, reply.as_bytes());
         });
