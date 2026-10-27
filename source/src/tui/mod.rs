@@ -4209,7 +4209,7 @@ impl App {
             Event::Steered(text) => self.push(Item::User(text)),
             // Only headless subagents emit it.
             Event::Outbox { .. } => {}
-            Event::Push(text) => self.notify(&text),
+            Event::Push(text) => self.notify("", &text),
             // The output tail went to the model; /tasks shows it in full.
             Event::FollowUp { source, text } => self.system(&source, text.split_once('\n').map_or(text.as_str(), |(head, _)| head)),
             Event::TurnEnd { usage, context_tokens } => {
@@ -4237,11 +4237,11 @@ impl App {
                 self.session_path = path;
             }
             Event::Permission { request, reply } => {
-                self.notify(&format!("{} {}", request.question, request.detail));
+                self.notify("Permission", &format!("{} {}", request.question, request.detail));
                 self.open_agent_panel(Panel::Permission { request, reply, index: 0, opened: Instant::now() });
             }
             Event::Ask { questions, reply } => {
-                self.notify(&questions.first().map_or(String::new(), |question| question.question.clone()));
+                self.notify("Waiting", &questions.first().map_or(String::new(), |question| question.question.clone()));
                 self.open_agent_panel(Panel::Ask(ask::AskPanel::new(questions, reply)));
             }
             Event::Reviewed { allowed, detail, reason } => {
@@ -4298,12 +4298,12 @@ impl App {
     }
 
     /// Desktop notification, sent only while the terminal is in the background; cmux decides that itself and also lists it in its sidebar.
-    fn notify(&self, body: &str) {
+    fn notify(&self, subtitle: &str, body: &str) {
         if !self.settings.notifications {
             return;
         }
         if let Some(cmux) = &self.cmux {
-            cmux.notify(&notify::printable(body));
+            cmux.notify(subtitle, &notify::printable(body));
             return;
         }
         if self.focused == Some(true) {
@@ -4315,9 +4315,11 @@ impl App {
 
     fn done(&mut self, result: Result<String, String>) {
         match &result {
-            Ok(answer) if answer.trim().is_empty() => self.notify("Done"),
-            Ok(answer) => self.notify(answer),
-            Err(error) => self.notify(&format!("Failed: {error}")),
+            // Esc aborted it, so the user is at the keyboard already; an aborted turn often still returns Ok.
+            _ if self.abort.load(Ordering::Relaxed) => {}
+            Ok(answer) if answer.trim().is_empty() => self.notify("Completed", "Done"),
+            Ok(answer) => self.notify("Completed", answer),
+            Err(error) => self.notify("Error", &format!("Failed: {error}")),
         }
         if std::mem::take(&mut self.retract) {
             match &result {
