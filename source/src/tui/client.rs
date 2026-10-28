@@ -157,6 +157,22 @@ pub fn notice(text: &str) -> Result<(), String> {
     write!(out, "\x1b[{height};1H\x1b[2K\x1b[7m{text}\x1b[0m").and_then(|()| out.flush()).map_err(|e| format!("Cannot write to the terminal: {e}"))
 }
 
+/// Shows `question` on the bottom row and waits for y or n; Esc and Ctrl+C answer no.
+pub fn confirm(question: &str) -> Result<bool, String> {
+    notice(question)?;
+    loop {
+        let event::Event::Key(key) = event::read().map_err(|e| format!("Cannot read the terminal: {e}"))? else { continue };
+        if key.code == event::KeyCode::Char('c') && key.modifiers.contains(event::KeyModifiers::CONTROL) {
+            return Ok(false);
+        }
+        match key.code {
+            event::KeyCode::Char('y' | 'Y') => return Ok(true),
+            event::KeyCode::Char('n' | 'N') | event::KeyCode::Esc => return Ok(false),
+            _ => {}
+        }
+    }
+}
+
 /// Whether the user pressed Ctrl+C within `wait`. Other keys are dropped: they were typed at a screen that is no longer
 /// the session's, which may ask for a permission by now.
 pub fn ctrl_c_within(wait: Duration) -> bool {
