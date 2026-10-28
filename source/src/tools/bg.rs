@@ -267,13 +267,13 @@ impl Terminal {
         [&self.stdout, &self.stderr].iter().map(|path| std::fs::metadata(path).map_or(0, |m| m.len())).sum()
     }
 
-    /// Both streams for the /tasks viewer, stderr only when it has something.
+    /// Both streams for the /tasks viewer; the `stdout:` label only when stderr has something to tell it from.
     pub fn log(&self) -> String {
-        let mut text = section("stdout", &self.stdout, VIEW_TAIL);
-        if std::fs::metadata(&self.stderr).is_ok_and(|m| m.len() > 0) {
-            text.push_str(&format!("\n\n{}", section("stderr", &self.stderr, VIEW_TAIL)));
+        let stdout = section("stdout", &self.stdout, VIEW_TAIL);
+        if !std::fs::metadata(&self.stderr).is_ok_and(|m| m.len() > 0) {
+            return stdout.strip_prefix("stdout:\n").unwrap_or(&stdout).to_string();
         }
-        text
+        format!("{stdout}\n\n{}", section("stderr", &self.stderr, VIEW_TAIL))
     }
 
     fn status_text(&self) -> String {
