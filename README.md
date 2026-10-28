@@ -51,18 +51,21 @@ Known names fill in the URL and the key variable: `ollama`, `lmstudio`, `groq`, 
 
 ## Compared with jcode and pi
 
-Same model (Claude Opus 5.5, medium thinking), same prompt, two coding tasks, 6 runs each, averages. Every run of every harness passed all hidden tests. A: fix a CSV parser and write a CLI (39 tests). B: port semver range matching with no dependencies (2550 cases).
+Same model (Claude Opus 5.5, medium thinking), same prompt, three large tasks, 3 runs each. On every run the three harnesses start together, each with only its login. C: write a jq interpreter in TypeScript, checked on 388 programs against jq 1.7.1, 40 minute limit. D: fix 11 reported bugs in marked, a 4,000 line Markdown renderer, where 1687 inputs must render byte for byte as the original. E: port Python's difflib to TypeScript, checked on 2916 cases from CPython.
 
 | | agent | jcode | pi |
 |---|---|---|---|
-| Version | 0.1.0 | 0.98.1 | 1.3.0 |
-| A: time, tool calls, tokens, cost | **35.0 s, 3.2, 85k, $0.11** | 40.5 s, 3.8, 122k, $0.14 | 47.4 s, 4.3, 113k, $0.17 |
-| B: time | **187.3 s** (143–279) | 244.5 s (165–344) | 224.4 s (135–365) |
-| B: tool calls | **9.5**, median 6 | 14.7, median 14 | 13.0, median 9.5 |
-| B: tokens, cost | **386k, $0.61** | 619k, $0.84 | 536k, $0.68 |
-| Reply to "OK", median of 15 | **2.30 s** | 3.09 s | 4.20 s |
-| Base context | **17.8k** | 24.2k | 19.4k |
-| CPU, memory when idle | **0.07 s, 27 MB** | 0.2 s, 48 MB | 2 s, 310 MB |
+| Version | 0.1.34 and the changes after it | 0.99.1 | 1.4.0 |
+| C: finished in time, cases passed per run | **3 of 3**, 388 · 388 · 387 | 0 of 3, 21 · 21 · 21 | 2 of 3, 388 · 386 · 21 |
+| C: time, cost | **1870 s**, $6.50 | 2400 s, $4.94 | 1981 s, **$3.60** |
+| D: time, tool calls, tokens, cost | 80.1 s, **10.7**, 340k, $0.41 | 142.5 s, 12.0, 715k, $0.83 | **78.5 s**, 11.7, **319k, $0.39** |
+| E: time | 152.1 s | 202.4 s | **132.0 s** |
+| E: tool calls, tokens, cost | **7.3, 147k, $0.45** | 11.0, 566k, $0.81 | 8.0, 179k, $0.49 |
+| Reply to "OK", median of 15 | 2.78 s | 5.30 s | **1.67 s** |
+| Base context | **2.3k** | 23.4k | 2.6k |
+| CPU, memory when idle | **0.05 s, 27 MB** | 0.29 s, 47 MB | 0.49 s, 135 MB |
+
+In C, jcode spent all 40 minutes trying jq and wrote no code, and one pi run waited 35 minutes on a jq command that never ended; agent stops a command after 2 minutes. Agent costs more in C because it checks its interpreter against the real jq on hundreds of its own programs, which is also why all three of its runs finished. In D one pi run and one jcode run missed one case. Run to run, times vary more than the gaps between agent and pi in D and E.
 
 ## Commands worth knowing
 
