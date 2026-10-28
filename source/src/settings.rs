@@ -367,6 +367,11 @@ pub fn load(home: &Path) -> Result<Settings, String> {
     Ok(from_json(&own))
 }
 
+/// Whether the settings file names `key`, as opposed to its default applying.
+pub fn sets(home: &Path, key: &str) -> bool {
+    std::fs::read_to_string(path(home)).ok().and_then(|text| serde_json::from_str::<Value>(&text).ok()).is_some_and(|own| !own[key].is_null())
+}
+
 fn from_json(own: &Value) -> Settings {
     Settings {
         model: own["model"].as_str().unwrap_or("claude-opus-5-5").to_string(),

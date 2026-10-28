@@ -1791,6 +1791,15 @@ impl Agent {
             system = format!("{system}\n\n{}", plan::PROMPT);
             list.push(plan::tool());
         }
+        // A one-shot run (-p, --headless, acp, a child) has no UI to ask, plan, notify or schedule in: these tools only fail there.
+        if !self.interactive {
+            const NEEDS_UI: [&str; 7] = ["AskUserQuestion", "EnterPlanMode", "PushNotification", "CronCreate", "CronDelete", "CronList", "ScheduleWakeup"];
+            list.retain(|tool| !NEEDS_UI.contains(&tool["name"].as_str().unwrap_or_default()));
+        }
+        // prompt::system_prompt lists the skills under this tag; with none, Skill has nothing to load.
+        if !self.system.contains("<skills>\n") {
+            list.retain(|tool| tool["name"] != "Skill");
+        }
         if let Some(only) = &self.only_tools {
             list.retain(|tool| only.iter().any(|name| tool["name"] == name.as_str()));
         }

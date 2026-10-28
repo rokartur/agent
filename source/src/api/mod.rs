@@ -526,6 +526,7 @@ impl Client {
             ("anthropic", secret) => {
                 let call = with_proxy_token(self.http.post(format!("{anthropic_base}/v1/messages")), proxy_token.as_deref()).header("anthropic-version", "2023-06-01");
                 let mut body = request.clone();
+                defer_rare_tools(&mut body);
                 // Anthropic has one fast tier.
                 if body["speed"] == "ultrafast" {
                     body["speed"] = json!("fast");
@@ -808,6 +809,27 @@ impl ApiError {
     }
 }
 
+/// The tools nearly every coding turn calls. Anthropic's tool search loads any other when the model asks for it,
+/// so their definitions stay out of the context until then: about 6.5k tokens for the built-in ones alone.
+const CORE_TOOLS: [&str; 7] = ["Read", "Bash", "Write", "ReplaceLines", "Edit", "InsertLines", "Grep"];
+
+fn defer_rare_tools(body: &mut Value) {
+    let Some(tools) = body["tools"].as_array_mut() else { return };
+    if tools.iter().all(|tool| CORE_TOOLS.contains(&tool["name"].as_str().unwrap_or_default())) {
+        return;
+    }
+    // A deferred tool cannot carry cache_control, so the breakpoint moves to the last tool still loaded.
+    let cache_control = tools.last_mut().and_then(|tool| tool.as_object_mut()?.remove("cache_control"));
+    for tool in tools.iter_mut().filter(|tool| !CORE_TOOLS.contains(&tool["name"].as_str().unwrap_or_default())) {
+        tool["defer_loading"] = json!(true);
+    }
+    tools.insert(0, json!({"type": "tool_search_tool_bm25_20251119", "name": "tool_search_tool_bm25"}));
+    if let Some(cache_control) = cache_control {
+        let loaded = tools.iter_mut().rev().find(|tool| tool.get("defer_loading").is_none()).expect("the tool search tool is loaded");
+        loaded["cache_control"] = cache_control;
+    }
+}
+
 /// Builds a Messages request with cache breakpoints on the system prompt, the last tool, and the last message.
 /// `cache_ttl` is "5m" or "1h"; all three breakpoints share it, since a 1h one after a 5m one is a 400.
 /// `per_session_system` follows the cached system block, so a value that differs per session does not rewrite it.
@@ -976,7 +998,7 @@ fn parse_stream(reader: &mut dyn BufRead, abort: &AtomicBool, on_delta: &mut dyn
             "content_block_stop" => {
                 let index = event["index"].as_u64().unwrap_or(0) as usize;
                 if let (Some(block), Some(partial)) = (blocks.get_mut(index), tool_json.get(index))
-                    && block["type"] == "tool_use"
+                    && (block["type"] == "tool_use" || block["type"] == "server_tool_use")
                     && !partial.is_empty()
                 {
                     block["input"] = parse_tool_input(block["id"].as_str().unwrap_or_default(), partial, &mut bad_tool_inputs);
@@ -1206,6 +1228,24 @@ mod tests {
         let [bad] = reply.bad_tool_inputs.as_slice() else { panic!("expected one bad input") };
         assert_eq!((bad.id.as_str(), bad.raw.as_str()), ("t1", r#"{"text": "a"b"}"#));
         assert!(bad.error.starts_with("Bad tool input JSON: expected `,` or `}`"), "{}", bad.error);
+    }
+
+    #[test]
+    fn rare_tools_load_through_tool_search_and_the_breakpoint_moves_to_a_loaded_tool() {
+        let tools = json!([{"name": "Read"}, {"name": "Edit"}, {"name": "Agent"}, {"name": "WebSearch"}]);
+        let mut body = request("m", 1000, "high", "5m", "sys", "", &tools, &[]);
+        defer_rare_tools(&mut body);
+        let names: Vec<&str> = body["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
+        assert_eq!(names, ["tool_search_tool_bm25", "Read", "Edit", "Agent", "WebSearch"]);
+        assert_eq!(body["tools"][2]["cache_control"]["type"], "ephemeral");
+        for deferred in &body["tools"].as_array().unwrap()[3..] {
+            assert_eq!((deferred["defer_loading"].as_bool(), deferred.get("cache_control")), (Some(true), None));
+        }
+        let core_only = json!([{"name": "Read"}, {"name": "Grep"}]);
+        let mut body = request("m", 1000, "high", "5m", "sys", "", &core_only, &[]);
+        let before = body.clone();
+        defer_rare_tools(&mut body);
+        assert_eq!(body, before);
     }
 
     #[test]

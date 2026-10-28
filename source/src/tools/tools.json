@@ -1,17 +1,17 @@
 [
   {
     "name": "Read",
-    "description": "Read a text file, or several files or line ranges with `paths`, as `anchor│content` rows; an anchor is 4 case-sensitive letters. Edit by anchor, never by content or line number. One file pages at 400 lines unless `limit` says otherwise; continue with `offset` (line number or anchor) from the hint. A stale anchor is refused: read again. A PNG, JPEG, GIF or WebP `file_path` comes back as the image itself, for checking screenshots. Other binary, UTF-16/32 and >64MB files are rejected.",
+    "description": "Read a text file as `anchor│content` rows (anchor: 4 letters), 2000 lines or 50KB per page; continue from the hint's `offset`. `paths` reads several files or ranges at once. Images come back as images.",
     "eager_input_streaming": true,
     "input_schema": {
       "type": "object",
       "properties": {
         "file_path": {
-          "type": "string",
-          "description": "Path to the file to read (relative or absolute)"
+          "type": "string"
         },
         "paths": {
           "type": "array",
+          "description": "Paths, or {file_path, offset, limit} ranges",
           "items": {
             "anyOf": [
               {
@@ -26,8 +26,7 @@
                   "offset": {
                     "anyOf": [
                       {
-                        "type": "integer",
-                        "minimum": 1
+                        "type": "integer"
                       },
                       {
                         "type": "string"
@@ -35,72 +34,68 @@
                     ]
                   },
                   "limit": {
-                    "type": "integer",
-                    "minimum": 1
+                    "type": "integer"
                   }
                 },
-                "required": ["file_path"]
+                "required": [
+                  "file_path"
+                ]
               }
             ]
-          },
-          "description": "Several files, each under a `== path` header: a path reads the whole file, {file_path, offset, limit} one range. Use instead of `cat` or a chain of `sed -n`."
+          }
         },
         "offset": {
           "anyOf": [
             {
-              "type": "integer",
-              "minimum": 1
+              "type": "integer"
             },
             {
               "type": "string"
             }
           ],
-          "description": "Line number (1-indexed) or a served anchor to start reading from"
+          "description": "1-based line or anchor"
         },
         "limit": {
-          "type": "integer",
-          "minimum": 1,
-          "description": "Lines from offset, default 400"
+          "type": "integer"
         }
       }
     }
   },
   {
     "name": "Bash",
-    "description": "Run a bash command in the cwd, stderr merged into stdout, no stdin. A command that is only `cd DIR` moves the session to DIR, so later calls run there. Output keeps the last 2000 lines or 24KB (50KB with rtk off); a truncated run names its full log. With `run_in_background: true` it returns a task id at once and its final output arrives as a message when it exits; max 8 at once, killed when the agent exits.",
+    "description": "Run a bash command in the cwd; stderr merged, no stdin. A lone `cd DIR` moves the session. Output keeps the last 2000 lines or 50KB. `run_in_background` returns a task id; its output arrives when it exits.",
     "eager_input_streaming": true,
     "input_schema": {
+      "additionalProperties": false,
       "type": "object",
       "required": [
         "command"
       ],
       "properties": {
         "command": {
-          "type": "string",
-          "description": "Shell command to execute"
+          "type": "string"
         },
         "timeout": {
           "type": "number",
-          "description": "Milliseconds; omit for none. Ignored in the background."
+          "description": "ms, default 120000"
+        },
+        "run_in_background": {
+          "type": "boolean"
         },
         "description": {
           "type": "string",
-          "description": "Short name for listings, 5-10 words"
-        },
-        "run_in_background": {
-          "type": "boolean",
-          "description": "For servers, watchers and jobs longer than a minute"
+          "description": "5-10 word label"
         }
-      },
-      "additionalProperties": false
+      }
     }
   },
   {
     "name": "Write",
-    "description": "Create or overwrite a file; creates parent directories.",
+    "description": "Create or overwrite a file.",
     "eager_input_streaming": true,
     "strict": true,
     "input_schema": {
+      "additionalProperties": false,
       "type": "object",
       "required": [
         "file_path",
@@ -108,81 +103,76 @@
       ],
       "properties": {
         "file_path": {
-          "type": "string",
-          "description": "Path to the file to write (relative or absolute)"
+          "type": "string"
         },
         "content": {
-          "type": "string",
-          "description": "Content to write to the file"
+          "type": "string"
         }
-      },
-      "additionalProperties": false
+      }
     }
   },
   {
     "name": "ReplaceLines",
-    "description": "Replace the lines from anchor `remove_from` to anchor `remove_to` (the same anchor for one line) with `text`. Emptying a file returns its empty-line anchor for a follow-up ReplaceLines. To change part of a line, use Edit.",
+    "description": "Replace the lines from anchor `remove_from` to `remove_to` with `text` (\"\" deletes).",
     "eager_input_streaming": true,
     "input_schema": {
       "type": "object",
-      "properties": {
-        "remove_from": {
-          "type": "string",
-          "description": "Anchor of the first line."
-        },
-        "remove_to": {
-          "type": "string",
-          "description": "Anchor of the last line."
-        },
-        "text": {
-          "type": "string",
-          "description": "Exact new text; \"\" deletes. A trailing newline ends the last line, it adds no blank line."
-        }
-      },
       "required": [
         "remove_from",
         "remove_to",
         "text"
-      ]
+      ],
+      "properties": {
+        "remove_from": {
+          "type": "string"
+        },
+        "remove_to": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        }
+      }
     }
   },
   {
     "name": "Edit",
-    "description": "Replace `old_string`, which must occur once, inside the lines from anchor `replace_from` to anchor `replace_to` (the same anchor for one line), or anywhere in the file at `file_path` when no anchors are given; no read needed. With `file_path`, `edits` changes several fragments in one call. The rest stays byte-for-byte. Send only the smallest changing fragment; for a whole-line rewrite use ReplaceLines.",
+    "description": "Replace `old_string`, which must occur once, in the file at `file_path` (no read needed) or between anchors `replace_from` and `replace_to`. `edits` applies several replacements to one file, all or none.",
     "eager_input_streaming": true,
     "input_schema": {
       "type": "object",
       "properties": {
         "file_path": {
-          "type": "string",
-          "description": "File to search whole, in place of the anchors."
+          "type": "string"
         },
         "replace_from": {
-          "type": "string",
-          "description": "Anchor of the first line."
+          "type": "string"
         },
         "replace_to": {
-          "type": "string",
-          "description": "Anchor of the last line."
+          "type": "string"
         },
         "old_string": {
-          "type": "string",
-          "description": "Exact text to find, copied from the served rows; only the part that changes. Line breaks are LF."
+          "type": "string"
         },
         "new_string": {
-          "type": "string",
-          "description": "Replacement; \"\" deletes."
+          "type": "string"
         },
         "edits": {
           "type": "array",
-          "description": "Several fragments of the file at `file_path`, in place of old_string/new_string; applied in order, all or none.",
           "items": {
             "type": "object",
+            "required": [
+              "old_string",
+              "new_string"
+            ],
             "properties": {
-              "old_string": { "type": "string" },
-              "new_string": { "type": "string" }
-            },
-            "required": ["old_string", "new_string"]
+              "old_string": {
+                "type": "string"
+              },
+              "new_string": {
+                "type": "string"
+              }
+            }
           }
         }
       }
@@ -194,33 +184,25 @@
     "eager_input_streaming": true,
     "input_schema": {
       "type": "object",
-      "properties": {
-        "anchor": {
-          "type": "string",
-          "description": "Anchor of the line to insert next to."
-        },
-        "direction": {
-          "anyOf": [
-            {
-              "type": "string",
-              "const": "after"
-            },
-            {
-              "type": "string",
-              "const": "before"
-            }
-          ]
-        },
-        "text": {
-          "type": "string",
-          "description": "Exact text, without the anchor line; \"\" inserts one blank line. A trailing newline ends the last line, it adds no blank line."
-        }
-      },
       "required": [
         "anchor",
         "direction",
         "text"
-      ]
+      ],
+      "properties": {
+        "anchor": {
+          "type": "string"
+        },
+        "direction": {
+          "enum": [
+            "after",
+            "before"
+          ]
+        },
+        "text": {
+          "type": "string"
+        }
+      }
     }
   },
   {
@@ -548,60 +530,40 @@
   },
   {
     "name": "Grep",
-    "description": "Search file contents with ripgrep: smart-case, respects .gitignore, at most 100 matches per file by default. Rows are `path:anchor│line` (match) and `path-anchor│line` (context); the anchors work in the edit tools without a Read. Output is capped at 2000 lines or 50KB.",
+    "description": "Search file contents with ripgrep (smart-case, respects .gitignore). Rows are `path:anchor│line`; the anchors work in the edit tools.",
     "eager_input_streaming": true,
     "input_schema": {
       "type": "object",
-      "properties": {
-        "pattern": {
-          "type": "string",
-          "description": "Regex, or literal with fixed_strings."
-        },
-        "path": {
-          "type": "string",
-          "description": "Default: current directory."
-        },
-        "glob": {
-          "type": "string",
-          "description": "e.g. '*.ts' or 'src/**'."
-        },
-        "type": {
-          "type": "string",
-          "description": "ripgrep type, e.g. 'ts', 'rust'."
-        },
-        "-i": {
-          "type": "boolean",
-          "description": "Ignore case. Default: smart-case."
-        },
-        "fixed_strings": {
-          "type": "boolean",
-          "description": "Literal pattern."
-        },
-        "hidden": {
-          "type": "boolean",
-          "description": "Include hidden files."
-        },
-        "-C": {
-          "type": "integer",
-          "description": "Context lines around each match.",
-          "maximum": 20,
-          "minimum": 0
-        },
-        "limit": {
-          "type": "integer",
-          "description": "Max matches per file, default 100.",
-          "minimum": 1,
-          "maximum": 1000
-        },
-        "output_mode": {
-          "type": "string",
-          "enum": ["content", "files_with_matches", "count"],
-          "description": "content (default): matching rows; files_with_matches: only paths; count: `path:matches` per file."
-        }
-      },
       "required": [
         "pattern"
-      ]
+      ],
+      "properties": {
+        "pattern": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "glob": {
+          "type": "string"
+        },
+        "-i": {
+          "type": "boolean"
+        },
+        "-C": {
+          "type": "integer"
+        },
+        "fixed_strings": {
+          "type": "boolean"
+        },
+        "output_mode": {
+          "enum": [
+            "content",
+            "files_with_matches",
+            "count"
+          ]
+        }
+      }
     }
   },
   {
