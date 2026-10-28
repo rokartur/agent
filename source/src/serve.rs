@@ -133,14 +133,16 @@ pub fn connect(home: &Path, pid: u32) -> Result<UnixStream, String> {
 /// connection drops stays on screen while this terminal reconnects to it.
 /// `connect` runs in raw mode: keys typed meanwhile would otherwise reach the session cooked, Enter as the LF that
 /// raw mode reads as Ctrl+J, a newline in the editor.
-pub fn show(home: &Path, settings: &Settings, environment: &str, connect: impl FnOnce() -> Result<Stream, String>) -> Result<(), String> {
+pub fn show(home: &Path, environment: &str, connect: impl FnOnce() -> Result<Stream, String>) -> Result<(), String> {
     let fullscreen = crate::tui::Fullscreen::enter()?;
     if environment != LOCAL {
         crate::tui::notice(&format!("Connecting to {environment}..."))?;
     }
     let (mut environment, mut stream) = (environment.to_string(), connect()?);
     loop {
-        let place = Place { environment: environment.clone(), environments: tailnet::environments(settings) };
+        // Read again each time: /env in a session on another computer may have removed a saved environment here.
+        let settings = &crate::settings::load(home)?;
+        let place = Place { environment: environment.clone(), environments: tailnet::environments(settings), saved: settings.environments.clone() };
         let ending = match stream {
             Stream::Local(socket) => crate::tui::attach(socket.try_clone().map_err(|e| format!("Cannot use the session socket: {e}"))?, socket, &place)?,
             Stream::Remote(reader, writer) => crate::tui::attach(reader, writer, &place)?,
@@ -219,12 +221,12 @@ pub fn attach_command(args: &[String]) -> Result<(), String> {
             Some(listed) => listed,
             None => {
                 let cwd = std::env::current_dir().map_err(|e| format!("Cannot read the working directory: {e}"))?;
-                return show(&home, &settings, LOCAL, || Ok(Stream::Local(start(&home, &["--resume".to_string(), id.clone()], &cwd, false, None)?)));
+                return show(&home, LOCAL, || Ok(Stream::Local(start(&home, &["--resume".to_string(), id.clone()], &cwd, false, None)?)));
             }
         },
         _ => return Err("Usage: agent attach [session id].".into()),
     };
-    show(&home, &settings, &listed.environment, || {
+    show(&home, &listed.environment, || {
         if listed.environment != LOCAL {
             return tailnet::attach(&settings, &listed.environment, &listed.session);
         }

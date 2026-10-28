@@ -416,9 +416,9 @@ fn open_session(options: &Options, args: &[String]) -> Result<(), String> {
         // Started before the screen, so "Reading the message from stdin..." stays visible.
         let stream = serve::Stream::Local(local_session(&home, options, &args, &cwd, piped, None)?);
         read_keys_from_the_terminal()?;
-        return serve::show(&home, &settings, &environment, || Ok(stream));
+        return serve::show(&home, &environment, || Ok(stream));
     }
-    serve::show(&home, &settings, &environment, || {
+    serve::show(&home, &environment, || {
         if environment == tailnet::LOCAL {
             return Ok(serve::Stream::Local(local_session(&home, options, &args, &cwd, false, None)?));
         }

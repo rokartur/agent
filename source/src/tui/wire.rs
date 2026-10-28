@@ -5,7 +5,8 @@
 //! `{"switch": environment}` when /env moves the terminal to a new session there, or `{"error": ..}`.
 //! The terminal's computer may not be the session's, so the server asks the terminal to `{"copy": text}`,
 //! `{"open": url}` or `{"paste_image": true}`; the terminal answers `{"copied": true}`, `{"image": ..}` or
-//! `{"failed": error}`, and sends a dropped image file's bytes in the `image` of its paste.
+//! `{"failed": error}`, and sends a dropped image file's bytes in the `image` of its paste. /env asks it to
+//! `{"forget": environment}` saved in its settings; it answers with its new `{"place": ..}`.
 
 use crossterm::event::{Event as Input, KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use serde_json::{Value, json};
@@ -48,7 +49,13 @@ const BUTTONS: [(&str, MouseButton); 3] = [("left", MouseButton::Left), ("right"
 /// environments it can move to with /env, named as its own settings name them.
 pub fn hello(size: (u16, u16), place: &Place) -> Value {
     let env: serde_json::Map<String, Value> = super::notify::TERMINAL_VARS.iter().filter_map(|name| Some((name.to_string(), Value::String(std::env::var(name).ok()?)))).collect();
-    json!({"protocol": PROTOCOL, "version": env!("CARGO_PKG_VERSION"), "size": [size.0, size.1], "env": env, "environment": place.environment, "environments": place.environments})
+    json!({"protocol": PROTOCOL, "version": env!("CARGO_PKG_VERSION"), "size": [size.0, size.1], "env": env, "environment": place.environment, "environments": place.environments, "saved": place.saved})
+}
+
+/// The place a hello or a `{"place": ..}` answer carries; a client older than `saved` offers nothing to remove.
+pub fn place(value: &Value) -> Place {
+    let names = |key: &str| value[key].as_array().into_iter().flatten().filter_map(|name| Some(name.as_str()?.to_string())).collect();
+    Place { environment: value["environment"].as_str().unwrap_or(crate::tailnet::LOCAL).to_string(), environments: names("environments"), saved: names("saved") }
 }
 
 /// Where a client sees the session it attaches to: `environment` is one of `environments`, `local` included.
@@ -56,6 +63,8 @@ pub fn hello(size: (u16, u16), place: &Place) -> Value {
 pub struct Place {
     pub environment: String,
     pub environments: Vec<String>,
+    /// The ones in the `environments` setting of the terminal's computer, which /env can remove.
+    pub saved: Vec<String>,
 }
 
 /// A pasted image as the terminal sends it: the base64 bytes of the block it read, and the dropped file's path.
