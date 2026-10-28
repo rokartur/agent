@@ -105,9 +105,13 @@ fn install(home: &Path) -> Result<(), String> {
 /// `agent service install --on <host>`: over one `ssh <host>`, installs agent there when it is missing, then runs
 /// `agent service install` there. The host's output shows here, and its exit status is this command's.
 fn install_on(host: &str) -> Result<(), String> {
+    println!("Connecting to {host} over ssh...");
     let status = process::command("ssh").args([host, &remote_install()]).stdin(std::process::Stdio::inherit()).status().map_err(|e| format!("Cannot run ssh: {e}"))?;
     match status.code() {
-        Some(0) => Ok(()),
+        Some(0) => {
+            println!("Done on {host}.");
+            Ok(())
+        }
         // ssh exits 255 for its own failures, which it has printed.
         Some(255) => Err(format!("ssh {host} failed. agent service install --on needs `ssh {host}` to work from this computer.")),
         _ => Err(format!("agent service install failed on {host}: {status}.")),
@@ -119,7 +123,7 @@ fn install_on(host: &str) -> Result<(), String> {
 /// than `agent service` would take `service install` as a message and run an agent turn, so it is refused first.
 fn remote_install() -> String {
     let script = format!(
-        r#"bin=$(command -v agent || echo "$HOME/.local/bin/agent"); if [ ! -x "$bin" ]; then echo "Installing agent..."; curl -fsSL {INSTALLER} | sh || exit 1; bin="$HOME/.local/bin/agent"; fi; if ! "$bin" --help | grep -q "service install"; then echo "$("$bin" --version) here has no agent service; run agent update here, then try again." >&2; exit 1; fi; exec "${{SHELL:-/bin/sh}}" -lc "'$bin' service install""#
+        r#"bin=$(command -v agent || echo "$HOME/.local/bin/agent"); if [ ! -x "$bin" ]; then echo "Installing agent..."; curl -fsSL {INSTALLER} | sh || exit 1; bin="$HOME/.local/bin/agent"; fi; if ! "$bin" --help | grep -q "service install"; then echo "$("$bin" --version) here has no agent service; run agent update here, then try again." >&2; exit 1; fi; echo "Found $("$bin" --version) at $bin; installing the listener..."; exec "${{SHELL:-/bin/sh}}" -lc "'$bin' service install""#
     );
     format!("sh -c '{}'", script.replace('\'', r"'\''"))
 }
@@ -321,7 +325,8 @@ mod tests {
         let current = run_with("  service install   Run serve --tailnet");
         let old = run_with("  attach [id]");
         std::fs::remove_dir_all(&home).unwrap();
-        assert_eq!(String::from_utf8_lossy(&current.stdout), "ran: service install\n", "{}", String::from_utf8_lossy(&current.stderr));
+        let found = format!("Found agent 0.0.1 at {}; installing the listener...\nran: service install\n", bin.join("agent").display());
+        assert_eq!(String::from_utf8_lossy(&current.stdout), found, "{}", String::from_utf8_lossy(&current.stderr));
         assert!(current.status.success());
         assert_eq!(String::from_utf8_lossy(&old.stdout), "");
         assert_eq!(String::from_utf8_lossy(&old.stderr), "agent 0.0.1 here has no agent service; run agent update here, then try again.\n");
