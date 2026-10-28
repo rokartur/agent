@@ -5712,15 +5712,16 @@ fn rewind_note(files: Option<RestoredFiles>) -> String {
     note
 }
 
-/// A full-screen read-only view: `header`, `lines` bottom-anchored like the transcript and scrolled up by `scroll`, a rule and `hint`.
+/// A full-screen read-only view: `header`, the last screenful of `lines` scrolled up by `scroll`, a rule and `hint`.
+/// Lines shorter than the screen start under the header, like a pager.
 fn full_screen(header: Line, lines: &[Line], scroll: &mut usize, width: usize, height: usize, hint: &str) -> Vec<Line> {
     let room = height.saturating_sub(3);
     *scroll = (*scroll).min(lines.len().saturating_sub(room));
     let end = lines.len() - *scroll;
     let start = end.saturating_sub(room);
     let mut rows = vec![header];
-    rows.extend(std::iter::repeat_n(Vec::new(), room - (end - start)));
     rows.extend_from_slice(&lines[start..end]);
+    rows.resize(room + 1, Vec::new());
     rows.push(vec![span("─".repeat(width), Style::fg(240))]);
     rows.push(vec![span(hint, DIM)]);
     rows
@@ -6728,6 +6729,13 @@ mod tests {
     fn log_lines_drop_colors_and_keep_the_last_progress_redraw() {
         let lines: Vec<String> = log_lines("\x1b[32mok\x1b[0m\n10%\r55%\r100%\nabcdefghij", 6).iter().map(text).collect();
         assert_eq!(lines, [" ok", " 100%", " abcde", " fghij"]);
+    }
+
+    #[test]
+    fn full_screen_starts_short_output_under_the_header() {
+        let lines = vec![vec![span("a", PLAIN)], vec![span("b", PLAIN)]];
+        let rows: Vec<String> = full_screen(vec![span("head", PLAIN)], &lines, &mut 0, 4, 7, "hint").iter().map(text).collect();
+        assert_eq!(rows, ["head", "a", "b", "", "", "────", "hint"]);
     }
 
     #[test]
