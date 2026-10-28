@@ -8,7 +8,8 @@ use std::sync::Arc;
 use crate::tools::{MAX_BYTES, MAX_LINES, format_size};
 
 // A single-path read without `limit` pages at this many lines; `paths` and written files still show up to MAX_LINES.
-const READ_DEFAULT_LINES: usize = 400;
+// The page bash output and search results get too, so a typical source file arrives in one call.
+const READ_DEFAULT_LINES: usize = crate::tools::MAX_LINES;
 
 // Two-letter pieces (sorted), then a row-major bitset of valid piece pairs, packed from pi's anchor table.
 const TABLE: &[u8] = include_bytes!("anchors.bin");
@@ -63,7 +64,8 @@ impl std::fmt::Display for Anchor {
     }
 }
 
-struct Change {
+/// One run of changed lines: `removed` from the old snapshot, `added` new lines starting at `start` in the new one.
+struct Hunk {
     start: usize,
     removed: Vec<(Anchor, String)>,
     added: usize,
@@ -119,30 +121,39 @@ impl Anchors {
         anchor
     }
 
-    /// Records `lines` as the content of `path`. Lines in the unchanged prefix and suffix keep their anchors.
-    // shortcut: prefix/suffix alignment re-mints anchors between two separate external edits, use a line diff if that hurts.
-    fn sync(&mut self, path: &Path, lines: Vec<String>) -> Result<Change, String> {
+    /// Records `lines` as the content of `path`. Lines a line diff matches to the old content keep their anchors.
+    fn sync(&mut self, path: &Path, lines: Vec<String>) -> Result<Vec<Hunk>, String> {
         let old = self.files.remove(path).unwrap_or_default();
-        let (prefix, suffix) = unchanged_ends(&old.lines, &lines);
-        let old_end = old.lines.len() - suffix;
-        let added = lines.len() - suffix - prefix;
+        let mut pairs = matching_lines(&old.lines, &lines);
+        let added = lines.len() - pairs.len();
         if let Err(e) = self.anchors_left(path, added) {
             self.files.insert(path.to_path_buf(), old);
             return Err(e);
         }
-        let mut removed = Vec::new();
-        for i in prefix..old_end {
-            self.owner.remove(&old.anchors[i]);
-            removed.push((old.anchors[i], old.lines[i].clone()));
-        }
-        let mut anchors = old.anchors[..prefix].to_vec();
+        pairs.push((old.lines.len(), lines.len()));
         let owner = Arc::from(path);
-        for _ in 0..added {
-            anchors.push(self.mint(&owner));
+        let mut anchors = Vec::with_capacity(lines.len());
+        let mut hunks = Vec::new();
+        let (mut old_at, mut new_at) = (0, 0);
+        for (old_match, new_match) in pairs {
+            if old_match > old_at || new_match > new_at {
+                let mut removed = Vec::new();
+                for i in old_at..old_match {
+                    self.owner.remove(&old.anchors[i]);
+                    removed.push((old.anchors[i], old.lines[i].clone()));
+                }
+                hunks.push(Hunk { start: new_at, removed, added: new_match - new_at });
+                for _ in new_at..new_match {
+                    anchors.push(self.mint(&owner));
+                }
+            }
+            if new_match < lines.len() {
+                anchors.push(old.anchors[old_match]);
+            }
+            (old_at, new_at) = (old_match + 1, new_match + 1);
         }
-        anchors.extend_from_slice(&old.anchors[old_end..]);
         self.files.insert(path.to_path_buf(), Snapshot { lines, anchors });
-        Ok(Change { start: prefix, removed, added })
+        Ok(hunks)
     }
 
     fn anchors_left(&self, path: &Path, needed: usize) -> Result<(), String> {
@@ -357,34 +368,46 @@ impl Anchors {
         self.anchors_left(path, written.lines.len() - prefix - suffix)?;
         replace_file(path, after.as_bytes())?;
         let empty = written.is_empty();
-        let change = self.sync(path, written.lines)?;
+        let hunks = self.sync(path, written.lines)?;
         let snapshot = &self.files[path];
         if empty {
             return Ok(format!("File is empty. Use replace on {}│ to insert content.", snapshot.anchors[0]));
         }
-        let mut out = Vec::new();
-        let start = change.start;
-        if start >= 2 {
-            out.push(" ...".to_string());
+        Ok(crate::tools::truncate_head(render_hunks(snapshot, &hunks), "diff"))
+    }
+}
+
+/// Each hunk with one line of context on both sides, ` ...` where unchanged lines are left out.
+fn render_hunks(snapshot: &Snapshot, hunks: &[Hunk]) -> String {
+    let row = |mark: char, i: usize| format!("{mark}{}│{}", snapshot.anchors[i], snapshot.lines[i]);
+    let mut out = Vec::new();
+    let mut shown_until = 0;
+    for hunk in hunks {
+        if hunk.start >= 1 {
+            let before = hunk.start - 1;
+            if before > shown_until {
+                out.push(" ...".to_string());
+            }
+            if before >= shown_until {
+                out.push(row(' ', before));
+            }
         }
-        if start >= 1 {
-            out.push(format!(" {}│{}", snapshot.anchors[start - 1], snapshot.lines[start - 1]));
-        }
-        for (anchor, line) in &change.removed {
+        for (anchor, line) in &hunk.removed {
             out.push(format!("-{anchor}│{line}"));
         }
-        for i in start..start + change.added {
-            out.push(format!("+{}│{}", snapshot.anchors[i], snapshot.lines[i]));
+        for i in hunk.start..hunk.start + hunk.added {
+            out.push(row('+', i));
         }
-        let after = start + change.added;
+        let after = hunk.start + hunk.added;
         if after < snapshot.lines.len() {
-            out.push(format!(" {}│{}", snapshot.anchors[after], snapshot.lines[after]));
+            out.push(row(' ', after));
         }
-        if after + 1 < snapshot.lines.len() {
-            out.push(" ...".to_string());
-        }
-        Ok(crate::tools::truncate_head(out.join("\n"), "diff"))
+        shown_until = after + 1;
     }
+    if shown_until < snapshot.lines.len() {
+        out.push(" ...".to_string());
+    }
+    out.join("\n")
 }
 
 const MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;
@@ -439,6 +462,37 @@ fn unchanged_ends(old: &[String], new: &[String]) -> (usize, usize) {
     let max_suffix = old.len().min(new.len()) - prefix;
     let suffix = old.iter().rev().zip(new.iter().rev()).take(max_suffix).take_while(|(a, b)| a == b).count();
     (prefix, suffix)
+}
+
+/// Index pairs of lines `old` and `new` share, in order: the unchanged ends, then a longest common subsequence of the middle.
+fn matching_lines(old: &[String], new: &[String]) -> Vec<(usize, usize)> {
+    let (prefix, suffix) = unchanged_ends(old, new);
+    let (a, b) = (&old[prefix..old.len() - suffix], &new[prefix..new.len() - suffix]);
+    let mut pairs: Vec<(usize, usize)> = (0..prefix).map(|i| (i, i)).collect();
+    // shortcut: an LCS table past 4M cells costs too much memory, so a change that large keeps no anchors in its middle.
+    if a.len() * b.len() <= 4_000_000 {
+        // lcs[i][j]: the common subsequence length of a[i..] and b[j..].
+        let width = b.len() + 1;
+        let mut lcs = vec![0u32; (a.len() + 1) * width];
+        for i in (0..a.len()).rev() {
+            for j in (0..b.len()).rev() {
+                lcs[i * width + j] = if a[i] == b[j] { lcs[(i + 1) * width + j + 1] + 1 } else { lcs[(i + 1) * width + j].max(lcs[i * width + j + 1]) };
+            }
+        }
+        let (mut i, mut j) = (0, 0);
+        while i < a.len() && j < b.len() {
+            if a[i] == b[j] {
+                pairs.push((prefix + i, prefix + j));
+                (i, j) = (i + 1, j + 1);
+            } else if lcs[(i + 1) * width + j] >= lcs[i * width + j + 1] {
+                i += 1;
+            } else {
+                j += 1;
+            }
+        }
+    }
+    pairs.extend((0..suffix).map(|k| (old.len() - suffix + k, new.len() - suffix + k)));
+    pairs
 }
 
 fn row_bits(row: usize) -> &'static [u8] {
@@ -705,6 +759,22 @@ mod tests {
         let error = anchors.replace_match(Path::new("/"), &json!({"file_path": path, "edits": edits})).unwrap_err();
         assert!(error.starts_with("[E_NO_MATCH]") && error.contains("edits[1]"), "{error}");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "1\ntwo\n3\n");
+    }
+
+    #[test]
+    fn edits_far_apart_show_two_hunks_and_keep_the_anchors_between() {
+        let lines: Vec<String> = (0..50).map(|i| format!("line {i}")).collect();
+        let path = temp_file("hunks", &(lines.join("\n") + "\n"));
+        let mut anchors = Anchors::new("s");
+        let before = anchors_of(&anchors.read(Path::new("/"), &json!({"file_path": path})).unwrap());
+        let edits = json!([{"old_string": "line 5\n", "new_string": "five\n"}, {"old_string": "line 40\n", "new_string": "forty\nforty-one\n"}]);
+        let out = anchors.replace_match(Path::new("/"), &json!({"file_path": path, "edits": edits})).unwrap();
+        let changed: Vec<&str> = out.lines().filter(|row| row.starts_with(['-', '+'])).collect();
+        assert_eq!(changed.len(), 5, "{out}");
+        assert_eq!(out.matches(" ...").count(), 3, "{out}");
+        let after = anchors_of(&anchors.read(Path::new("/"), &json!({"file_path": path})).unwrap());
+        assert_eq!(after[6..40], before[6..40]);
+        assert_eq!(after[42..], before[41..]);
     }
 
     #[test]

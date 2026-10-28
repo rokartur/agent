@@ -112,6 +112,9 @@ pub fn cd_target(command: &str) -> Option<&str> {
     plain.then_some(dir)
 }
 
+/// Claude Code's default: a command stuck in a loop costs two minutes, not the rest of the turn.
+const DEFAULT_BASH_TIMEOUT_MS: f64 = 120_000.0;
+
 enum Killed {
     Timeout,
     Aborted,
@@ -119,15 +122,15 @@ enum Killed {
 
 fn bash(input: &Value, cwd: &Path, rtk: &Rtk, abort: &AtomicBool) -> Result<String, String> {
     let command = rtk.rewrite(str_arg(input, "command")?);
-    let timeout = input["timeout"].as_f64().filter(|ms| *ms > 0.0);
+    let timeout = input["timeout"].as_f64().filter(|ms| *ms > 0.0).unwrap_or(DEFAULT_BASH_TIMEOUT_MS);
     // A timeout too large for an Instant is no timeout.
-    let deadline = timeout.and_then(|ms| Instant::now().checked_add(Duration::try_from_secs_f64(ms / 1000.0).ok()?));
+    let deadline = Instant::now().checked_add(Duration::try_from_secs_f64(timeout / 1000.0).unwrap_or(Duration::MAX));
     let child = process::command("bash").arg("-c").arg(format!("exec 2>&1; {command}")).current_dir(cwd).stdout(Stdio::piped()).spawn().map_err(|e| format!("Cannot start bash: {e}"))?;
     let mut capture = Capture::default();
     let (status, killed) = wait_streaming(child, abort, deadline, |chunk| capture.push(chunk))?;
     let output = truncate_tail(rtk.strip(String::from_utf8_lossy(&capture.text).into_owned()), rtk.max_bytes, capture.spilled());
     match killed {
-        Some(Killed::Timeout) => return Err(append_status(&output, &format!("Command timed out after {} ms", timeout.unwrap_or_default()))),
+        Some(Killed::Timeout) => return Err(append_status(&output, &format!("Command timed out after {timeout} ms. Pass a larger `timeout` for a long build or test, or `run_in_background: true`."))),
         Some(Killed::Aborted) => return Err(append_status(&output, "Command aborted")),
         None => {}
     }
@@ -600,7 +603,7 @@ mod tests {
     fn bash_timeout_kills_the_command() {
         let (out, err) = run_bash(json!({"command": "echo start; sleep 30", "timeout": 500}), &Arc::default());
         assert!(err);
-        assert_eq!(out, "start\n\n\nCommand timed out after 500 ms");
+        assert_eq!(out, "start\n\n\nCommand timed out after 500 ms. Pass a larger `timeout` for a long build or test, or `run_in_background: true`.");
     }
 
     #[test]
@@ -721,12 +724,13 @@ mod tests {
 
     #[test]
     fn long_bash_output_keeps_its_end_and_saves_the_full_log() {
-        // 30 KB in 2000 lines: under the line and byte caps, over rtk's 24 KB.
-        let (out, _) =
-            run("Bash", &json!({"command": "awk 'BEGIN { for (i = 1; i <= 2000; i++) print \"line\", i, \"xxxx\" }'"}), Path::new("/tmp"), &mut Anchors::new("t"), &Rtk::ON, &Arc::default());
-        assert!(out.contains("\nline 2000 xxxx\n"), "{}", &out[out.len().saturating_sub(300)..]);
+        // About 68 KB in 1500 lines: under the line cap, over the 50 KB byte cap.
+        let pad = "x".repeat(32);
+        let command = format!("awk 'BEGIN {{ for (i = 1; i <= 1500; i++) print \"line\", i, \"{pad}\" }}'");
+        let (out, _) = run("Bash", &json!({ "command": command }), Path::new("/tmp"), &mut Anchors::new("t"), &Rtk::ON, &Arc::default());
+        assert!(out.contains(&format!("\nline 1500 {pad}\n")), "{}", &out[out.len().saturating_sub(300)..]);
         let path = out.rsplit("Full output: ").next().unwrap().trim_end_matches(']');
-        assert_eq!(std::fs::read_to_string(path).unwrap(), (1..=2000).map(|i| format!("line {i} xxxx\n")).collect::<String>());
+        assert_eq!(std::fs::read_to_string(path).unwrap(), (1..=1500).map(|i| format!("line {i} {pad}\n")).collect::<String>());
     }
 
     #[test]

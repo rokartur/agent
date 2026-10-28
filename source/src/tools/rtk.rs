@@ -9,7 +9,8 @@ pub struct Rtk {
 }
 
 impl Rtk {
-    pub const ON: Rtk = Rtk { enabled: true, max_bytes: 24 * 1024 };
+    /// The same tail as pi's bash: at 24KB, printing a 1000-line source file took a second call for its head.
+    pub const ON: Rtk = Rtk { enabled: true, max_bytes: super::MAX_BYTES };
     /// For `!` commands the user typed and for every call when the rtk setting is off: no rewrite, no ANSI strip, the MAX_BYTES tail.
     pub const OFF: Rtk = Rtk { enabled: false, max_bytes: super::MAX_BYTES };
 
