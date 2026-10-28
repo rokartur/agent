@@ -506,10 +506,13 @@ fn run(options: Options) -> Result<(), String> {
         settings.default_accounts.insert(provider, name);
     }
     client.configure(&settings);
+    // A one-shot run starts on the cached catalog when it lists the model: the lists take 1-3 s of network.
+    let cached_catalog = !options.serve && client.load_cached_catalog(&settings.model);
     // About 0.5 s of network; the TUI opens meanwhile and settle_model waits for it.
     let model_lists = std::thread::spawn({
         let client = client.clone();
-        move || client.load_catalog()
+        // On the cached catalog the lists only refresh the cache: a list failing mid-run would drop the model in use.
+        move || if cached_catalog { client.fetch_catalog().1 } else { client.load_catalog() }
     });
     // Downloads only a missing file; the refresh of cached ones runs behind it, so startup never waits on it.
     let modes_error = modes::fetch(&home, &settings.ponytail, &settings.caveman, false).err();
@@ -577,8 +580,10 @@ fn run(options: Options) -> Result<(), String> {
         for notice in &plugin_updates {
             eprintln!("{notice}");
         }
-        for notice in model_lists.join().expect("the model lists thread") {
-            eprintln!("{notice}");
+        if !cached_catalog {
+            for notice in model_lists.join().expect("the model lists thread") {
+                eprintln!("{notice}");
+            }
         }
         if let Some(notice) = agent.settle_model(&mut settings)? {
             eprintln!("{notice}");

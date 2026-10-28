@@ -157,6 +157,13 @@ impl Client {
 
     /// Builds the model catalog live from every account's model list; returns one error per list that failed.
     pub fn load_catalog(&self) -> Vec<String> {
+        let (catalog, errors) = self.fetch_catalog();
+        *self.catalog.write().unwrap() = catalog.into();
+        errors
+    }
+
+    /// The live catalog and one error per list that failed, saved to the cache when complete; the catalog in use stays as it is.
+    pub fn fetch_catalog(&self) -> (Vec<Model>, Vec<String>) {
         let accounts: Vec<Account> = self.state.lock().unwrap().accounts.iter().filter(|a| a.provider != "openrouter").cloned().collect();
         let custom_providers = self.state.lock().unwrap().custom_providers.clone();
         // One request per account, about 0.3-0.7 s each; in parallel the load waits only for the slowest.
@@ -194,8 +201,28 @@ impl Client {
             }
         }
         catalog.extend(models::free_routers(&catalog));
+        // Only a complete load is saved: a list that failed would drop its account's models from the next start.
+        if errors.is_empty() {
+            let path = self.catalog_cache();
+            let _ = std::fs::create_dir_all(path.parent().expect("the cache is under ~/.agents"));
+            let _ = accounts::write_private(&path, &models::to_cache(&catalog));
+        }
+        (catalog, errors)
+    }
+
+    /// Sets the catalog the last complete load saved, so a one-shot run need not wait for the lists.
+    /// False, leaving the catalog empty, when there is none or it does not list `model`.
+    pub fn load_cached_catalog(&self, model: &str) -> bool {
+        let Some(catalog) = std::fs::read_to_string(self.catalog_cache()).ok().and_then(|text| models::from_cache(&text)) else { return false };
+        if !catalog.iter().any(|m| m.id == model) {
+            return false;
+        }
         *self.catalog.write().unwrap() = catalog.into();
-        errors
+        true
+    }
+
+    fn catalog_cache(&self) -> PathBuf {
+        self.home.join(".agents/cache/models.json")
     }
 
     /// Empty until load_catalog finishes.
@@ -424,9 +451,13 @@ impl Client {
 
     /// Fetches windows older than a minute for OAuth accounts; a failed fetch counts as unknown, which does not block.
     fn refresh_usage(&self, accounts: &[Account]) {
-        for account in accounts.iter().filter(|a| a.is_oauth()) {
-            // Stamped before the fetch, under the same lock as the check, so concurrent sends do not fetch it too.
-            let stale = {
+        // Each stale account is claimed (stamped) under the lock, so concurrent sends do not fetch it too.
+        let stale: Vec<&Account> = accounts
+            .iter()
+            .filter(|account| {
+                if !account.is_oauth() {
+                    return false;
+                }
                 let mut state = self.state.lock().unwrap();
                 match state.usage.get_mut(&key(account)) {
                     Some((at, _)) if at.elapsed() < USAGE_TTL => false,
@@ -439,13 +470,17 @@ impl Client {
                         true
                     }
                 }
-            };
-            if !stale {
-                continue;
-            }
-            let base = if account.provider == "anthropic" { &self.anthropic_base } else { &self.chatgpt_base };
-            let usage = self.fresh(account.clone()).ok().and_then(|account| accounts::fetch_usage(&account, base).ok());
-            self.state.lock().unwrap().usage.insert(key(account), (Instant::now(), usage));
+            })
+            .collect();
+        // In the background: this pick uses the windows already known (unknown does not block), the next one the fresh ones.
+        // Waiting cost every run's first request 0.2-0.6 s; an account over its limit still answers 429 and is switched.
+        for account in stale {
+            let (client, account) = (self.clone(), account.clone());
+            std::thread::spawn(move || {
+                let base = if account.provider == "anthropic" { &client.anthropic_base } else { &client.chatgpt_base };
+                let usage = client.fresh(account.clone()).ok().and_then(|fresh| accounts::fetch_usage(&fresh, base).ok());
+                client.state.lock().unwrap().usage.insert(key(&account), (Instant::now(), usage));
+            });
         }
     }
 

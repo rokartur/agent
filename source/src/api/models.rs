@@ -1,4 +1,4 @@
-use serde_json::Value;
+use serde_json::{Value, json};
 
 /// The Codex model list has no output limit; every Codex model takes this many.
 const CODEX_MAX_TOKENS: u64 = 128_000;
@@ -220,6 +220,41 @@ fn is_flash(model: &Model) -> bool {
     name.split('-').any(|word| FLASH_WORDS.contains(&word))
 }
 
+/// The catalog as the cache file stores it.
+pub fn to_cache(catalog: &[Model]) -> String {
+    let rates = |r: &Rates| json!([r.input, r.output, r.cache_read, r.cache_write]);
+    let models: Vec<Value> = catalog
+        .iter()
+        .map(|m| {
+            let price = m.price.as_ref().map(|p| json!({"base": rates(&p.base), "long_prompt": p.long_prompt.iter().map(|(from, r)| json!([from, rates(r)])).collect::<Vec<_>>()}));
+            json!({"provider": m.provider, "id": m.id, "name": m.name, "context_window": m.context_window, "max_tokens": m.max_tokens, "accounts": m.accounts, "price": price})
+        })
+        .collect();
+    Value::Array(models).to_string()
+}
+
+/// The catalog `to_cache` wrote; None when the file is not one.
+pub fn from_cache(text: &str) -> Option<Vec<Model>> {
+    let rates = |v: &Value| Some(Rates { input: v[0].as_f64()?, output: v[1].as_f64()?, cache_read: v[2].as_f64()?, cache_write: v[3].as_f64()? });
+    let mut catalog = Vec::new();
+    for m in serde_json::from_str::<Value>(text).ok()?.as_array()? {
+        let price = match &m["price"] {
+            Value::Null => None,
+            p => Some(Price { base: rates(&p["base"])?, long_prompt: p["long_prompt"].as_array()?.iter().map(|tier| Some((tier[0].as_u64()?, rates(&tier[1])?))).collect::<Option<_>>()? }),
+        };
+        catalog.push(Model {
+            provider: m["provider"].as_str()?.into(),
+            id: m["id"].as_str()?.into(),
+            name: m["name"].as_str()?.into(),
+            context_window: m["context_window"].as_u64()?,
+            max_tokens: m["max_tokens"].as_u64()?,
+            accounts: m["accounts"].as_array()?.iter().map(|a| a.as_str().map(String::from)).collect::<Option<_>>()?,
+            price,
+        });
+    }
+    Some(catalog)
+}
+
 /// The provider's newest small model (haiku, luna), used for summaries and permission reviews; `model` itself when its provider lists none.
 pub fn small_model<'a>(catalog: &'a [Model], model: &'a Model) -> &'a Model {
     catalog.iter().find(|m| m.provider == model.provider && is_small(m)).unwrap_or(model)
@@ -247,10 +282,21 @@ pub fn short_name(model: &Model) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
     fn model(provider: &str, id: &str) -> Model {
         Model { provider: provider.into(), id: id.into(), name: id.into(), context_window: 1, max_tokens: 1, accounts: Vec::new(), price: None }
+    }
+
+    #[test]
+    fn the_cached_catalog_reads_back_as_it_was_saved() {
+        let rates = Rates { input: 1e-7, output: 5e-7, cache_read: 1e-8, cache_write: 1.25e-7 };
+        let priced = Model { accounts: vec!["work".into()], price: Some(Price { base: rates, long_prompt: vec![(100_000, rates)] }), ..model("openrouter", "a/b") };
+        let catalog = vec![priced, model("anthropic", "claude-haiku-5-5")];
+        let back = from_cache(&to_cache(&catalog)).unwrap();
+        assert_eq!(back.len(), 2);
+        assert_eq!((back[0].id.as_str(), back[0].accounts.as_slice(), back[0].price.as_ref()), ("a/b", &["work".to_string()][..], catalog[0].price.as_ref()));
+        assert!(back[1].price.is_none());
+        assert!(from_cache("{\"not\": \"a list\"}").is_none());
     }
 
     #[test]
