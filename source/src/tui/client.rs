@@ -1,6 +1,7 @@
 //! The terminal side of an attached session: forwards key, mouse and resize events, writes the frames it gets back.
 
 use std::io::{BufRead, BufReader, Read, Write};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -72,7 +73,13 @@ pub fn attach(reader: impl Read, sender: impl Write + Send + 'static, place: &wi
         }
     });
     let ending = show(BufReader::new(reader), &mut std::io::stdout(), |request| {
-        let Some(answer) = serve_request(request) else { return };
+        let answer = match request["forget"].as_str() {
+            Some(name) => crate::home().and_then(|home| forget_environment(&home, name, &place.environment)).unwrap_or_else(|error| json!({"failed": error})),
+            None => match serve_request(request) {
+                Some(answer) => answer,
+                None => return,
+            },
+        };
         // A failed write means the connection is gone; reading it then ends the session.
         let _ = writeln!(sender.lock().unwrap(), "{answer}");
     });
@@ -108,6 +115,15 @@ fn serve_request(request: &Value) -> Option<Value> {
         return None;
     };
     done.err().map(|error| json!({"failed": error}))
+}
+
+/// /env in a session on another computer: removes `name` from this computer's `environments` setting, and answers
+/// with the place the terminal now sees.
+fn forget_environment(home: &Path, name: &str, environment: &str) -> Result<Value, String> {
+    let settings = crate::settings::load(home)?;
+    let after = crate::settings::Settings { environments: settings.environments.iter().filter(|saved| *saved != name).cloned().collect(), ..settings.clone() };
+    crate::settings::save_change(home, &settings, &after)?;
+    Ok(json!({"place": {"environment": environment, "environments": crate::tailnet::environments(&after), "saved": after.environments}}))
 }
 
 /// Writes the session's frames to `out` and hands its requests to `requests`, until it lets go of this terminal.
@@ -238,6 +254,20 @@ mod tests {
     fn only_a_failed_or_asked_for_request_is_answered() {
         assert_eq!(serve_request(&json!({"open": "file:///etc/passwd"})), Some(json!({"failed": "Not a web link: file:///etc/passwd"})));
         assert_eq!(serve_request(&json!({"unknown": 1})), None);
+    }
+
+    #[test]
+    fn forgetting_an_environment_removes_only_it_from_this_computers_settings() {
+        let home = std::env::temp_dir().join(format!("agent-forget-{}", std::process::id()));
+        std::fs::create_dir_all(home.join(".agents")).unwrap();
+        std::fs::write(home.join(".agents/settings.json"), json!({"environments": ["studio", "laptop"]}).to_string()).unwrap();
+        let answer = forget_environment(&home, "studio", "laptop").unwrap();
+        let saved = crate::settings::load(&home).unwrap().environments;
+        std::fs::remove_dir_all(&home).unwrap();
+        assert_eq!(saved, ["laptop"]);
+        assert_eq!(answer["place"]["environment"], "laptop");
+        assert_eq!(answer["place"]["saved"], json!(["laptop"]));
+        assert!(answer["place"]["environments"].as_array().unwrap().contains(&json!("laptop")));
     }
 
     #[test]

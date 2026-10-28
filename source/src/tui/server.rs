@@ -118,11 +118,7 @@ fn serve_client(id: u64, stream: UnixStream, events: &Sender<Msg>) {
         // Wakes this client's reader, which then reports the detach.
         let _ = stream.shutdown(std::net::Shutdown::Both);
     });
-    let place = wire::Place {
-        environment: hello["environment"].as_str().unwrap_or(crate::tailnet::LOCAL).to_string(),
-        environments: hello["environments"].as_array().into_iter().flatten().filter_map(|name| Some(name.as_str()?.to_string())).collect(),
-    };
-    let client = Client { id, size: (size.0 as usize, size.1 as usize), focused: None, place, env, screen: Screen::new(), pending: String::new(), lines: lines_out, writer };
+    let client = Client { id, size: (size.0 as usize, size.1 as usize), focused: None, place: wire::place(&hello), env, screen: Screen::new(), pending: String::new(), lines: lines_out, writer };
     if events.send(Msg::Attached(client)).is_err() {
         return;
     }
@@ -156,6 +152,9 @@ fn from_terminal(id: u64, message: &Value) -> Option<Msg> {
     }
     if message["copied"] == true {
         return Some(Msg::TerminalCopied);
+    }
+    if message["place"].is_object() {
+        return Some(Msg::Place(id, wire::place(&message["place"])));
     }
     let input = wire::decode(&message["input"]);
     if message["image"].is_null() {
@@ -214,6 +213,8 @@ mod tests {
         assert!(matches!(clipboard, Some(Msg::Image { id: 7, paste: None, image: Err(_) })));
         assert!(matches!(from_terminal(7, &json!({"failed": "Cannot run pbcopy"})), Some(Msg::TerminalFailed(error)) if error == "Cannot run pbcopy"));
         assert!(matches!(from_terminal(7, &json!({"copied": true})), Some(Msg::TerminalCopied)));
+        let place = json!({"place": {"environment": "studio", "environments": ["local", "studio"], "saved": []}});
+        assert!(matches!(from_terminal(7, &place), Some(Msg::Place(7, place)) if place.environment == "studio" && place.environments.len() == 2 && place.saved.is_empty()));
         assert!(from_terminal(7, &json!({"what": 1})).is_none());
     }
 }

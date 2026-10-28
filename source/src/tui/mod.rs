@@ -99,6 +99,8 @@ enum Msg {
     TerminalCopied,
     /// The client's computer could not copy or open what the session asked it to.
     TerminalFailed(String),
+    /// Where the client with this id sees the session after /env removed one of its saved environments.
+    Place(u64, wire::Place),
     Detached(u64),
     Agent(Event),
     Done(Result<String, String>),
@@ -1622,6 +1624,7 @@ impl App {
                 None => {}
             },
             Msg::TerminalFailed(error) => self.push(Item::Error(error)),
+            Msg::Place(id, place) => self.replace_place(id, place),
             Msg::Agent(event) => self.agent_event(event),
             Msg::Done(result) => self.done(result),
             Msg::ModelSettled { model, failures } => {
@@ -3354,9 +3357,9 @@ impl App {
             }
             return;
         }
-        // The settings here are the session host's; only a local session shares them with the terminal's computer.
         let editable = place.environment == crate::tailnet::LOCAL;
         let selected = place.environments.get(*index).cloned();
+        let saved = selected.as_ref().is_some_and(|name| place.saved.contains(name));
         let removing = std::mem::take(confirm);
         match (key.code, selected) {
             (KeyCode::Esc, _) => self.panel = None,
@@ -3367,12 +3370,15 @@ impl App {
                 self.panel = None;
                 self.switch_environment(&name);
             }
-            (KeyCode::Char('d'), Some(name)) if editable && self.settings.environments.contains(&name) => {
-                if removing {
+            (KeyCode::Char('d'), Some(name)) if saved => {
+                if !removing {
+                    *confirm = true;
+                } else if editable {
                     self.update_settings(|s| s.environments.retain(|saved| *saved != name));
                     self.refresh_environments();
                 } else {
-                    *confirm = true;
+                    // The settings here are the session host's; the terminal's computer removes it from its own.
+                    self.ask_terminal(json!({"forget": name}));
                 }
             }
             _ => {}
@@ -3395,15 +3401,24 @@ impl App {
         }
     }
 
-    /// Lists the environments again after the saved ones changed, in the panel and for the terminal that typed /env.
+    /// Lists the environments again after the saved ones changed here, in a local session.
     fn refresh_environments(&mut self) {
-        let environments = crate::tailnet::environments(&self.settings);
-        if let Some(client) = self.clients.iter_mut().find(|client| Some(client.id) == self.typing_client) {
-            client.place.environments = environments.clone();
+        let Some(id) = self.typing_client else { return };
+        let place = wire::Place { environment: crate::tailnet::LOCAL.into(), environments: crate::tailnet::environments(&self.settings), saved: self.settings.environments.clone() };
+        self.replace_place(id, place);
+    }
+
+    /// Shows the client's new place in the panel and keeps it for its next /env.
+    fn replace_place(&mut self, id: u64, place: wire::Place) {
+        if let Some(Panel::Environments { place: shown, index, .. }) = self.panel.as_mut()
+            && self.typing_client == Some(id)
+        {
+            // Only a local session lists the row that adds one, past the environments.
+            *index = (*index).min(place.environments.len() - usize::from(place.environment != crate::tailnet::LOCAL));
+            *shown = place.clone();
         }
-        if let Some(Panel::Environments { place, index, .. }) = self.panel.as_mut() {
-            *index = (*index).min(environments.len());
-            place.environments = environments;
+        if let Some(client) = self.clients.iter_mut().find(|client| client.id == id) {
+            client.place = place;
         }
     }
 
@@ -3810,7 +3825,7 @@ impl App {
                     return view.render(width, PANEL_ROWS);
                 }
                 let editable = place.environment == crate::tailnet::LOCAL;
-                let saved = |environment: &String| editable && self.settings.environments.contains(environment);
+                let saved = |environment: &String| place.saved.contains(environment);
                 let mut rows: Vec<panel::Row> = place
                     .environments
                     .iter()
