@@ -204,6 +204,15 @@ enum Panel {
         /// `d` was pressed once on the selected profile; a second `d` deletes it.
         confirm: bool,
     },
+    /// /env: the environments of the terminal that opened it; in a local session also a row that adds one.
+    Environments {
+        place: Place,
+        index: usize,
+        /// The Tailscale name typed for a new environment.
+        naming: Option<Editor>,
+        /// `d` was pressed once on the selected environment; a second `d` removes it from settings.
+        confirm: bool,
+    },
     /// Every skill, checked when `profile` holds it by name or by its repo.
     ProfileSkills {
         profile: String,
@@ -457,7 +466,7 @@ const BUILTIN_COMMANDS: &[(&str, MidTurn, &str)] = &[
     ("logout", MidTurn::Runs, "Remove a saved account"),
     ("account", MidTurn::Runs, "Show accounts and their usage; pick one to use until it reaches the switch threshold"),
     ("detach", MidTurn::Runs, "Close this terminal's view and leave the session running; `agent attach` returns to it"),
-    ("env", MidTurn::Runs, "[name]: List the computers sessions can run on, or start a new session on one; this one keeps running"),
+    ("env", MidTurn::Runs, "[name]: Pick, add or remove the computers sessions can run on, or start a new session on one; this one keeps running"),
     ("quit", MidTurn::Runs, "Quit agent"),
 ];
 const MENU_ROWS: [usize; 5] = [4, 6, 8, 10, 12];
@@ -1531,15 +1540,13 @@ impl App {
         self.invalidate_screens();
     }
 
-    /// /env: without a name lists the environments of the terminal that typed it, with one moves that terminal to a
+    /// /env: without a name opens the environments of the terminal that typed it, with one moves that terminal to a
     /// new session there. A session that never got a message and has no other terminal ends instead of idling.
     fn switch_environment(&mut self, name: &str) {
         let Some(index) = self.clients.iter().position(|client| Some(client.id) == self.typing_client) else { return };
         let place = &self.clients[index].place;
         if name.is_empty() {
-            let rows: Vec<String> =
-                place.environments.iter().map(|environment| if *environment == place.environment { format!("{environment} (this session)") } else { environment.clone() }).collect();
-            self.system("env", format!("{}\nStart a session on one with /env <name>. Your other computers show up here while they are online on the tailnet.", rows.join(", ")));
+            self.panel = Some(Panel::Environments { place: place.clone(), index: 0, naming: None, confirm: false });
             return;
         }
         if !place.environments.iter().any(|environment| environment == name) {
@@ -1769,7 +1776,7 @@ impl App {
                 }
             }
             Some(Panel::Btw) => self.btw.as_mut().expect("the btw panel opens with a thread").input.insert(&line),
-            Some(Panel::Headroom { input, .. } | Panel::Profiles { naming: Some(input), .. }) => input.insert(line.trim()),
+            Some(Panel::Headroom { input, .. } | Panel::Profiles { naming: Some(input), .. } | Panel::Environments { naming: Some(input), .. }) => input.insert(line.trim()),
             Some(Panel::ProfileSkills { query, index, .. }) => {
                 query.insert(line.trim());
                 *index = 0;
@@ -2604,6 +2611,7 @@ impl App {
             Some(Panel::ContextWindows { .. }) => return self.context_windows_key(key),
             Some(Panel::ProviderOrder { .. }) => return self.provider_order_key(key),
             Some(Panel::Profiles { .. }) => return self.profiles_key(key),
+            Some(Panel::Environments { .. }) => return self.environments_key(key),
             Some(Panel::ProfileSkills { .. }) => return self.profile_skills_key(key),
             Some(Panel::Headroom { .. }) => return self.headroom_key(key),
             Some(Panel::Diff { .. }) => return self.diff_key(code),
@@ -2963,6 +2971,7 @@ impl App {
                 | Panel::ContextWindows { .. }
                 | Panel::ProviderOrder { .. }
                 | Panel::Profiles { .. }
+                | Panel::Environments { .. }
                 | Panel::ProfileSkills { .. }
                 | Panel::Headroom { .. }
                 | Panel::Terminal { .. }
@@ -3328,6 +3337,73 @@ impl App {
             (KeyCode::Char('d'), Some(profile)) if deleting => self.update_settings(|s| s.delete_profile(&profile)),
             (KeyCode::Char('d'), Some(_)) => *confirm = true,
             _ => {}
+        }
+    }
+
+    fn environments_key(&mut self, key: KeyEvent) {
+        let Some(Panel::Environments { place, index, naming, confirm }) = self.panel.as_mut() else { return };
+        if let Some(input) = naming {
+            match key.code {
+                KeyCode::Esc => *naming = None,
+                KeyCode::Enter => {
+                    let name = input.text().trim().to_string();
+                    *naming = None;
+                    self.add_environment(name);
+                }
+                _ => _ = input.edit_key(key),
+            }
+            return;
+        }
+        // The settings here are the session host's; only a local session shares them with the terminal's computer.
+        let editable = place.environment == crate::tailnet::LOCAL;
+        let selected = place.environments.get(*index).cloned();
+        let removing = std::mem::take(confirm);
+        match (key.code, selected) {
+            (KeyCode::Esc, _) => self.panel = None,
+            (KeyCode::Up, _) => *index = index.saturating_sub(1),
+            (KeyCode::Down, _) => *index = (*index + 1).min(place.environments.len() - usize::from(!editable)),
+            (KeyCode::Enter, None) => *naming = Some(Editor::new()),
+            (KeyCode::Enter, Some(name)) if name != place.environment => {
+                self.panel = None;
+                self.switch_environment(&name);
+            }
+            (KeyCode::Char('d'), Some(name)) if editable && self.settings.environments.contains(&name) => {
+                if removing {
+                    self.update_settings(|s| s.environments.retain(|saved| *saved != name));
+                    self.refresh_environments();
+                } else {
+                    *confirm = true;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn add_environment(&mut self, name: String) {
+        if name.is_empty() {
+            return;
+        }
+        if name.contains(char::is_whitespace) {
+            return self.push(Item::Error(format!("{name} is not a Tailscale name: those hold no spaces.")));
+        }
+        if !self.settings.environments.contains(&name) {
+            self.update_settings(|s| s.environments.push(name.clone()));
+        }
+        self.refresh_environments();
+        if let Some(Panel::Environments { place, index, .. }) = self.panel.as_mut() {
+            *index = place.environments.iter().position(|environment| *environment == name).expect("a saved environment is listed");
+        }
+    }
+
+    /// Lists the environments again after the saved ones changed, in the panel and for the terminal that typed /env.
+    fn refresh_environments(&mut self) {
+        let environments = crate::tailnet::environments(&self.settings);
+        if let Some(client) = self.clients.iter_mut().find(|client| Some(client.id) == self.typing_client) {
+            client.place.environments = environments.clone();
+        }
+        if let Some(Panel::Environments { place, index, .. }) = self.panel.as_mut() {
+            *index = (*index).min(environments.len());
+            place.environments = environments;
         }
     }
 
@@ -3717,6 +3793,49 @@ impl App {
                     None => "↑↓ navigate     enter new profile     tab section     esc close".into(),
                 };
                 let view = panel::Panel { title: "Settings".into(), tabs: &setting_tabs(), tab: PROFILES_TAB, search: None, rows: &rows, selected: *index, empty: "", hint: &hint };
+                view.render(width, PANEL_ROWS)
+            }
+            Panel::Environments { place, index, naming, confirm } => {
+                if let Some(input) = naming {
+                    let view = panel::Panel {
+                        title: "New environment".into(),
+                        tabs: &[],
+                        tab: 0,
+                        search: Some(input.field(None)),
+                        rows: &[],
+                        selected: 0,
+                        empty: "The Tailscale name of a computer running `agent serve --tailnet`; offered even while it is offline.",
+                        hint: "enter save     esc cancel",
+                    };
+                    return view.render(width, PANEL_ROWS);
+                }
+                let editable = place.environment == crate::tailnet::LOCAL;
+                let saved = |environment: &String| editable && self.settings.environments.contains(environment);
+                let mut rows: Vec<panel::Row> = place
+                    .environments
+                    .iter()
+                    .map(|environment| {
+                        let note = if *environment == place.environment {
+                            "this session"
+                        } else if saved(environment) {
+                            "saved"
+                        } else {
+                            ""
+                        };
+                        panel::Row { left: environment.clone(), right: vec![span(note, MUTED)] }
+                    })
+                    .collect();
+                if editable {
+                    rows.push(panel::Row { left: "Add environment".into(), right: vec![span("enter name", MUTED)] });
+                }
+                let hint = match place.environments.get(*index) {
+                    Some(environment) if *confirm => format!("d again removes {environment}     any other key keeps it"),
+                    Some(environment) if *environment == place.environment => "↑↓ navigate     esc close".into(),
+                    Some(environment) if saved(environment) => "↑↓ navigate     enter start a session there     d remove     esc close".into(),
+                    Some(_) => "↑↓ navigate     enter start a session there     esc close".into(),
+                    None => "↑↓ navigate     enter add environment     esc close".into(),
+                };
+                let view = panel::Panel { title: "Environments".into(), tabs: &[], tab: 0, search: None, rows: &rows, selected: *index, empty: "", hint: &hint };
                 view.render(width, PANEL_ROWS)
             }
             Panel::ProfileSkills { profile, query, index } => {
