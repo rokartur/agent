@@ -204,6 +204,8 @@ pub struct Agent {
     pub worktree_session: Option<WorktreeSession>,
     /// Directories outside `cwd` that belong to the task: --add-dir and /workspace.
     pub extra_dirs: Vec<PathBuf>,
+    /// The computer the user's terminal is on, when it is not this one: `serve::USER_DEVICE`.
+    pub user_device: Option<String>,
     pub messages: Vec<Value>,
     pub session: Session,
     pub sessions_dir: PathBuf,
@@ -378,6 +380,7 @@ impl Agent {
             nested_instructions: HashSet::new(),
             worktree_session: None,
             extra_dirs: Vec::new(),
+            user_device: std::env::var(crate::serve::USER_DEVICE).ok(),
             shell_context: Vec::new(),
             images: Vec::new(),
             model: settings.model.clone(),
@@ -550,7 +553,7 @@ impl Agent {
             self.collect_condensed(emit)?;
             let messages = self.provider_view();
             let (system, tools) = self.system_and_tools();
-            let mut request = api::request(&self.model, self.max_tokens, &self.effort, &self.cache_ttl, &system, &prompt::cwd_section(&self.cwd, &self.extra_dirs), &tools, &messages);
+            let mut request = api::request(&self.model, self.max_tokens, &self.effort, &self.cache_ttl, &system, &self.cwd_section(), &tools, &messages);
             if self.speed != "standard" {
                 request["speed"] = json!(self.speed);
             }
@@ -1762,17 +1765,21 @@ impl Agent {
         (system, tools)
     }
 
+    fn cwd_section(&self) -> String {
+        prompt::cwd_section(&self.cwd, &self.extra_dirs, self.user_device.as_deref())
+    }
+
     /// The last request's context tokens split across `context::PARTS`.
     pub fn context_split(&self) -> context::PerPart {
         let (system, tools) = self.system_and_tools();
-        let system = format!("{system}{}", prompt::cwd_section(&self.cwd, &self.extra_dirs));
+        let system = format!("{system}{}", self.cwd_section());
         context::split(&system, &tools, &self.provider_view(), self.last_context_tokens)
     }
 
     /// Set after a resume or rewind, so auto-compact runs before a first request that would not fit.
     fn estimate_context_tokens(&mut self) {
         let (system, tools) = self.system_and_tools();
-        let system = format!("{system}{}", prompt::cwd_section(&self.cwd, &self.extra_dirs));
+        let system = format!("{system}{}", self.cwd_section());
         self.last_context_tokens = context::estimate(&system, &tools, &self.provider_view());
     }
 

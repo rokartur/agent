@@ -391,7 +391,7 @@ fn answer(home: &Path, device: &str, request: &Value) -> Result<Answer, String> 
         return serve::connect(home, pid).map(Answer::Session).map_err(|_| ended());
     }
     if request["start"].is_object() {
-        return start_here(home, &request["start"]).map(Answer::Session);
+        return start_here(home, device, &request["start"]).map(Answer::Session);
     }
     if request["message"].is_object() {
         return deliver_here(home, device, &request["message"]).map(|sent| Answer::Reply(json!({"ok": true, "sent": sent})));
@@ -409,7 +409,7 @@ fn deliver_here(home: &Path, device: &str, message: &Value) -> Result<String, St
     peers::send(&peer, &from, Path::new(message["from_cwd"].as_str().unwrap_or("unknown")), text, None)
 }
 
-fn start_here(home: &Path, start: &Value) -> Result<UnixStream, String> {
+fn start_here(home: &Path, device: &str, start: &Value) -> Result<UnixStream, String> {
     let args: Vec<String> = start["args"].as_array().into_iter().flatten().filter_map(|arg| Some(arg.as_str()?.to_string())).collect();
     // parse_args prints and exits the process for these, which would end this listener.
     if args.iter().any(|arg| matches!(arg.as_str(), "-h" | "--help" | "--version")) {
@@ -424,7 +424,7 @@ fn start_here(home: &Path, start: &Value) -> Result<UnixStream, String> {
     if let Some(missing) = missing {
         args.extend(["--missing-cwd".to_string(), missing.display().to_string()]);
     }
-    crate::local_session(home, &options, &args, &cwd, false)
+    crate::local_session(home, &options, &args, &cwd, false, Some(device))
 }
 
 /// Where a remote start runs: the directory it asked for, or home and the asked one when that is not on this computer.

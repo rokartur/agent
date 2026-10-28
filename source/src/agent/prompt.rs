@@ -42,13 +42,15 @@ pub fn system_prompt(agent_dir: &Path, cwd: &Path, trusted: bool, skill_enabled:
 }
 
 /// Sent after the cached system prompt, so moving to another directory or adding one keeps that cache.
-pub fn cwd_section(cwd: &Path, extra_dirs: &[PathBuf]) -> String {
+pub fn cwd_section(cwd: &Path, extra_dirs: &[PathBuf], user_device: Option<&str>) -> String {
     let mut content = cwd.display().to_string();
     if !extra_dirs.is_empty() {
         let dirs: Vec<String> = extra_dirs.iter().map(|dir| dir.display().to_string()).collect();
         content.push_str(&format!("\nAdditional directories: {}", dirs.join(", ")));
     }
-    tag("cwd", &content)
+    let Some(device) = user_device else { return tag("cwd", &content) };
+    let computer = format!("The user's terminal is on another computer, {device}. Your tools run on this one, so its screen, apps and files are not the ones in front of the user.");
+    format!("{}\n{}", tag("cwd", &content), tag("computer", &computer))
 }
 
 fn tag(name: &str, content: &str) -> String {
@@ -481,9 +483,11 @@ mod tests {
         std::fs::create_dir_all(root.join("a")).unwrap();
         std::fs::create_dir_all(root.join("b")).unwrap();
         assert_eq!(system_prompt(&root, &root.join("a"), true, |_| true, false), system_prompt(&root, &root.join("b"), true, |_| true, false));
-        assert_eq!(cwd_section(&root.join("a"), &[]), format!("<cwd>\n{}\n</cwd>", root.join("a").display()));
+        assert_eq!(cwd_section(&root.join("a"), &[], None), format!("<cwd>\n{}\n</cwd>", root.join("a").display()));
         let extra = [root.join("b"), root.join("c")];
-        assert_eq!(cwd_section(&root.join("a"), &extra), format!("<cwd>\n{}\nAdditional directories: {}, {}\n</cwd>", root.join("a").display(), extra[0].display(), extra[1].display()));
+        assert_eq!(cwd_section(&root.join("a"), &extra, None), format!("<cwd>\n{}\nAdditional directories: {}, {}\n</cwd>", root.join("a").display(), extra[0].display(), extra[1].display()));
+        let remote = cwd_section(&root.join("a"), &[], Some("laptop"));
+        assert!(remote.starts_with(&format!("<cwd>\n{}\n</cwd>\n<computer>\n", root.join("a").display())) && remote.contains("another computer, laptop."));
     }
 
     #[test]
