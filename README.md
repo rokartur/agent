@@ -55,7 +55,7 @@ Same model (Claude Opus 5.5, medium thinking), same prompt, three large tasks, 3
 
 | | agent | jcode | pi |
 |---|---|---|---|
-| Version | 0.1.34 and the changes after it | 0.99.1 | 1.4.0 |
+| Version | 0.1.35 | 0.99.1 | 1.4.0 |
 | C: finished in time, cases passed per run | **3 of 3**, 388 · 388 · 387 | 0 of 3, 21 · 21 · 21 | 2 of 3, 388 · 386 · 21 |
 | C: time, cost | **1870 s**, $6.50 | 2400 s, $4.94 | 1981 s, **$3.60** |
 | D: time, tool calls, tokens, cost | 80.1 s, **10.7**, 340k, $0.41 | 142.5 s, 12.0, 715k, $0.83 | **78.5 s**, 11.7, **319k, $0.39** |
@@ -65,7 +65,7 @@ Same model (Claude Opus 5.5, medium thinking), same prompt, three large tasks, 3
 | Base context | **2.3k** | 23.4k | 2.6k |
 | CPU, memory when idle | **0.05 s, 27 MB** | 0.29 s, 47 MB | 0.49 s, 135 MB |
 
-In C, jcode spent all 40 minutes trying jq and wrote no code, and one pi run waited 35 minutes on a jq command that never ended; agent stops a command after 2 minutes. Agent costs more in C because it checks its interpreter against the real jq on hundreds of its own programs, which is also why all three of its runs finished. In D one pi run and one jcode run missed one case. Run to run, times vary more than the gaps between agent and pi in D and E.
+In C, jcode spent all 40 minutes trying jq and wrote no code, and one pi run waited 35 minutes on a jq command that never ended; agent stops a command after 2 minutes. Agent costs more in C because it checks its interpreter against the real jq on hundreds of its own programs, which is also why all three of its runs finished. In D one pi run and one jcode run missed one case. Run to run, times vary more than the gaps between agent and pi in D and E. The reply to "OK" varies too: in a second series of 15, agent took 3.42 s, pi 2.93 s and jcode 5.17 s.
 
 ## Commands worth knowing
 

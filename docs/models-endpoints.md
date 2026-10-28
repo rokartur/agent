@@ -29,7 +29,8 @@ Checked 2026-10 with live requests. Credentials came from `~/.agents/accounts.js
 
 ## What the agent does
 
-- `Client::load_catalog` in `source/src/api/mod.rs` fetches OpenRouter's public list, then the list of each Anthropic and Codex account. A list that fails becomes a startup notice.
+- `Client::load_catalog` in `source/src/api/mod.rs` fetches OpenRouter's public list, then the list of each Anthropic and Codex account. A list that fails becomes a startup notice. A catalog with no failed list is saved to `~/.agents/cache/models.json`.
+- A one-shot run (`-p`) starts on that cached catalog when it lists the configured model, and the lists only refresh the cache behind the request. The lists take 1-3 s of network.
 - Each entry in `custom_providers` (settings) is an OpenAI-compatible server: `GET {base_url}/models`, or the `models` list from settings when it is set. Ids get the prefix `<name>/`, which the agent removes before it sends a request to `{base_url}/chat/completions`. With `"api": "anthropic"` the list is `GET {base_url}/v1/models` and requests go to `{base_url}/v1/messages` with `x-api-key`, without `thinking`, `output_config` and `speed`. A custom model with the same id as an OpenRouter model replaces it. The key comes from the env var named in `api_key_env`. If that is empty, no `authorization` header is sent. A missing key or a failed list becomes a startup notice. Missing context sizes default to 32768 / 16384.
 - A `github-copilot` account (device login in `/login`) lists `GET {base}/models` and sends Chat Completions to `{base}/chat/completions`. `base` comes from `proxy-ep` in the Copilot token. The token lasts about 30 minutes and is refreshed with the saved GitHub token.
 - `models::merge` keeps one entry per model and records in `Model.accounts` which accounts listed it. `/model` shows these accounts next to the provider.

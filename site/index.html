@@ -137,23 +137,23 @@
       </div>
       <figure class="bars" id="benchmark">
         <figcaption>Memory when idle</figcaption>
-        <div class="bar"><b>agent</b><i style="width: 8.7%"></i><span>27 MB</span></div>
-        <div class="bar other"><span>jcode</span><i style="width: 15.5%"></i><span>48 MB</span></div>
-        <div class="bar other"><span>pi</span><i style="width: 100%"></i><span>310 MB</span></div>
+        <div class="bar"><b>agent</b><i style="width: 20%"></i><span>27 MB</span></div>
+        <div class="bar other"><span>jcode</span><i style="width: 34.8%"></i><span>47 MB</span></div>
+        <div class="bar other"><span>pi</span><i style="width: 100%"></i><span>135 MB</span></div>
       </figure>
     </section>
 
     <section class="figs" aria-label="Benchmark">
-      <div class="fig"><strong>2.30 s</strong><span>to answer "OK" <em>pi takes 4.20 s</em></span></div>
-      <div class="fig"><strong>17.8k</strong><span>tokens of base context <em>jcode sends 24.2k</em></span></div>
-      <div class="fig"><strong>$0.61</strong><span>for the semver port <em>jcode costs $0.84</em></span></div>
-      <div class="fig"><strong>9.5</strong><span>tool calls per task <em>jcode needs 14.7</em></span></div>
+      <div class="fig"><strong>3 of 3</strong><span>jq interpreters done in 40 min <em>pi finished 2, jcode 0</em></span></div>
+      <div class="fig"><strong>2.3k</strong><span>tokens of base context <em>jcode sends 23.4k</em></span></div>
+      <div class="fig"><strong>7.3</strong><span>tool calls for the difflib port <em>jcode needs 11.0</em></span></div>
+      <div class="fig"><strong>0.05 s</strong><span>of CPU when idle <em>pi uses 0.49 s</em></span></div>
     </section>
 
     <section class="features" id="features">
       <div>
         <h2>Small binary, full agent</h2>
-        <p class="note">Benchmark: same model, same prompt, 6 runs each, every run passed all hidden tests. <a href="https://github.com/rokartur/agent#compared-with-jcode-and-pi">Full table</a></p>
+        <p class="note">Benchmark: same model, same prompt, three large tasks, 3 runs each. pi is faster on two of them and cheaper on one. <a href="https://github.com/rokartur/agent#compared-with-jcode-and-pi">Full table</a></p>
       </div>
       <div>
         <div class="row"><h3>Every account you have</h3><p>Claude, ChatGPT and GitHub Copilot logins, Anthropic and OpenRouter keys. When one hits its limit, it moves to the next. /usage shows what is left.</p></div>
