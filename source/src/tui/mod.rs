@@ -77,6 +77,7 @@ const PERMISSION_SETTLE: Duration = Duration::from_millis(400);
 
 const DIM: Style = Style::fg(241);
 const WARN: Style = Style::fg(179);
+const FOOTER_SEPARATOR: &str = " · ";
 const SYSTEM: Style = Style::rgb(0x79c0ff);
 const OK: Style = Style::rgb(0x7ee787);
 const ERROR: Style = Style::rgb(0xff7b72);
@@ -4920,7 +4921,13 @@ impl App {
                 _ => short_path(&path),
             }
         };
-        let mut left = vec![span(tilde(&self.cwd), PLAIN.bold())];
+        let mut left = Vec::new();
+        // Every remote client names the same host, the computer this session server runs on.
+        if let Some(host) = self.clients.iter().map(|client| &client.place.environment).find(|environment| *environment != crate::tailnet::LOCAL) {
+            left.push(span(host, SYSTEM.bold()));
+            left.push(span(FOOTER_SEPARATOR, DIM));
+        }
+        left.push(span(tilde(&self.cwd), PLAIN.bold()));
         if let Some(branch) = &self.git.branch {
             left.push(span(" ", PLAIN));
             left.push(span(branch, MUTED));
@@ -4940,16 +4947,18 @@ impl App {
             left.push(span(format!(" + {name}"), MUTED));
         }
         if let Some(goal) = self.goal.lock().unwrap().as_ref() {
-            left.push(span(format!(" goal {}", goal.status.as_str()), MUTED));
+            left.push(span(FOOTER_SEPARATOR, DIM));
+            left.push(span(format!("goal {}", goal.status.as_str()), MUTED));
         }
         match *self.plan.lock().unwrap() {
             Plan::Off => {}
-            Plan::Drafting => left.push(span(" plan", WARN)),
-            Plan::Ready(_) => left.push(span(" plan ready", WARN)),
+            Plan::Drafting => left.extend([span(FOOTER_SEPARATOR, DIM), span("plan", WARN)]),
+            Plan::Ready(_) => left.extend([span(FOOTER_SEPARATOR, DIM), span("plan ready", WARN)]),
         }
         let profiles: Vec<&str> = self.settings.active_profiles.iter().filter(|profile| self.settings.skill_profiles.contains_key(*profile)).map(String::as_str).collect();
         if !profiles.is_empty() {
-            left.push(span(format!(" profile {}", profiles.join(",")), MUTED));
+            left.push(span(FOOTER_SEPARATOR, DIM));
+            left.push(span(format!("profile {}", profiles.join(",")), MUTED));
         }
         let percent = (self.context_tokens * 100).checked_div(self.context_window()).unwrap_or(0);
         let mut right = Line::default();
