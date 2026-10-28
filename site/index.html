@@ -85,6 +85,20 @@
   .row h3 { margin: 0; font-size: 18px; font-weight: 600; }
   .row p { margin: 0; color: #444; font-size: 15px; }
 
+  .env { display: grid; grid-template-columns: 1fr 1fr; gap: 56px; padding: 72px 56px; background: var(--ink); color: #fff; border-radius: 20px; margin-bottom: 140px; }
+  .env p { color: #bdbdbd; margin: 20px 0 0; font-size: 17px; max-width: 40ch; }
+  .env ol { margin: 28px 0 0; padding: 0; list-style: none; display: grid; gap: 14px; }
+  .env li { display: grid; grid-template-columns: 28px 1fr; color: #ddd; }
+  .env li b { color: #7a7a7a; font-weight: 500; }
+  .env li code { background: #1d1d1d; padding: 2px 8px; border-radius: 6px; color: #fff; }
+  .env .panel { align-self: center; min-width: 0; overflow-x: auto; background: #1d1d1d; color: #e8e8e8; border-radius: 14px; padding: 22px 24px; font: 14px/1.7 ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .env .title { color: #fff; font-weight: 600; }
+  .env-row { display: flex; justify-content: space-between; gap: 24px; margin: 0 -10px; padding: 0 10px; border-radius: 4px; }
+  .env-row span + span, .env .hint { color: #7a7a7a; }
+  .env-row.selected { background: #2a2a2a; }
+  .env .hint { display: flex; flex-wrap: wrap; column-gap: 18px; margin-top: 1.7em; }
+  .env p.small { font-size: 15px; color: #7a7a7a; }
+
   .band { display: flex; justify-content: space-between; align-items: center; gap: 40px; flex-wrap: wrap; padding: 72px 56px; background: var(--ink); color: #fff; border-radius: 20px; margin-bottom: 56px; }
   .band .cmd { background: #1d1d1d; color: #fff; }
   .band .cmd:hover { background: #2a2a2a; }
@@ -103,7 +117,8 @@
   @media (max-width: 860px) {
     .wrap { padding: 0 20px; }
     .links a:not(.btn) { display: none; }
-    .hero, .features, .row { grid-template-columns: 1fr; gap: 36px; }
+    .hero, .features, .row, .env { grid-template-columns: 1fr; gap: 36px; }
+    .env { padding: 40px 24px; margin-bottom: 96px; }
     .row { gap: 6px; }
     .hero { padding-top: 40px; padding-bottom: 80px; }
     h1 { font-size: 64px; }
@@ -125,7 +140,7 @@
 <div class="wrap">
   <nav>
     <a class="brand" href="/"><svg width="28" height="15" viewBox="3 9 26 14" aria-hidden="true"><g fill="currentColor"><rect x="3" y="9" width="4" height="14" opacity=".25"/><rect x="7" y="9" width="4" height="14" opacity=".5"/><rect x="11" y="9" width="4" height="14" opacity=".75"/><rect x="15" y="9" width="5" height="14"/><path d="M21 9l8 7-8 7z"/></g></svg>agent</a>
-    <div class="links"><a href="#benchmark">Benchmark</a><a href="#features">Features</a><a href="https://github.com/rokartur/agent">GitHub</a><a class="btn" href="#install">Install</a></div>
+    <div class="links"><a href="#benchmark">Benchmark</a><a href="#env">/env</a><a href="#features">Features</a><a href="https://github.com/rokartur/agent">GitHub</a><a class="btn" href="#install">Install</a></div>
   </nav>
 
   <main>
@@ -148,6 +163,26 @@
       <div class="fig"><strong>2.3k</strong><span>tokens of base context <em>jcode sends 23.4k</em></span></div>
       <div class="fig"><strong>7.3</strong><span>tool calls for the difflib port <em>jcode needs 11.0</em></span></div>
       <div class="fig"><strong>0.05 s</strong><span>of CPU when idle <em>pi uses 0.49 s</em></span></div>
+    </section>
+
+    <section class="env" id="env">
+      <div>
+        <h2>Switch computers with /env</h2>
+        <p>Pick one of your computers on the tailnet and a new session starts there, in this terminal. Its files, its shell, its accounts. No cloud relay, no pairing.</p>
+        <ol>
+          <li><b>1</b><span><code>agent service install</code> on the other computer</span></li>
+          <li><b>2</b><span><code>/env studio</code> here. The session you leave keeps running.</span></li>
+        </ol>
+        <p class="small"><a href="https://github.com/rokartur/agent/blob/main/docs/remote-sessions.md">Setup</a></p>
+      </div>
+      <div class="panel" role="img" aria-label="The /env panel: local is this session, studio is saved and selected, linux-box, and a row to add an environment">
+        <div class="title">Environments</div>
+        <div class="env-row"><span>local</span><span>this session</span></div>
+        <div class="env-row selected"><span>studio</span><span>saved</span></div>
+        <div class="env-row"><span>linux-box</span><span></span></div>
+        <div class="env-row"><span>Add environment</span><span>enter name</span></div>
+        <div class="hint"><span>↑↓ navigate</span><span>enter start a session there</span><span>d remove</span><span>esc close</span></div>
+      </div>
     </section>
 
     <section class="features" id="features">
