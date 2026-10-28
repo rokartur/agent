@@ -477,10 +477,6 @@ fn run(options: Options) -> Result<(), String> {
     // The flags below apply to this run only; /settings saves only the keys it changes.
     let mut settings = settings::load(&home)?;
     settings.reset_to_defaults();
-    // A one-shot run follows ponytail only when the settings file names a level: its rules add ~0.9k tokens to every request.
-    if !options.serve && !settings::sets(&home, "ponytail") {
-        settings.ponytail = "off".into();
-    }
     if let Some(model) = options.model {
         settings.model = model;
     }
