@@ -18,6 +18,8 @@ pub struct Snapshots {
     last_ref: RefCell<String>,
     /// ~/.agents relative to the work tree, when inside it (a dotfiles repo).
     agent_data: Option<PathBuf>,
+    /// One store for every file `take` leaves out, so a move to another work tree keeps them.
+    files_git_dir: PathBuf,
 }
 
 impl Snapshots {
@@ -33,19 +35,14 @@ impl Snapshots {
         crate::process::private_dir(&spills).ok()?;
         let index = spills.join("snapshot.index");
         let agent_data = home.join(".agents").canonicalize().ok().and_then(|dir| dir.strip_prefix(&work_tree).ok().map(Path::to_path_buf));
-        Some(Snapshots { git_dir, work_tree, index, exclude, last_ref: RefCell::default(), agent_data })
+        let files_git_dir = home.join(".agents/snapshots/files");
+        Some(Snapshots { git_dir, work_tree, index, exclude, last_ref: RefCell::default(), agent_data, files_git_dir })
     }
 
     /// Stores the work tree as it is now and returns the tree id.
     /// The tree stays reachable from a ref named after today, so gc packs it and `prune` keeps it for KEEP_DAYS.
     pub fn take(&self) -> Result<String, String> {
-        if !self.git_dir.exists() {
-            // Snapshots hold every file of the project, .env included, so only this user may read them.
-            let parent = self.git_dir.parent().expect("git_dir is under ~/.agents/snapshots");
-            std::fs::create_dir_all(parent).map_err(|e| format!("Cannot create {}: {e}", parent.display()))?;
-            crate::process::private_dir(&self.git_dir)?;
-            run(crate::process::command("git").args(["init", "-q", "--bare", "--shared=0600"]).arg(&self.git_dir))?;
-        }
+        init_store(&self.git_dir)?;
         self.copy_exclude()?;
         self.git(&["add", "-A"])?;
         let tree = self.git(&["write-tree"])?;
@@ -119,6 +116,62 @@ impl Snapshots {
         }
     }
 
+    /// Whether `take` stores `path`: inside the work tree and not ignored.
+    pub fn stores(&self, path: &Path) -> Result<bool, String> {
+        let Ok(relative) = path.strip_prefix(&self.work_tree) else { return Ok(false) };
+        Ok(!self.ignored(&relative.to_string_lossy())?)
+    }
+
+    /// Stores one file `take` leaves out and returns its blob id, None when it does not exist.
+    pub fn save_file(&self, path: &Path) -> Result<Option<String>, String> {
+        let Some(blob) = self.file_blob(path, true)? else { return Ok(None) };
+        run(store_git(&self.files_git_dir).args(["update-ref", &format!("refs/snapshots/{}/{blob}", today()), &blob]))?;
+        run(store_git(&self.files_git_dir).args(["gc", "--auto", "--quiet"]))?;
+        Ok(Some(blob))
+    }
+
+    /// The blob id `path` has now, without storing it.
+    pub fn file_id(&self, path: &Path) -> Result<Option<String>, String> {
+        self.file_blob(path, false)
+    }
+
+    /// Writes the stored `blob` to `path`, or deletes `path` when None.
+    pub fn restore_file(&self, path: &Path, blob: Option<&str>) -> Result<(), String> {
+        let Some(blob) = blob else {
+            return match std::fs::remove_file(path) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(format!("Cannot delete {}: {e}", path.display())),
+                _ => Ok(()),
+            };
+        };
+        let output = store_git(&self.files_git_dir).args(["cat-file", "blob", blob]).output().map_err(|e| format!("Cannot run git: {e}"))?;
+        if !output.status.success() {
+            return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+        }
+        std::fs::write(path, output.stdout).map_err(|e| format!("Cannot write {}: {e}", path.display()))
+    }
+
+    /// Hashes the bytes the edit tools read, so a symlink hashes its target like Write follows it.
+    fn file_blob(&self, path: &Path, write: bool) -> Result<Option<String>, String> {
+        let bytes = match std::fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(format!("Cannot read {}: {e}", path.display())),
+        };
+        init_store(&self.files_git_dir)?;
+        let mut command = store_git(&self.files_git_dir);
+        command.args(["hash-object", "--stdin"]);
+        if write {
+            command.arg("-w");
+        }
+        let mut child = command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| format!("Cannot run git: {e}"))?;
+        child.stdin.take().expect("stdin is piped").write_all(&bytes).map_err(|e| format!("Cannot write to git hash-object: {e}"))?;
+        let output = child.wait_with_output().map_err(|e| format!("Cannot run git: {e}"))?;
+        if !output.status.success() {
+            return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+        }
+        Ok(Some(String::from_utf8_lossy(&output.stdout).trim().to_string()))
+    }
+
     fn git(&self, args: &[&str]) -> Result<String, String> {
         run(&mut self.command(args))
     }
@@ -187,6 +240,17 @@ fn store_git(git_dir: &Path) -> Command {
     // into gc.log and skips auto gc for a day. An hour still covers a take between write-tree and update-ref.
     command.args(["-c", "gc.pruneExpire=1.hour.ago"]);
     command
+}
+
+/// Snapshots hold every file of the project, .env included, so only this user may read them.
+fn init_store(git_dir: &Path) -> Result<(), String> {
+    if git_dir.exists() {
+        return Ok(());
+    }
+    let parent = git_dir.parent().expect("git_dir is under ~/.agents/snapshots");
+    std::fs::create_dir_all(parent).map_err(|e| format!("Cannot create {}: {e}", parent.display()))?;
+    crate::process::private_dir(git_dir)?;
+    run(crate::process::command("git").args(["init", "-q", "--bare", "--shared=0600"]).arg(git_dir)).map(|_| ())
 }
 
 /// Days since the Unix epoch, in UTC.
