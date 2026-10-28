@@ -146,23 +146,23 @@
   <main>
     <section class="hero">
       <div>
-        <h1 class="reveal">27 MB idle.</h1>
+        <h1 class="reveal">25 MB idle.</h1>
         <p class="sub reveal">A coding agent in one Rust binary. Bring your Claude or ChatGPT login and start.</p>
         <button class="cmd reveal" type="button" aria-label="Copy install command"><code><span class="prompt">$ </span>curl -fsSL https://agent.rokartur.com/install.sh | sh</code><span class="status" role="status">Copy</span></button>
       </div>
       <figure class="bars" id="benchmark">
         <figcaption>Memory when idle</figcaption>
-        <div class="bar"><b>agent</b><i style="width: 20%"></i><span>27 MB</span></div>
-        <div class="bar other"><span>jcode</span><i style="width: 34.8%"></i><span>47 MB</span></div>
+        <div class="bar"><b>agent</b><i style="width: 18.5%"></i><span>25 MB</span></div>
+        <div class="bar other"><span>jcode</span><i style="width: 33.3%"></i><span>45 MB</span></div>
         <div class="bar other"><span>pi</span><i style="width: 100%"></i><span>135 MB</span></div>
       </figure>
     </section>
 
     <section class="figs" aria-label="Benchmark">
-      <div class="fig"><strong>3 of 3</strong><span>jq interpreters done in 40 min <em>pi finished 2, jcode 0</em></span></div>
-      <div class="fig"><strong>2.3k</strong><span>tokens of base context <em>jcode sends 23.4k</em></span></div>
-      <div class="fig"><strong>7.3</strong><span>tool calls for the difflib port <em>jcode needs 11.0</em></span></div>
-      <div class="fig"><strong>0.05 s</strong><span>of CPU when idle <em>pi uses 0.49 s</em></span></div>
+      <div class="fig"><strong>3 of 3</strong><span>jq interpreters done in 40 min <em>pi finished 0, jcode 0</em></span></div>
+      <div class="fig"><strong>3.2k</strong><span>tokens of base context <em>jcode sends 23.4k</em></span></div>
+      <div class="fig"><strong>7.0</strong><span>tool calls for the difflib port <em>jcode needs 12.0</em></span></div>
+      <div class="fig"><strong>0.04 s</strong><span>of CPU when idle <em>pi uses 0.49 s</em></span></div>
     </section>
 
     <section class="env" id="env">
@@ -188,7 +188,7 @@
     <section class="features" id="features">
       <div>
         <h2>Small binary, full agent</h2>
-        <p class="note">Benchmark: same model, same prompt, three large tasks, 3 runs each. pi is faster on two of them and cheaper on one. <a href="https://github.com/rokartur/agent#compared-with-jcode-and-pi">Full table</a></p>
+        <p class="note">Benchmark: same model, same prompt, three large tasks, 3 runs each. agent costs the least on all three. pi sends a smaller base context. <a href="https://github.com/rokartur/agent#compared-with-jcode-and-pi">Full table</a></p>
       </div>
       <div>
         <div class="row"><h3>Every account you have</h3><p>Claude, ChatGPT and GitHub Copilot logins, Anthropic and OpenRouter keys. When one hits its limit, it moves to the next. /usage shows what is left.</p></div>
