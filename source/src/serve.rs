@@ -16,6 +16,10 @@ use crate::settings::Settings;
 use crate::tailnet::{self, LOCAL, Reattach};
 use crate::tui::{Ending, Place};
 
+/// Set on a session server a remote start began, and inherited by its subagents: the Tailscale name of the computer
+/// the user's terminal is on.
+pub const USER_DEVICE: &str = "AGENT_USER_DEVICE";
+
 /// A session server this terminal reaches: its socket on this computer, or `agent serve --tailnet` on another one.
 pub enum Stream {
     Local(UnixStream),
@@ -86,8 +90,8 @@ pub fn remove_files(home: &Path) {
 }
 
 /// Starts `agent serve <args>` in `cwd` and connects once it listens. A `piped` stdin goes to the server, which reads
-/// the message from it as `agent` always did.
-pub fn start(home: &Path, args: &[String], cwd: &Path, piped: bool) -> Result<UnixStream, String> {
+/// the message from it as `agent` always did. `user_device` names the computer of a remote start's terminal.
+pub fn start(home: &Path, args: &[String], cwd: &Path, piped: bool, user_device: Option<&str>) -> Result<UnixStream, String> {
     let exe = std::env::current_exe().map_err(|e| format!("Cannot find the agent binary: {e}"))?;
     // sh starts the server in the background and exits, so the server is no child of ours: on SIGHUP, closing the
     // terminal, `process::hang_up_children` would end it. An async list's stdin is /dev/null unless redirected.
@@ -95,6 +99,9 @@ pub fn start(home: &Path, args: &[String], cwd: &Path, piped: bool) -> Result<Un
     command.args(["-c", r#""$0" serve "$@" <&0 >/dev/null 2>&1 & echo $!"#]).arg(exe).args(args).current_dir(cwd).stdout(Stdio::piped()).stderr(Stdio::null());
     if piped {
         command.stdin(Stdio::inherit());
+    }
+    if let Some(device) = user_device {
+        command.env(USER_DEVICE, device);
     }
     let output = command.output().map_err(|e| format!("Cannot start the session server: {e}"))?;
     let pid: u32 = String::from_utf8_lossy(&output.stdout).trim().parse().map_err(|_| format!("Cannot start the session server: sh exited with {}.", output.status))?;
@@ -159,7 +166,7 @@ pub fn show(home: &Path, settings: &Settings, environment: &str, connect: impl F
         };
         tailnet::check(settings, &next)?;
         let cwd = std::env::current_dir().map_err(|e| format!("Cannot read the working directory: {e}"))?;
-        stream = if next == LOCAL { Stream::Local(start(home, &[], &cwd, false)?) } else { tailnet::start(settings, &next, &cwd, &[])? };
+        stream = if next == LOCAL { Stream::Local(start(home, &[], &cwd, false, None)?) } else { tailnet::start(settings, &next, &cwd, &[])? };
         environment = next;
     }
 }
@@ -212,7 +219,7 @@ pub fn attach_command(args: &[String]) -> Result<(), String> {
             Some(listed) => listed,
             None => {
                 let cwd = std::env::current_dir().map_err(|e| format!("Cannot read the working directory: {e}"))?;
-                return show(&home, &settings, LOCAL, || Ok(Stream::Local(start(&home, &["--resume".to_string(), id.clone()], &cwd, false)?)));
+                return show(&home, &settings, LOCAL, || Ok(Stream::Local(start(&home, &["--resume".to_string(), id.clone()], &cwd, false, None)?)));
             }
         },
         _ => return Err("Usage: agent attach [session id].".into()),

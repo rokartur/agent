@@ -414,13 +414,13 @@ fn open_session(options: &Options, args: &[String]) -> Result<(), String> {
             return Err(format!("A piped message cannot reach a session on {environment}; pass it as words after the flags."));
         }
         // Started before the screen, so "Reading the message from stdin..." stays visible.
-        let stream = serve::Stream::Local(local_session(&home, options, &args, &cwd, piped)?);
+        let stream = serve::Stream::Local(local_session(&home, options, &args, &cwd, piped, None)?);
         read_keys_from_the_terminal()?;
         return serve::show(&home, &settings, &environment, || Ok(stream));
     }
     serve::show(&home, &settings, &environment, || {
         if environment == tailnet::LOCAL {
-            return Ok(serve::Stream::Local(local_session(&home, options, &args, &cwd, false)?));
+            return Ok(serve::Stream::Local(local_session(&home, options, &args, &cwd, false, None)?));
         }
         tailnet::start(&settings, &environment, &cwd, &args)
     })
@@ -446,7 +446,7 @@ fn read_keys_from_the_terminal() -> Result<(), String> {
 
 /// The running session `-r` or `-c` names in `cwd`, or a new session server for `args` there. `agent serve
 /// --tailnet` calls it for the computers that start sessions on this one.
-fn local_session(home: &std::path::Path, options: &Options, args: &[String], cwd: &std::path::Path, piped: bool) -> Result<std::os::unix::net::UnixStream, String> {
+fn local_session(home: &std::path::Path, options: &Options, args: &[String], cwd: &std::path::Path, piped: bool, user_device: Option<&str>) -> Result<std::os::unix::net::UnixStream, String> {
     let resumed = match &options.resume {
         Some(Resume::Id(id)) => Some(id.clone()),
         Some(Resume::Latest) => Some(Session::latest(&home.join(".agents/sessions"), cwd)?),
@@ -462,7 +462,7 @@ fn local_session(home: &std::path::Path, options: &Options, args: &[String], cwd
         // An inherited pipe that never closes (IDE task, ssh) would otherwise hang here silently.
         eprintln!("Reading the message from stdin...");
     }
-    serve::start(home, args, cwd, piped)
+    serve::start(home, args, cwd, piped, user_device)
 }
 
 fn run(options: Options) -> Result<(), String> {
