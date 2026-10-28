@@ -87,10 +87,34 @@ pub fn check(settings: &Settings, name: &str) -> Result<(), String> {
     Err(format!("No environment {name}. It must be one of your computers, online on the tailnet and running `agent serve --tailnet` (`agent service install`); now there are: {}.", names.join(", ")))
 }
 
-/// A new session on `environment` in `cwd`, or in the host's home when `cwd` does not exist there.
+/// A new session on `environment` in `cwd`. When `cwd` does not exist there, the user picks between copying it
+/// over with rsync and starting in the host's home.
 pub fn start(settings: &Settings, environment: &str, cwd: &Path, args: &[String]) -> Result<Stream, String> {
+    let (_, _, listed) = request(settings, environment, json!({"list": true, "cwd": cwd}), LIST_TIMEOUT)?;
+    if listed["has_cwd"] == false && crate::tui::confirm(&format!("{} is not on {environment}. Copy it there with rsync? y/n", cwd.display()))? {
+        crate::tui::notice(&format!("Copying {} to {environment}...", cwd.display()))?;
+        copy_to(environment, cwd)?;
+    }
     let (reader, writer, _) = request(settings, environment, json!({"start": {"cwd": cwd, "args": args}}), START_REPLY_TIMEOUT)?;
     Ok(Stream::Remote(reader, writer))
+}
+
+/// Copies `dir` to the same path on `environment` over ssh, `.git` included and what `.gitignore` names left out.
+fn copy_to(environment: &str, dir: &Path) -> Result<(), String> {
+    let remote = crate::agent::edit_hooks::shell_quote(&dir.display().to_string());
+    // BatchMode: a password prompt would draw over the full-screen terminal and wait unseen. accept-new: the
+    // tailnet already vouched for the host, which ssh may not know by its Tailscale name yet.
+    let options = ["-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new"];
+    run("ssh", &[&options[..], &[environment, &format!("mkdir -p {remote}")]].concat())?;
+    run("rsync", &["-az", "-e", &format!("ssh {}", options.join(" ")), "--filter=:- .gitignore", &format!("{}/", dir.display()), &format!("{environment}:{remote}/")])
+}
+
+fn run(program: &str, args: &[&str]) -> Result<(), String> {
+    let output = crate::process::command(program).args(args).output().map_err(|e| format!("Cannot run {program}: {e}"))?;
+    if !output.status.success() {
+        return Err(format!("{program} failed: {}", String::from_utf8_lossy(&output.stderr).trim()));
+    }
+    Ok(())
 }
 
 /// Sends `text` from session `from` here to the session `to` names on `environment`, and says how it went.

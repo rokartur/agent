@@ -14,7 +14,7 @@ mod server;
 mod voice;
 mod wire;
 
-pub use client::{Ending, Fullscreen, attach, ctrl_c_within, notice};
+pub use client::{Ending, Fullscreen, attach, confirm, ctrl_c_within, notice};
 pub use wire::{PROTOCOL, Place, SILENCE};
 
 use crossterm::event::{
