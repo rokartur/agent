@@ -113,7 +113,7 @@ fn reply(blocks: &[Value], stop_reason: &str) -> String {
     events.iter().map(|event| format!("data: {event}\n\n")).collect()
 }
 
-/// `agent acp` as an editor sees it. Every message the agent sends lands in `seen`; permission requests get `allow_once`,
+/// `agent acp` as an editor sees it. Every message the agent sends lands in `seen`; permission requests get `permission_answer`,
 /// and forms the next of `form_replies`, or a decline.
 struct Editor {
     child: Child,
@@ -131,6 +131,8 @@ struct Editor {
     /// Terminal methods the fake terminal answers with an error, and those it never answers.
     terminal_errors: Vec<&'static str>,
     terminal_silent: Vec<&'static str>,
+    /// The option every permission request gets.
+    permission_answer: &'static str,
 }
 
 impl Editor {
@@ -181,6 +183,7 @@ impl Editor {
             worktrees: Vec::new(),
             terminal_errors: Vec::new(),
             terminal_silent: Vec::new(),
+            permission_answer: "allow_once",
         };
         editor.request("initialize", json!({"protocolVersion": 1, "clientCapabilities": capabilities})).unwrap();
         editor
@@ -223,7 +226,7 @@ impl Editor {
                 return message;
             }
             if message["method"] == "session/request_permission" {
-                self.send(&json!({"jsonrpc": "2.0", "id": message["id"], "result": {"outcome": {"outcome": "selected", "optionId": "allow_once"}}}));
+                self.send(&json!({"jsonrpc": "2.0", "id": message["id"], "result": {"outcome": {"outcome": "selected", "optionId": self.permission_answer}}}));
             }
             let method = message["method"].as_str().unwrap_or_default();
             let outside = method.starts_with("fs/") && !self.worktrees.iter().any(|worktree| Path::new(message["params"]["path"].as_str().unwrap()).starts_with(worktree));
@@ -822,4 +825,44 @@ fn a_terminal_is_released_when_the_editor_fails_its_wait_or_ignores_the_kill() {
 
         assert!(editor.seen.iter().any(|message| message["method"] == "terminal/release"), "{:#?}", editor.seen);
     }
+}
+
+#[test]
+fn session_cancel_stops_a_running_command_and_ends_the_turn_as_cancelled() {
+    let home = Home::new("cancel-running");
+    let api = fake_api(vec![reply(&[tool_use("toolu_sleep", "Bash", json!({"command": "sleep 120"}))], "tool_use")]);
+    let mut editor = Editor::start(&home, &api);
+    let session_id = editor.new_session(&home.project());
+    let prompt = editor.start_request("session/prompt", json!({"sessionId": session_id, "prompt": [{"type": "text", "text": "Wait."}]}));
+    editor.until("the sleep's tool call", |message| message["params"]["update"]["sessionUpdate"] == "tool_call");
+
+    editor.send(&json!({"jsonrpc": "2.0", "method": "session/cancel", "params": {"sessionId": session_id}}));
+
+    assert_eq!(editor.answer(prompt, "session/prompt")["result"], json!({"stopReason": "cancelled"}));
+}
+
+#[test]
+fn a_rejected_tool_call_ends_the_turn_without_cancelled() {
+    let home = Home::new("reject");
+    let api = fake_api(vec![reply(&[tool_use("toolu_touch", "Bash", json!({"command": "touch made"}))], "tool_use")]);
+    let mut editor = Editor::start(&home, &api);
+    editor.permission_answer = "reject_once";
+    let session_id = editor.new_session(&home.project());
+
+    assert_eq!(editor.prompt(&session_id, "Make a file.").unwrap(), json!({"stopReason": "end_turn"}));
+    assert!(!home.project().join("made").exists());
+}
+
+#[test]
+fn a_refused_prompt_ends_as_refusal_and_stays_out_of_the_next_request() {
+    let home = Home::new("refusal");
+    let api = fake_api(vec![reply(&[text("I will not.")], "refusal"), reply(&[text("Sure.")], "end_turn")]);
+    let mut editor = Editor::start(&home, &api);
+    let session_id = editor.new_session(&home.project());
+
+    assert_eq!(editor.prompt(&session_id, "Something forbidden.").unwrap(), json!({"stopReason": "refusal"}));
+    editor.prompt(&session_id, "Something fine.").unwrap();
+
+    let next = api.requests.try_iter().last().unwrap()["messages"].to_string();
+    assert!(next.contains("Something fine.") && !next.contains("forbidden") && !next.contains("I will not."), "{next}");
 }
