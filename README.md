@@ -28,10 +28,10 @@ macOS and Linux. Updates itself. `agent --help` for the rest.
 
 Run a session on another of your computers over Tailscale: its files, its shell, its accounts. No cloud relay, no pairing.
 
-1. `agent service install` on the other computer, or `agent service install --on studio` from this one.
-2. `/env studio` here. A new session starts there, in this terminal, and the session you leave keeps running.
+1. `agent service install` on the other computer, or `agent service install --on <computer_name>` from this one.
+2. `/env <computer_name>` here. A new session starts there, in this terminal, and the session you leave keeps running.
 
-`/env` alone lists your environments. `agent --on studio` starts a session there from the shell, and `agent --on auto` picks the least loaded computer. [Setup](docs/remote-sessions.md).
+`/env` alone lists your environments. `agent --on <computer_name>` starts a session there from the shell, and `agent --on auto` picks the least loaded computer. [Setup](docs/remote-sessions.md).
 
 ## Features
 
