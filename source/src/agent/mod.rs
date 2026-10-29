@@ -130,6 +130,8 @@ pub enum Event {
     TurnEnd {
         usage: Usage,
         context_tokens: u64,
+        /// Anthropic's names whatever the provider: `end_turn`, `tool_use`, `max_tokens`, `refusal`, `aborted`.
+        stop_reason: String,
     },
     Compacted {
         summary: String,
@@ -583,7 +585,7 @@ impl Agent {
                 goal.tokens_used += reply.usage.input + reply.usage.cache_write + reply.usage.output;
             }
             self.last_context_tokens = reply.context_tokens;
-            emit(Event::TurnEnd { usage: reply.usage, context_tokens: reply.context_tokens });
+            emit(Event::TurnEnd { usage: reply.usage, context_tokens: reply.context_tokens, stop_reason: reply.stop_reason.clone() });
             let aborted = reply.stop_reason == "aborted";
             if aborted {
                 keep_finished_text(&mut reply.message);
@@ -1482,13 +1484,19 @@ impl Agent {
     /// None: the work tree is not snapshotted, so files stay as they are.
     pub fn rewind(&mut self, index: usize) -> Result<Option<RestoredFiles>, String> {
         let files = self.snapshots.as_ref().map(|snapshots| restore_files(snapshots, &self.checkpoints, &self.file_checkpoints, index)).transpose()?;
+        self.forget_from(index)?;
+        Ok(files)
+    }
+
+    /// Drops message `index` and every later one from the context, and leaves the files as they are.
+    pub fn forget_from(&mut self, index: usize) -> Result<(), String> {
         self.checkpoints.retain(|checkpoint| checkpoint.at < index);
         self.file_checkpoints.retain(|checkpoint| checkpoint.at < index);
         self.compactions.retain(|compaction| compaction.cut <= index);
         self.messages.truncate(index);
         self.session.append(&json!({"type": "rewind", "index": index}))?;
         self.estimate_context_tokens();
-        Ok(files)
+        Ok(())
     }
 
     /// Snapshots around a tool that can change files, so a rewind touches only what this session changed.
