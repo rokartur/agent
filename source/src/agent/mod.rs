@@ -1729,7 +1729,9 @@ impl Agent {
         self.shell_context.push(format!("Session moved from {} to {}. Paths and git state from earlier messages refer to the old checkout.", self.cwd.display(), cwd.display()));
         self.trusted_projects = settings.trusted_projects.clone();
         self.system = prompt::system_prompt(&self.agent_dir, &cwd, settings.trusts(&cwd), |skill| settings.skill_enabled(skill), settings.prefer_global());
+        let editor = self.anchors.editor.take();
         self.anchors = Anchors::new(&session.id);
+        self.anchors.editor = editor;
         self.nested_instructions.clear();
         self.checkpoints.clear();
         self.file_checkpoints.clear();

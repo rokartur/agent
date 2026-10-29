@@ -85,7 +85,7 @@ pub fn run(name: &str, input: &Value, cwd: &Path, anchors: &mut Anchors, rtk: &R
     let result = match name {
         "Read" => anchors.read(cwd, input),
         "Bash" => bash(input, cwd, rtk, abort),
-        "Write" => write(input, cwd),
+        "Write" => write(input, cwd, anchors.editor.as_deref()),
         "ReplaceLines" => anchors.replace(input),
         "Edit" => anchors.replace_match(cwd, input),
         "InsertLines" => anchors.insert(input),
@@ -253,7 +253,7 @@ fn append_status(output: &str, status: &str) -> String {
     if output.is_empty() { status.to_string() } else { format!("{output}\n\n{status}") }
 }
 
-fn write(input: &Value, cwd: &Path) -> Result<String, String> {
+fn write(input: &Value, cwd: &Path, editor: Option<&dyn hashline::EditorFiles>) -> Result<String, String> {
     let path = resolve(cwd, str_arg(input, "file_path")?);
     let content = str_arg(input, "content")?;
     if let Some(parent) = path.parent() {
@@ -269,8 +269,12 @@ fn write(input: &Value, cwd: &Path) -> Result<String, String> {
     {
         return Err(format!("Cannot read {}: {e}", path.display()));
     }
-    hashline::replace_file(&path, content.as_bytes())?;
-    let path = path.canonicalize().map_err(|e| e.to_string())?;
+    match editor {
+        Some(editor) => editor.write(&path, content)?,
+        None => hashline::replace_file(&path, content.as_bytes())?,
+    }
+    // An editor may keep a new file as an unsaved buffer, which canonicalize cannot find on disk.
+    let path = path.canonicalize().unwrap_or(path);
     // No echo of the content: it is already in the call, and every later turn would pay for it twice.
     Ok(format!("Wrote {} lines to {}.", content.lines().count(), path.display()))
 }

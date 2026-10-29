@@ -2,7 +2,7 @@
 // The test plays the editor; no TUI shares its terminal, which is what process::command guards.
 #![allow(clippy::disallowed_methods)]
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
@@ -122,6 +122,8 @@ struct Editor {
     next_id: u64,
     seen: Vec<Value>,
     form_replies: VecDeque<Value>,
+    /// Unsaved buffers by path, for a client that offers fs: reads come from here before the disk, writes land here.
+    buffers: HashMap<String, String>,
 }
 
 impl Editor {
@@ -160,7 +162,7 @@ impl Editor {
                 }
             }
         });
-        let mut editor = Editor { child, stdin, lines, next_id: 0, seen: Vec::new(), form_replies: VecDeque::new() };
+        let mut editor = Editor { child, stdin, lines, next_id: 0, seen: Vec::new(), form_replies: VecDeque::new(), buffers: HashMap::new() };
         editor.request("initialize", json!({"protocolVersion": 1, "clientCapabilities": capabilities})).unwrap();
         editor
     }
@@ -198,6 +200,16 @@ impl Editor {
             }
             if message["method"] == "session/request_permission" {
                 self.send(&json!({"jsonrpc": "2.0", "id": message["id"], "result": {"outcome": {"outcome": "selected", "optionId": "allow_once"}}}));
+            }
+            if message["method"] == "fs/read_text_file" {
+                let path = message["params"]["path"].as_str().unwrap();
+                let content = self.buffers.get(path).cloned().unwrap_or_else(|| std::fs::read_to_string(path).unwrap());
+                self.send(&json!({"jsonrpc": "2.0", "id": message["id"], "result": {"content": content}}));
+            }
+            if message["method"] == "fs/write_text_file" {
+                let params = &message["params"];
+                self.buffers.insert(params["path"].as_str().unwrap().to_string(), params["content"].as_str().unwrap().to_string());
+                self.send(&json!({"jsonrpc": "2.0", "id": message["id"], "result": null}));
             }
             if message["method"] == "elicitation/create" {
                 let result = self.form_replies.pop_front().unwrap_or(json!({"action": "decline"}));
@@ -540,4 +552,29 @@ fn a_subagent_gets_the_mcp_servers_of_the_editor() {
     assert!(offered_tools(&parent).contains(&"mcp__fake__echo"), "{:?}", offered_tools(&parent));
     assert!(!offered_tools(&child).contains(&"Agent"), "the second request is the child's");
     assert!(offered_tools(&child).contains(&"mcp__fake__echo"), "{:?}", offered_tools(&child));
+}
+
+#[test]
+fn an_editor_with_fs_serves_reads_and_takes_edits_of_its_buffers() {
+    let home = Home::new("fs");
+    let file = home.project().join("a.txt");
+    std::fs::write(&file, "on disk\n").unwrap();
+    let api = fake_api(vec![
+        reply(&[tool_use("toolu_read", "Read", json!({"file_path": "a.txt"}))], "tool_use"),
+        reply(&[tool_use("toolu_edit", "Edit", json!({"file_path": "a.txt", "old_string": "unsaved", "new_string": "edited"}))], "tool_use"),
+        reply(&[text("Done.")], "end_turn"),
+    ]);
+    let mut editor = Editor::start_with(&home, &api, json!({"fs": {"readTextFile": true, "writeTextFile": true}}), "sk-fake");
+    editor.buffers.insert(file.display().to_string(), "unsaved buffer\n".into());
+    let session_id = editor.new_session(&home.project());
+
+    editor.prompt(&session_id, "Fix a.txt.").unwrap();
+
+    let read = api.requests.try_iter().nth(1).unwrap();
+    let result = read["messages"].as_array().unwrap().last().unwrap()["content"][0]["content"].to_string();
+    assert!(result.contains("unsaved buffer"), "{result}");
+    assert_eq!(editor.buffers[&file.display().to_string()], "edited buffer\n");
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "on disk\n");
+    let edited = editor.updates("tool_call_update").into_iter().find(|update| update["toolCallId"] == "toolu_edit").unwrap();
+    assert_eq!((&edited["content"][0]["oldText"], &edited["content"][0]["newText"]), (&json!("unsaved buffer\n"), &json!("edited buffer\n")));
 }

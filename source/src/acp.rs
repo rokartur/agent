@@ -1,14 +1,14 @@
 //! `agent acp`: the Agent Client Protocol for editors like Zed, JSON-RPC 2.0 with one message per line on stdin and stdout.
 //! `router` starts a process per session; `serve` is that process, and serves one session.
-//! shortcut: no session/load or client fs; add them when an editor needs them.
+//! shortcut: Bash runs here, not in the editor's terminal; add it when an editor needs it.
 
 mod router;
 pub use router::{SESSION_ENV, route};
 
 use std::collections::HashMap;
 use std::io::{BufRead, Write};
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
 
@@ -20,6 +20,7 @@ use crate::agent::{Agent, Event, workflow};
 use crate::api::models::{Model, PROVIDERS};
 use crate::settings::THINKING_LEVELS;
 use crate::tools::ask::{self, Answer, Question};
+use crate::tools::hashline;
 use crate::tools::plan::Plan;
 use crate::tools::todo::{Status, Todos};
 
@@ -33,6 +34,7 @@ const REQUEST_CANCELLED: i64 = -32800;
 pub fn serve(agent: &mut Agent) -> Result<(), String> {
     let cancelled = Arc::new(AtomicBool::new(false));
     let (requests, replies) = read_stdin(agent.abort.clone(), cancelled.clone());
+    let replies = Arc::new(Mutex::new(replies));
     let mut connection = Connection { replies, cancelled, session_id: String::new(), client: Value::Null, commands: Commands::default() };
     for message in requests {
         let result = handle(agent, &mut connection, &message);
@@ -97,8 +99,8 @@ fn read_stdin(abort: Arc<AtomicBool>, cancelled: Arc<AtomicBool>) -> (Receiver<V
 
 /// What the connection remembers between messages.
 struct Connection {
-    /// The editor's replies to our requests.
-    replies: Receiver<Value>,
+    /// The editor's replies to our requests; `EditorFiles` waits on them too.
+    replies: Arc<Mutex<Receiver<Value>>>,
     cancelled: Arc<AtomicBool>,
     /// The id the editor knows. A `cd` moves the agent to a new saved session, and the editor keeps this one.
     session_id: String,
@@ -146,6 +148,9 @@ fn handle(agent: &mut Agent, connection: &mut Connection, message: &Value) -> Re
                 }
             }
             *commands = Commands::load(agent).map_err(|error| (INTERNAL_ERROR, error))?;
+            if client["fs"]["readTextFile"] == true && client["fs"]["writeTextFile"] == true {
+                agent.anchors.editor = Some(Arc::new(EditorFiles { session_id: session_id.clone(), replies: replies.clone(), next_id: AtomicU64::new(0) }));
+            }
             let mut answer = json!({"modes": modes(agent), "configOptions": config_options(agent)});
             if method == "session/new" {
                 answer["sessionId"] = json!(session_id);
@@ -193,7 +198,14 @@ fn handle(agent: &mut Agent, connection: &mut Connection, message: &Value) -> Re
                 agent.start_naming(&text);
             }
             let first_new_message = agent.messages.len();
-            let mut turn = Turn { cwd: agent.cwd.clone(), todos: agent.todos.clone(), context_window: agent.context_window, notices: !client["session"]["notices"].is_null(), ..Turn::default() };
+            let mut turn = Turn {
+                cwd: agent.cwd.clone(),
+                todos: agent.todos.clone(),
+                context_window: agent.context_window,
+                notices: !client["session"]["notices"].is_null(),
+                editor: agent.anchors.editor.clone(),
+                ..Turn::default()
+            };
             cancelled.store(false, Ordering::Relaxed);
             let mut on_event = |event: Event| match event {
                 Event::Permission { call, request, reply } => {
@@ -209,7 +221,7 @@ fn handle(agent: &mut Agent, connection: &mut Connection, message: &Value) -> Re
                             {"optionId": "reject_once", "name": "Reject", "kind": "reject_once"},
                         ],
                     }}));
-                    let decision = wait_for_decision(replies, &id);
+                    let decision = wait_for_decision(&replies.lock().unwrap(), &id);
                     // An edit hook's check has no tool call whose end would close its card.
                     if call.is_none() {
                         let status = if matches!(decision, Decision::Deny) { "failed" } else { "completed" };
@@ -220,7 +232,7 @@ fn handle(agent: &mut Agent, connection: &mut Connection, message: &Value) -> Re
                 }
                 Event::Ask { questions, reply } => {
                     let message = questions.iter().map(|question| question.question.as_str()).collect::<Vec<_>>().join("\n");
-                    let content = elicit(replies, session_id, &message, question_form(&questions));
+                    let content = elicit(&replies.lock().unwrap(), session_id, &message, question_form(&questions));
                     // No answers at all is how the TUI declines.
                     let _ = reply.send(content.map_or_else(Vec::new, |content| form_answers(&questions, &content)));
                 }
@@ -236,7 +248,7 @@ fn handle(agent: &mut Agent, connection: &mut Connection, message: &Value) -> Re
                 && agent.asks
                 && !cancelled.load(Ordering::Relaxed)
             {
-                let implement = approve_plan(replies, session_id, &plan);
+                let implement = approve_plan(&replies.lock().unwrap(), session_id, &plan);
                 *agent.plan.lock().unwrap() = if implement { Plan::Off } else { Plan::Drafting };
                 agent.save_plan().map_err(|error| (INTERNAL_ERROR, error))?;
                 if implement {
@@ -310,6 +322,37 @@ fn config_options(agent: &Agent) -> Vec<Value> {
 /// A model an account lists, or one of a custom provider, which needs no account.
 fn usable(model: &Model) -> bool {
     !model.accounts.is_empty() || !PROVIDERS.contains(&model.provider.as_str())
+}
+
+/// ACP's fs methods, for a client that offers both: Read, Write and the edit tools see its buffers, unsaved edits included.
+struct EditorFiles {
+    session_id: String,
+    replies: Arc<Mutex<Receiver<Value>>>,
+    next_id: AtomicU64,
+}
+
+impl EditorFiles {
+    fn request(&self, method: &str, params: Value) -> Result<Value, String> {
+        // The pid too: the router keys the editor's replies by id across every session's process.
+        let id = format!("fs-{}-{}", std::process::id(), self.next_id.fetch_add(1, Ordering::Relaxed));
+        send(&json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}));
+        let reply = wait_for_reply(&self.replies.lock().unwrap(), &id).ok_or("The editor closed the connection.")?;
+        match reply.get("error") {
+            Some(error) => Err(format!("The editor answered {method} with: {}", error["message"].as_str().unwrap_or_default())),
+            None => Ok(reply["result"].clone()),
+        }
+    }
+}
+
+impl hashline::EditorFiles for EditorFiles {
+    fn read(&self, path: &Path) -> Result<String, String> {
+        let result = self.request("fs/read_text_file", json!({"sessionId": self.session_id, "path": path}))?;
+        result["content"].as_str().map(String::from).ok_or_else(|| format!("The editor sent no text for {}.", path.display()))
+    }
+
+    fn write(&self, path: &Path, text: &str) -> Result<(), String> {
+        self.request("fs/write_text_file", json!({"sessionId": self.session_id, "path": path, "content": text})).map(|_| ())
+    }
 }
 
 /// The editor's `/` commands: skills as `skill:<name>`, like the TUI, and saved workflows by name.
@@ -424,7 +467,8 @@ fn wait_for_reply(replies: &Receiver<Value>, id: &str) -> Option<Value> {
 
 /// Asks the editor to fill in a form; the content, or None when the user declines or cancels.
 fn elicit(replies: &Receiver<Value>, session_id: &str, message: &str, schema: Value) -> Option<Value> {
-    let id = format!("elicitation-{}", crate::process::now_ms());
+    // The pid too: the router keys the editor's replies by id across every session's process.
+    let id = format!("elicitation-{}-{}", std::process::id(), crate::process::now_ms());
     let params = json!({"sessionId": session_id, "mode": "form", "message": message, "requestedSchema": schema});
     send(&json!({"jsonrpc": "2.0", "id": id, "method": "elicitation/create", "params": params}));
     let reply = wait_for_reply(replies, &id)?;
@@ -488,6 +532,8 @@ struct Turn {
     context_window: u64,
     /// The client shows `notice` updates.
     notices: bool,
+    /// The editor's buffers, which edits go to when the client offers fs; the disk otherwise.
+    editor: Option<Arc<dyn hashline::EditorFiles>>,
 }
 
 impl Turn {
@@ -500,7 +546,7 @@ impl Turn {
             Event::ToolStart { id, name, input } => {
                 let path = input["file_path"].as_str().map(|path| self.cwd.join(path));
                 if let Some(path) = path.as_ref().filter(|_| tool_kind(name) == "edit") {
-                    self.before_edit.insert(id.clone(), (path.clone(), std::fs::read_to_string(path).ok()));
+                    self.before_edit.insert(id.clone(), (path.clone(), self.read_text(path)));
                 }
                 let locations: Vec<Value> = path.iter().map(|path| json!({"path": path, "line": input["offset"].as_u64()})).collect();
                 let update = json!({
@@ -520,7 +566,7 @@ impl Turn {
                 let mut content = vec![json!({"type": "content", "content": {"type": "text", "text": output}})];
                 if let Some((path, old_text)) = self.before_edit.remove(id)
                     && !is_error
-                    && let Ok(new_text) = std::fs::read_to_string(&path)
+                    && let Some(new_text) = self.read_text(&path)
                 {
                     content.insert(0, json!({"type": "diff", "path": path, "oldText": old_text, "newText": new_text}));
                 }
@@ -547,6 +593,13 @@ impl Turn {
             Event::Notice(notice) if self.notices && !notice.is_empty() => json!({"sessionUpdate": "notice", "severity": "info", "title": notice}),
             _ => return Vec::new(),
         }]
+    }
+
+    fn read_text(&self, path: &Path) -> Option<String> {
+        match &self.editor {
+            Some(editor) => editor.read(path).ok(),
+            None => std::fs::read_to_string(path).ok(),
+        }
     }
 
     /// The tool call a permission request is about, titled with the question: the started call, or a new card for an
