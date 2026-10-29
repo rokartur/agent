@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>agent: terminal coding agent for macOS and Linux with Claude and ChatGPT</title>
-<meta name="description" content="Code with Claude or ChatGPT from your terminal. agent is a fast native coding agent for macOS and Linux that installs with one command and updates itself.">
+<title>agent: hit a limit, keep working</title>
+<meta name="description" content="A 25 MB coding agent that moves to your next Claude, ChatGPT or Copilot account at a limit, and uses less than half the tokens of Claude Code.">
 <link rel="canonical" href="https://agent.rokartur.com/">
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <meta name="theme-color" content="#ffffff">
@@ -12,15 +12,15 @@
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="agent">
 <meta property="og:url" content="https://agent.rokartur.com/">
-<meta property="og:title" content="agent: terminal coding agent for macOS and Linux">
-<meta property="og:description" content="Code with Claude or ChatGPT from your terminal. Installs with one command and updates itself.">
+<meta property="og:title" content="agent: hit a limit, keep working">
+<meta property="og:description" content="A 25 MB coding agent that moves to your next Claude, ChatGPT or Copilot account at a limit, and uses less than half the tokens of Claude Code.">
 <meta name="twitter:card" content="summary">
 <script type="application/ld+json">
 {
   "@context": "https://schema.org",
   "@type": "SoftwareApplication",
   "name": "agent",
-  "description": "Terminal coding agent for macOS and Linux. Works with Claude and ChatGPT accounts, installs with one command and updates itself.",
+  "description": "A 25 MB coding agent that moves to your next Claude, ChatGPT or Copilot account at a limit, and uses less than half the tokens of Claude Code.",
   "url": "https://agent.rokartur.com/",
   "applicationCategory": "DeveloperApplication",
   "operatingSystem": "macOS, Linux",
@@ -107,13 +107,13 @@
 </nav>
 
 <main class="col">
-  <h1 class="rise">A coding agent<br>in 25 MB.</h1>
-  <p class="sub rise">One Rust binary. Bring your Claude or ChatGPT login and start.</p>
+  <h1 class="rise">Hit a limit,<br>keep working.</h1>
+  <p class="sub rise">When one Claude, ChatGPT or Copilot account runs out, agent moves to the next. It also uses less than half the tokens Claude Code does, so it runs out later.</p>
   <button class="cmd rise" type="button" aria-label="Copy install command"><code><span class="prompt">$ </span>curl -fsSL https://agent.rokartur.com/install.sh | sh</code><span class="status" role="status">Copy</span></button>
 
   <section id="benchmark" aria-labelledby="benchmark-title">
-    <h2 id="benchmark-title" class="rise">The cheapest of four harnesses</h2>
-    <p class="rise">Same model, same prompt, three large tasks, three runs each. Pick a task and see what each harness spent on it.</p>
+    <h2 id="benchmark-title" class="rise">It spends less to begin&nbsp;with</h2>
+    <p class="rise">Same model, same prompt, three real tasks, three runs each. agent spent the least of four harnesses on every task. Pick a task and a measure.</p>
     <div class="rise">
       <div class="choices" role="group" aria-label="Task" data-tasks></div>
       <div class="choices" role="group" aria-label="Measure" data-measures></div>
@@ -129,8 +129,8 @@
   </section>
 
   <section id="env" aria-labelledby="env-title">
-    <h2 id="env-title" class="rise">Switch computers with /env</h2>
-    <p class="rise">Pick one of your computers on the tailnet and a new session starts there, in this terminal. Its files, its shell, its accounts. No cloud relay, no pairing. Run <code>agent service install</code> on it once, then <code>/env studio</code> here; the session you leave keeps running.</p>
+    <h2 id="env-title" class="rise">Or keep working on another computer</h2>
+    <p class="rise"><code>agent service install</code> on any machine on your tailnet, then <code>/env</code> its name here. The next session runs there, in this terminal, with its own files, shell and accounts. The one you leave keeps running.</p>
     <div class="panel rise" data-ui role="img" aria-label="The /env panel: local is this session, studio is saved and selected, linux-box, and a row to add an environment">
       <div><span>local</span><span class="dim">this session</span></div>
       <div class="selected"><span>studio</span><span>saved</span></div>
@@ -141,16 +141,17 @@
   </section>
 
   <section id="features" aria-labelledby="features-title">
-    <h2 id="features-title" class="rise">What else is in the binary</h2>
+    <h2 id="features-title" class="rise">Everything else</h2>
     <dl class="rise">
-      <dt>Every account you have</dt><dd>Claude, ChatGPT and GitHub Copilot logins, Anthropic and OpenRouter keys. When one hits its limit, it moves to the next. /usage shows what is left.</dd>
-      <dt>Local and open models</dt><dd>Run offline on Ollama or LM Studio, or bring a key for one of 38 hosted providers, from DeepSeek and Groq to Kimi and Z.AI. Any OpenAI- or Anthropic-compatible server works with one line of settings.</dd>
-      <dt>Edits by line anchor</dt><dd>If the file changed since it last read it, the edit is refused. No silent overwrites.</dd>
-      <dt>Checks its own work</dt><dd>Language server errors and your edit hooks after every change. It fixes what they find.</dd>
-      <dt>Rewind</dt><dd>Esc twice goes back to an earlier prompt, and your files go back with it.</dd>
-      <dt>Subagents</dt><dd>Big work splits into parallel child agents, tuned in a plain Markdown prompt.</dd>
-      <dt>Plugins, MCP, skills</dt><dd>Plugins in any language over JSON-RPC. MCP servers with OAuth. Skills, with /skill-usage to find the dead ones.</dd>
-      <dt>Scripts and CI</dt><dd><code>agent -p</code> prints and exits, <code>--headless</code> streams JSONL, <code>agent acp</code> talks to Zed.</dd>
+      <dt>Every account you have</dt><dd>Claude, ChatGPT, Copilot, Anthropic and OpenRouter, as many as you have. At a limit it moves to the next; <code>/usage</code> shows what is left.</dd>
+      <dt>Local and open models</dt><dd>Offline on Ollama or LM Studio, or any of 38 hosted providers with a key. Any OpenAI- or Anthropic-compatible server takes one line of settings.</dd>
+      <dt>Edits that cannot go stale</dt><dd>Edits go by line anchor. If the file changed since agent read it, the edit is refused, so it never writes over your work.</dd>
+      <dt>Checks its own work</dt><dd>After every edit your language server and your edit hooks run. It fixes what they report.</dd>
+      <dt>Rewind</dt><dd>Esc twice goes back to any earlier prompt, and your files go back with it.</dd>
+      <dt>Sessions outlive the terminal</dt><dd>Close the terminal mid-turn and the turn still finishes. <code>agent attach</code> brings it back in any terminal.</dd>
+      <dt>Subagents</dt><dd>Big work splits into parallel child agents. The rules for splitting are a Markdown file you can edit.</dd>
+      <dt>Plugins, MCP, skills</dt><dd>Plugins in any language over JSON-RPC, MCP servers with OAuth, and skills, with <code>/skill-usage</code> to find the dead ones.</dd>
+      <dt>Scripts, CI and editors</dt><dd><code>agent -p</code> answers and exits, <code>--headless</code> streams JSONL, <code>agent acp</code> runs inside Zed.</dd>
     </dl>
   </section>
 
