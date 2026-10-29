@@ -5534,7 +5534,7 @@ fn matching_args(name: &str, arg: &str) -> Vec<(String, String)> {
 }
 
 /// Entries of the query's directory whose names start with its last part, directories first with a trailing `/`.
-/// Dotfiles show only once the last part starts with a dot.
+/// A dotfile matches with or without its dot typed; `.git` shows only once the dot is typed.
 /// A query without a `/` also lists deeper paths whose names start with it, after the top-level ones.
 fn matching_paths(cwd: &Path, query: &str) -> Vec<(String, String)> {
     let (dir, prefix) = query.split_at(query.rfind('/').map_or(0, |slash| slash + 1));
@@ -5543,7 +5543,9 @@ fn matching_paths(cwd: &Path, query: &str) -> Vec<(String, String)> {
     let mut paths = Vec::new();
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
-        if !name.to_lowercase().starts_with(&prefix) || (name.starts_with('.') && !prefix.starts_with('.')) {
+        let lower = name.to_lowercase();
+        let undotted = lower.strip_prefix('.').unwrap_or(&lower);
+        if !(lower.starts_with(&prefix) || undotted.starts_with(&prefix)) || (name == ".git" && !prefix.starts_with('.')) {
             continue;
         }
         let is_dir = entry.path().is_dir();
@@ -5560,12 +5562,9 @@ fn matching_paths(cwd: &Path, query: &str) -> Vec<(String, String)> {
 /// fd is killed after 150 ms, so a huge tree (a home directory takes 7 s) lists nothing deeper instead of freezing typing.
 fn nested_paths(cwd: &Path, prefix: &str) -> Vec<(bool, String)> {
     let mut fd = crate::process::command("fd");
-    fd.args(["--color=never", "--ignore-case", "--glob", "--min-depth=2", "--max-results=50"]).current_dir(cwd);
+    fd.args(["--color=never", "--ignore-case", "--glob", "--hidden", "--exclude=.git", "--min-depth=2", "--max-results=50"]).current_dir(cwd);
     fd.stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null());
-    if prefix.starts_with('.') {
-        fd.arg("--hidden");
-    }
-    let Ok(mut child) = fd.arg(format!("{prefix}*")).spawn() else { return Vec::new() };
+    let Ok(mut child) = fd.arg(format!("{{{prefix}*,.{prefix}*}}")).spawn() else { return Vec::new() };
     let started = Instant::now();
     while child.try_wait().is_ok_and(|status| status.is_none()) {
         if started.elapsed() > Duration::from_millis(150) {
@@ -6566,16 +6565,19 @@ mod tests {
     }
 
     #[test]
-    fn at_menu_lists_a_directory_then_nested_names_with_folders_first_and_dotfiles_on_request() {
+    fn at_menu_lists_a_directory_then_nested_names_with_folders_first_and_dotfiles_without_the_dot() {
         let root = std::env::temp_dir().join(format!("agent-at-{}", std::process::id()));
         std::fs::create_dir_all(root.join("src/tui")).unwrap();
-        for file in ["b.md", ".env", "src/main.rs"] {
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        for file in ["b.md", ".env", "src/main.rs", "src/.envrc"] {
             std::fs::write(root.join(file), "").unwrap();
         }
         let paths = |query: &str| matching_paths(&root, query).into_iter().map(|p| p.0).collect::<Vec<_>>();
-        assert_eq!(paths(""), ["src/", "b.md"]);
-        assert_eq!(paths("."), [".env"]);
-        assert_eq!(paths("src/"), ["src/tui/", "src/main.rs"]);
+        assert_eq!(paths(""), ["src/", ".env", "b.md"]);
+        assert_eq!(paths("."), [".git/", ".env", "src/.envrc"]);
+        assert_eq!(paths("env"), [".env", "src/.envrc"]);
+        assert_eq!(paths("src/e"), ["src/.envrc"]);
+        assert_eq!(paths("src/"), ["src/tui/", "src/.envrc", "src/main.rs"]);
         assert_eq!(paths("src/M"), ["src/main.rs"]);
         assert_eq!(paths("tu"), ["src/tui/"]);
         assert_eq!(paths("m"), ["src/main.rs"]);
