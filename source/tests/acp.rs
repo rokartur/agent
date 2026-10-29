@@ -764,6 +764,7 @@ fn a_file_outside_the_editors_project_is_read_and_edited_on_disk() {
     let api = fake_api(vec![
         reply(&[tool_use("toolu_read", "Read", json!({"file_path": file}))], "tool_use"),
         reply(&[tool_use("toolu_edit", "Edit", json!({"file_path": file, "old_string": "outside", "new_string": "edited"}))], "tool_use"),
+        reply(&[tool_use("toolu_write", "Write", json!({"file_path": "../written.txt", "content": "new\n"}))], "tool_use"),
         reply(&[text("Done.")], "end_turn"),
     ]);
     let mut editor = Editor::start_with(&home, &api, json!({"fs": {"readTextFile": true, "writeTextFile": true}}), "sk-fake");
@@ -772,6 +773,7 @@ fn a_file_outside_the_editors_project_is_read_and_edited_on_disk() {
     editor.prompt(&session_id, "Fix notes.txt.").unwrap();
 
     assert_eq!(std::fs::read_to_string(&file).unwrap(), "edited\n");
+    assert_eq!(std::fs::read_to_string(home.dir.join("written.txt")).unwrap(), "new\n");
     let asked_the_editor = editor.seen.iter().any(|message| message["method"].as_str().is_some_and(|method| method.starts_with("fs/")));
     assert!(!asked_the_editor, "{:#?}", editor.seen);
 }

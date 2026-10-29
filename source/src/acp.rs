@@ -418,7 +418,9 @@ fn result_of(method: &str, reply: &Value) -> Result<Value, String> {
 
 impl EditorFiles for EditorClient {
     fn serves(&self, path: &Path) -> bool {
-        self.roots.iter().any(|root| path.starts_with(root))
+        // By its real directory: `project/../x` and a link out of the project are outside.
+        let dir = path.parent().and_then(|dir| dir.canonicalize().ok());
+        dir.is_some_and(|dir| self.roots.iter().any(|root| dir.starts_with(root)))
     }
 
     fn read(&self, path: &Path) -> Result<String, String> {
