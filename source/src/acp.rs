@@ -167,9 +167,7 @@ fn handle(agent: &mut Agent, connection: &mut Connection, message: &Value) -> Re
         }
         "session/set_mode" => {
             known_session(params, session_id)?;
-            let asked = params["modeId"].as_str().unwrap_or_default();
-            let mode = MODES.into_iter().find(|mode| mode_id(*mode) == asked).ok_or((INVALID_PARAMS, format!("Unknown mode {asked}.")))?;
-            *agent.permission_mode.lock().unwrap() = mode;
+            *agent.permission_mode.lock().unwrap() = mode_by_id(params["modeId"].as_str().unwrap_or_default())?;
             Ok(json!({}))
         }
         "session/set_config_option" => {
@@ -179,6 +177,10 @@ fn handle(agent: &mut Agent, connection: &mut Connection, message: &Value) -> Re
             let Some(option) = option else { return Err((INVALID_PARAMS, format!("Unknown config option {}.", params["configId"]))) };
             if !option["options"].as_array().into_iter().flatten().any(|offered| offered["value"] == value) {
                 return Err((INVALID_PARAMS, format!("{} cannot be {value}.", option["name"].as_str().unwrap_or_default())));
+            }
+            if option["id"] == "mode" {
+                *agent.permission_mode.lock().unwrap() = mode_by_id(value)?;
+                return Ok(json!({"configOptions": config_options(agent)}));
             }
             let mut settings = crate::settings::load(&agent.home).map_err(|error| (INTERNAL_ERROR, error))?;
             // settle_model applies every setting, so the session keeps what it changed and only this option moves.
@@ -311,13 +313,20 @@ fn mode_id(mode: Mode) -> String {
     mode.label().replace(' ', "-")
 }
 
-/// The model, from the models an account lists, and the effort.
+fn mode_by_id(asked: &str) -> Result<Mode, (i64, String)> {
+    MODES.into_iter().find(|mode| mode_id(*mode) == asked).ok_or((INVALID_PARAMS, format!("Unknown mode {asked}.")))
+}
+
+/// The permission mode (again, as Zed ignores `modes` next to config options), the model from the models an account
+/// lists, and the effort.
 fn config_options(agent: &Agent) -> Vec<Value> {
     let catalog = agent.client.catalog();
     let models: Vec<Value> =
         catalog.iter().filter(|model| usable(model) || model.id == agent.model).map(|model| json!({"value": model.id, "name": model.name, "description": model.provider})).collect();
     let efforts: Vec<Value> = THINKING_LEVELS.iter().map(|level| json!({"value": level, "name": level})).collect();
+    let modes: Vec<Value> = MODES.iter().map(|mode| json!({"value": mode_id(*mode), "name": mode.label(), "description": mode.description()})).collect();
     vec![
+        json!({"id": "mode", "name": "Mode", "category": "mode", "type": "select", "currentValue": mode_id(*agent.permission_mode.lock().unwrap()), "options": modes}),
         json!({"id": "model", "name": "Model", "category": "model", "type": "select", "currentValue": agent.model, "options": models}),
         json!({"id": "effort", "name": "Effort", "category": "thought_level", "type": "select", "currentValue": agent.effort, "options": efforts}),
     ]

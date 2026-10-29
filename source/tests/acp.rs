@@ -366,7 +366,10 @@ fn the_editor_sets_the_permission_mode_model_and_effort_of_the_next_prompt() {
     let set = |editor: &mut Editor, config_id: &str, value: &str| editor.request("session/set_config_option", json!({"sessionId": session_id, "configId": config_id, "value": value}));
 
     assert!(editor.request("session/set_mode", json!({"sessionId": session_id, "modeId": "plan"})).is_err());
-    editor.request("session/set_mode", json!({"sessionId": session_id, "modeId": "full-access"})).unwrap();
+    editor.request("session/set_mode", json!({"sessionId": session_id, "modeId": "ask"})).unwrap();
+    // Zed ignores modes once a session has config options, so the mode is one of them too.
+    assert!(set(&mut editor, "mode", "plan").is_err());
+    set(&mut editor, "mode", "full-access").unwrap();
     assert!(set(&mut editor, "model", "gpt-unknown").is_err());
     assert!(set(&mut editor, "effort", "extreme").is_err());
     assert!(set(&mut editor, "speed", "fast").is_err());
@@ -375,7 +378,7 @@ fn the_editor_sets_the_permission_mode_model_and_effort_of_the_next_prompt() {
     editor.prompt(session_id, "Make a file.").unwrap();
 
     let current: Vec<&str> = options.as_array().unwrap().iter().map(|option| option["currentValue"].as_str().unwrap()).collect();
-    assert_eq!(current, ["claude-sonnet-9", "low"]);
+    assert_eq!(current, ["full-access", "claude-sonnet-9", "low"]);
     assert_eq!(api.requests.recv_timeout(WAIT).unwrap()["model"], "claude-sonnet-9");
     assert!(!editor.seen.iter().any(|message| message["method"] == "session/request_permission"), "full access asks nothing");
     assert!(home.project().join("made").exists());
