@@ -341,8 +341,8 @@ fn parse_args(args: Vec<String>) -> Result<Options, String> {
         return Err("--on starts an interactive session, so it takes no acp, -p, --json, --headless or --parent.".into());
     }
     let picks_session = matches!(options.resume, Some(Resume::Pick));
-    if options.acp && (options.print || options.json || options.headless || options.prompt.is_some() || picks_session) {
-        return Err("acp reads its messages from the editor, so it takes no message, -p, --json, --headless or -r without an id.".into());
+    if options.acp && (options.print || options.json || options.headless || options.prompt.is_some() || options.resume.is_some()) {
+        return Err("acp opens the editor's sessions, so it takes no message, -p, --json, --headless, -c or -r.".into());
     }
     if picks_session && (options.print || options.json || options.headless || options.parent.is_some()) {
         return Err("--resume without an id opens the session list, so it needs the interactive mode.".into());
@@ -818,6 +818,9 @@ mod tests {
         assert!(options.acp && options.prompt.is_none());
         assert!(super::parse_args(args(&["acp", "hi"])).is_err());
         assert!(super::parse_args(args(&["acp", "-p"])).is_err());
+        // The editor opens sessions itself, and every session's process gets these flags.
+        assert!(super::parse_args(args(&["acp", "-c"])).is_err());
+        assert!(super::parse_args(args(&["acp", "-r", "abc123"])).is_err());
         assert!(!super::parse_args(args(&["-p", "acp"])).unwrap().acp);
         assert!(super::parse_args(args(&["acp", "--login"])).unwrap().login);
         assert!(super::parse_args(args(&["--login"])).is_err());
