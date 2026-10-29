@@ -504,3 +504,40 @@ fn a_cancelled_session_new_stops_waiting_for_a_hung_mcp_server() {
     assert_eq!(answer["error"]["code"], -32800, "{answer}");
     assert!(started.elapsed() < Duration::from_secs(10));
 }
+
+/// An MCP server over stdio with one tool, `echo`.
+const FAKE_MCP_SERVER: &str = r#"
+import json, sys
+for line in sys.stdin:
+    m = json.loads(line)
+    if "id" not in m:
+        continue
+    if m["method"] == "initialize":
+        r = {"protocolVersion": m["params"]["protocolVersion"], "capabilities": {"tools": {}}, "serverInfo": {"name": "fake", "version": "1"}}
+    elif m["method"] == "tools/list":
+        r = {"tools": [{"name": "echo", "description": "Echoes", "inputSchema": {"type": "object"}}]}
+    else:
+        r = {"content": [{"type": "text", "text": "echo"}]}
+    print(json.dumps({"jsonrpc": "2.0", "id": m["id"], "result": r}), flush=True)
+"#;
+
+#[test]
+fn a_subagent_gets_the_mcp_servers_of_the_editor() {
+    let home = Home::new("subagent-mcp");
+    let api = fake_api(vec![
+        reply(&[tool_use("toolu_agent", "Agent", json!({"description": "Look", "prompt": "Say hi."}))], "tool_use"),
+        reply(&[text("Hi from the child.")], "end_turn"),
+        reply(&[text("The child said hi.")], "end_turn"),
+    ]);
+    let mut editor = Editor::start(&home, &api);
+    let servers = json!([{"name": "fake", "command": "python3", "args": ["-c", FAKE_MCP_SERVER], "env": []}]);
+    let session = editor.request("session/new", json!({"cwd": home.project(), "mcpServers": servers})).unwrap();
+
+    editor.prompt(session["sessionId"].as_str().unwrap(), "Ask a subagent.").unwrap();
+
+    let parent = api.requests.recv_timeout(WAIT).unwrap();
+    let child = api.requests.recv_timeout(WAIT).unwrap();
+    assert!(offered_tools(&parent).contains(&"mcp__fake__echo"), "{:?}", offered_tools(&parent));
+    assert!(!offered_tools(&child).contains(&"Agent"), "the second request is the child's");
+    assert!(offered_tools(&child).contains(&"mcp__fake__echo"), "{:?}", offered_tools(&child));
+}

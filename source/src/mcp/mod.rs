@@ -22,11 +22,17 @@ pub struct Mcp {
     state: Arc<Mutex<State>>,
 }
 
+/// An `agent acp` session passes its editor's MCP servers to its subagents here, as the JSON list of session/new.
+/// `process::command` drops it from every other child, since headers and env values can hold secrets.
+pub const CLIENT_SERVERS_ENV: &str = "AGENT_ACP_MCP_SERVERS";
+
 #[derive(Default)]
 struct State {
     servers: Vec<Entry>,
     /// The servers an ACP client passed with session/new; `sync` runs them next to `mcp.json`'s, over one of the same name.
     client: Vec<Server>,
+    /// `client` as the client sent it, which subagents get in CLIENT_SERVERS_ENV.
+    client_list: Value,
     /// Why `mcp.json` could not be read, shown in /mcp.
     error: Option<String>,
     next_run: u64,
@@ -124,9 +130,18 @@ impl Mcp {
 
     /// Replaces the servers an ACP client passed before with `list`, the `mcpServers` of its session/new, and syncs.
     pub fn set_client_servers(&self, list: &Value, disabled: &[String], approved: &[String]) -> Result<(), String> {
-        self.state.lock().unwrap().client = config::client_servers(list, &self.cwd)?;
+        let client = config::client_servers(list, &self.cwd)?;
+        let mut state = self.state.lock().unwrap();
+        state.client = client;
+        state.client_list = list.clone();
+        drop(state);
         self.sync(disabled, approved);
         Ok(())
+    }
+
+    /// The ACP client's servers in its own shape, null when there are none.
+    pub fn client_list(&self) -> Value {
+        self.state.lock().unwrap().client_list.clone()
     }
 
     /// Waits until no server is still connecting, so a run without a UI starts with every tool.

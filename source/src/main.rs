@@ -543,6 +543,10 @@ fn run(options: Options) -> Result<(), String> {
     let mut agent = Agent::new(client, &settings, home.clone(), cwd, session, sessions_dir, options.parent.clone());
     agent.plugins.sync(&settings.disabled_plugins, &settings.plugin_settings);
     agent.mcp.sync(&settings.disabled_mcp, &settings.approved_mcp);
+    if let Ok(list) = std::env::var(mcp::CLIENT_SERVERS_ENV) {
+        let list = serde_json::from_str(&list).map_err(|e| format!("{}: {e}", mcp::CLIENT_SERVERS_ENV))?;
+        agent.mcp.set_client_servers(&list, &settings.disabled_mcp, &settings.approved_mcp)?;
+    }
     agent.load(history);
     for dir in &options.add_dirs {
         agent.add_dir(dir)?;

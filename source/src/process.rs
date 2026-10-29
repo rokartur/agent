@@ -49,6 +49,7 @@ pub const SIGTERM: i32 = 15;
 pub fn command(program: impl AsRef<OsStr>) -> Command {
     let mut command = Command::new(program);
     command.stdin(Stdio::null());
+    command.env_remove(crate::mcp::CLIENT_SERVERS_ENV);
     // SAFETY: the hook only calls setsid, which is async-signal-safe.
     unsafe { command.pre_exec(new_session) };
     command

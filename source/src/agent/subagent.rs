@@ -146,6 +146,8 @@ pub struct Launch {
     pub trusted: bool,
     /// Keeps WebSearch, WebFetch and GetSearchContent, which Workflow agents get.
     pub web: bool,
+    /// The editor's MCP servers of an `agent acp` parent, null for none.
+    pub client_mcp: Value,
 }
 
 #[derive(Default)]
@@ -285,7 +287,11 @@ fn start(run: &Arc<Run>, message: &str, resume: Option<&str>, runs: &Arc<Mutex<R
     if let Some(session) = resume {
         args.extend(["--resume", session]);
     }
-    let mut child = crate::process::command(exe)
+    let mut command = crate::process::command(exe);
+    if !launch.client_mcp.is_null() {
+        command.env(crate::mcp::CLIENT_SERVERS_ENV, launch.client_mcp.to_string());
+    }
+    let mut child = command
         .args(args)
         .args(launch.extra_dirs.iter().flat_map(|dir| [std::ffi::OsStr::new("--add-dir"), dir.as_os_str()]))
         .current_dir(&launch.cwd)
@@ -480,6 +486,7 @@ pub fn test_launch() -> Launch {
         extra_dirs: Vec::new(),
         trusted: false,
         web: false,
+        client_mcp: Value::Null,
     }
 }
 

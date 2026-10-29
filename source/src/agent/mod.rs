@@ -1045,6 +1045,7 @@ impl Agent {
                     extra_dirs: self.extra_dirs.clone(),
                     trusted: prompt::is_trusted(&self.trusted_projects, &cwd),
                     web: false,
+                    client_mcp: self.mcp.client_list(),
                 };
                 // The tool reports failure, so this chunk's runs must not keep going; earlier chunks have finished.
                 match subagent::spawn(&self.subagents, launch, background, None, &self.follow_ups) {
@@ -1111,6 +1112,7 @@ impl Agent {
             extra_dirs: self.extra_dirs.clone(),
             trusted: prompt::is_trusted(&self.trusted_projects, &self.cwd),
             web: true,
+            client_mcp: self.mcp.client_list(),
         };
         let host = workflow::Host { runs: self.subagents.clone(), follow_ups: self.follow_ups.clone(), base, models };
         let runs_dir = self.workflow_runs_dir();
