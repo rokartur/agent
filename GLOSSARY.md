@@ -75,7 +75,7 @@ A folder with a `SKILL.md` of instructions the model loads when a task matches i
 _Avoid_: Prompt, recipe
 
 **Profile**:
-A named set of skills, by name or `owner/repo` source, in `skill_profiles`; its skills load only while `/profile:<name>` has it on. Skills no profile holds always load.
+A named set of skills, by name or `owner/repo` source, in `skill_profiles`; its skills load only while `/profile:<name>` has it on, even ones in `disabled_skills`. Skills no profile holds load unless disabled.
 _Avoid_: Mode, skill set
 
 **Subagent**:

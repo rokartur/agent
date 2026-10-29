@@ -192,13 +192,13 @@ impl Settings {
         self.conflict_priority == "global"
     }
 
-    /// A skill no profile holds loads unless disabled; one a profile holds loads only while one of its profiles is active.
+    /// A skill no profile holds loads unless disabled; one a profile holds loads only while one of its profiles is active, disabled or not.
     pub fn skill_enabled(&self, skill: &Skill) -> bool {
-        if self.disabled_skills.contains(&skill.name) {
-            return false;
-        }
         let holders: Vec<&String> = self.skill_profiles.keys().filter(|profile| self.profile_holds(profile, skill)).collect();
-        holders.is_empty() || holders.iter().any(|profile| self.active_profiles.contains(profile))
+        if holders.is_empty() {
+            return !self.disabled_skills.contains(&skill.name);
+        }
+        holders.iter().any(|profile| self.active_profiles.contains(profile))
     }
 
     pub fn profile_holds(&self, profile: &str, skill: &Skill) -> bool {
@@ -674,7 +674,9 @@ mod tests {
         settings.active_profiles = vec!["writing".into()];
         assert_eq!(enabled(&settings), [true, true, true]);
         settings.disabled_skills = vec!["seo-audit".into(), "tdd".into()];
-        assert_eq!(enabled(&settings), [false, true, false]);
+        assert_eq!(enabled(&settings), [true, true, false]);
+        settings.active_profiles.clear();
+        assert_eq!(enabled(&settings), [false, false, false]);
     }
 
     #[test]
