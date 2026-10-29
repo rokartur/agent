@@ -13,6 +13,14 @@ pub const CHANNELS: [&str; 3] = ["latest", "pre-release", "off"];
 /// GitHub allows 60 unauthenticated API calls an hour per IP, and every TUI start would spend one.
 const CHECK_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
 
+/// What an update is doing right now; `agent update` draws it, the start-up check passes `&|_| ()`.
+pub enum Progress<'a> {
+    Checking,
+    Downloading { version: &'a str, received: u64, total: Option<u64> },
+    Verifying,
+    Installing,
+}
+
 /// Only CI release builds update themselves, so a local `cargo build` never gets replaced.
 pub fn enabled() -> bool {
     option_env!("AGENT_RELEASE").is_some()
@@ -30,22 +38,31 @@ pub fn install_latest(home: &Path, channel: &str) -> Result<Option<String>, Stri
         mark_checked(&stamp, channel)?;
     }
     let Some(latest) = latest? else { return Ok(None) };
-    install_if_newer(latest)
+    install_if_newer(latest, &|_| ())
 }
 
 /// `agent update`: checks now, whatever the channel and the last check, and reports an offline start as an error.
-pub fn install_now(channel: &str) -> Result<Option<String>, String> {
+pub fn install_now(channel: &str, report: &dyn Fn(Progress)) -> Result<Option<String>, String> {
+    report(Progress::Checking);
     let latest = latest_version(channel == "pre-release")?.ok_or("Cannot reach GitHub to check for updates.")?;
-    install_if_newer(latest)
+    install_if_newer(latest, report)
 }
 
-fn install_if_newer(latest: String) -> Result<Option<String>, String> {
+fn install_if_newer(latest: String, report: &dyn Fn(Progress)) -> Result<Option<String>, String> {
     if !is_newer(&latest, CURRENT) {
         return Ok(None);
     }
     let exe = std::env::current_exe().map_err(|e| format!("Cannot find the agent binary: {e}"))?;
     let staged = exe.with_file_name(format!(".agent-update-{}", std::process::id()));
-    let result = download(&latest, &staged).and_then(|()| verify(&staged, &latest)).and_then(|()| std::fs::rename(&staged, &exe).map_err(|e| format!("Cannot replace {}: {e}", exe.display())));
+    let result = download(&latest, &staged, report)
+        .and_then(|()| {
+            report(Progress::Verifying);
+            verify(&staged, &latest)
+        })
+        .and_then(|()| {
+            report(Progress::Installing);
+            std::fs::rename(&staged, &exe).map_err(|e| format!("Cannot replace {}: {e}", exe.display()))
+        });
     if let Err(error) = result {
         let _ = std::fs::remove_file(&staged);
         return Err(error);
@@ -91,7 +108,7 @@ fn newest(releases: &Value, include_prereleases: bool) -> Option<&str> {
         .max_by_key(|version| precedence(version))
 }
 
-fn download(version: &str, path: &Path) -> Result<(), String> {
+fn download(version: &str, path: &Path, report: &dyn Fn(Progress)) -> Result<(), String> {
     let asset = format!("agent-{}-{}", std::env::consts::OS, std::env::consts::ARCH);
     let url = format!("{RELEASES}/download/v{version}/{asset}");
     let http: ureq::Agent = ureq::Agent::config_builder().timeout_global(Some(Duration::from_secs(300))).build().into();
@@ -103,8 +120,21 @@ fn download(version: &str, path: &Path) -> Result<(), String> {
         }
         _ => format!("Cannot write {}: {e}", path.display()),
     })?;
-    let bytes = http.get(&url).call().and_then(|mut response| response.body_mut().with_config().limit(100 << 20).read_to_vec()).map_err(|e| format!("Cannot download {url}: {e}"))?;
-    std::io::Write::write_all(&mut file, &bytes).map_err(|e| format!("Cannot write {}: {e}", path.display()))?;
+    let mut response = http.get(&url).call().map_err(|e| format!("Cannot download {url}: {e}"))?;
+    let total = response.body().content_length();
+    let mut body = response.body_mut().with_config().limit(100 << 20).reader();
+    let mut received = 0;
+    let mut chunk = [0u8; 64 << 10];
+    report(Progress::Downloading { version, received, total });
+    loop {
+        let read = std::io::Read::read(&mut body, &mut chunk).map_err(|e| format!("Cannot download {url}: {e}"))?;
+        if read == 0 {
+            break;
+        }
+        std::io::Write::write_all(&mut file, &chunk[..read]).map_err(|e| format!("Cannot write {}: {e}", path.display()))?;
+        received += read as u64;
+        report(Progress::Downloading { version, received, total });
+    }
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).map_err(|e| format!("Cannot make {} executable: {e}", path.display()))
 }

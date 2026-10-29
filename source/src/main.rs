@@ -12,6 +12,7 @@ mod process;
 mod serve;
 mod service;
 mod settings;
+mod spinner;
 mod tailnet;
 mod tools;
 mod tui;
@@ -169,7 +170,16 @@ fn update_command(args: &[String]) -> Result<(), String> {
     }
     // `off` only stops the automatic check, so an explicit update with it follows stable releases.
     let home = home()?;
-    match update::install_now(&settings::load(&home)?.update_channel)? {
+    let channel = settings::load(&home)?.update_channel;
+    let progress = spinner::Spinner::start();
+    let installed = update::install_now(&channel, &|step| match step {
+        update::Progress::Checking => progress.set("Check for updates", String::new()),
+        update::Progress::Downloading { version, received, total } => progress.set(&format!("Download v{version}"), spinner::transfer(received, total)),
+        update::Progress::Verifying => progress.set("Verify the download", String::new()),
+        update::Progress::Installing => progress.set("Replace the binary", String::new()),
+    });
+    progress.finish();
+    match installed? {
         Some(version) => {
             println!("Updated to v{version}.");
             if service::restart_if_installed(&home)? {
