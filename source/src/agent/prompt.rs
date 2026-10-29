@@ -436,7 +436,7 @@ fn format_skills(skills: Vec<Skill>) -> String {
     }
     let mut lines = vec![
         "The following skills provide specialized instructions for specific tasks.".to_string(),
-        "Load a skill with the Skill tool when the task matches its description.".to_string(),
+        "Load a skill when the task matches its description: call the Skill tool (when it is not in your tool list, find it with tool search first) or Read its SKILL.md.".to_string(),
         "When a skill file references a relative path, resolve it against the skill directory (parent of SKILL.md / dirname of the path) and use that absolute path in tool commands.".to_string(),
     ];
     for (root, mut entries) in by_root {
@@ -468,6 +468,12 @@ mod tests {
         assert_eq!(fields[0], ("name".into(), "say \"hi\"".into()));
         assert_eq!(fields[1], ("description".into(), "first line second line".into()));
         assert_eq!(fields[2], ("license".into(), "MIT".into()));
+    }
+
+    #[test]
+    fn skills_listing_tells_how_to_reach_the_deferred_skill_tool() {
+        let listing = format_skills(Vec::new());
+        assert!(listing.contains("find it with tool search first") && listing.contains("Read its SKILL.md"), "{listing}");
     }
 
     #[test]
