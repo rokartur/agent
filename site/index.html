@@ -30,201 +30,204 @@
 }
 </script>
 <style>
-  :root { --ink: #0a0a0a; --text: #333; --muted: #6b6b6b; --tone: #f4f4f4; --line: #ececec; --ease: cubic-bezier(.2, 0, 0, 1); }
+  :root { --ink: #0a0a0a; --muted: #595959; --tone: #f3f3f1; --tone-2: #e9e9e6; --ease: cubic-bezier(.2, 0, 0, 1); }
   * { box-sizing: border-box; }
   html { scroll-behavior: smooth; }
-  body { margin: 0; background: #fff; color: var(--ink); font: 16px/1.55 Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; -webkit-font-smoothing: antialiased; }
+  body { margin: 0; background: #fff; color: var(--ink); font: 17px/1.55 Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; -webkit-font-smoothing: antialiased; }
   a { color: inherit; }
-  :focus-visible { outline: 2px solid var(--ink); outline-offset: 3px; border-radius: 4px; }
-  code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-  .wrap { max-width: 1280px; margin: 0 auto; padding: 0 56px; }
+  :focus-visible { outline: 2px solid var(--ink); outline-offset: 3px; }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .9em; }
+  p code, dd code { background: var(--tone); padding: 1px 5px; }
 
-  nav { display: flex; align-items: center; justify-content: space-between; padding-top: 24px; padding-bottom: 24px; }
-  .brand { display: flex; align-items: center; gap: 10px; font-weight: 600; font-size: 17px; text-decoration: none; }
-  .links { display: flex; align-items: center; gap: 28px; font-size: 14px; }
-  .links a { text-decoration: none; color: #444; transition: color 150ms var(--ease); }
-  .links a:hover { color: var(--ink); }
-  .links .btn { color: #fff; }
-  .btn { display: inline-flex; padding: 10px 16px; border-radius: 8px; background: var(--ink); color: #fff; font-weight: 500; transition: transform 150ms var(--ease), opacity 150ms var(--ease); }
-  .links .btn:hover { color: #fff; opacity: .85; }
-  .btn:active, .cmd:active { transform: scale(.97); }
+  nav { display: flex; justify-content: space-between; align-items: center; gap: 24px; padding: 28px 32px; font-size: 15px; }
+  nav .links { display: flex; gap: 24px; }
+  nav a { text-decoration: none; transition: opacity 150ms var(--ease); }
+  nav a:hover { opacity: .6; }
+  .brand { display: flex; align-items: center; gap: 10px; font-weight: 600; font-size: 17px; }
 
-  .cmd { all: unset; box-sizing: border-box; cursor: pointer; display: inline-flex; align-items: center; gap: 14px; max-width: 100%; padding: 14px 18px; border-radius: 10px; background: var(--tone); font-size: clamp(11px, 3vw, 15px); white-space: nowrap; transition: transform 150ms var(--ease), background-color 150ms var(--ease); }
-  .cmd:hover { background: #ebebeb; }
+  .col { width: min(600px, calc(100% - 40px)); margin-left: max(20px, 22vw); }
+  h1 { margin: 24vh 0 24px; width: max-content; max-width: calc(100vw - 40px); font-size: clamp(44px, 5.6vw, 84px); line-height: 1; letter-spacing: -.045em; font-weight: 650; }
+  .sub { margin: 0 0 40px; font-size: 19px; }
+  .cmd { all: unset; box-sizing: border-box; cursor: pointer; display: flex; justify-content: space-between; align-items: center; gap: 16px; width: 100%; padding: 16px 18px; background: var(--tone); white-space: nowrap; transition: background-color 150ms var(--ease), transform 150ms var(--ease); }
+  .cmd:hover { background: var(--tone-2); }
+  .cmd:active { transform: scale(.99); }
   .cmd:focus-visible { outline: 2px solid var(--ink); outline-offset: 3px; }
-  .cmd code { min-width: 0; overflow-x: auto; scrollbar-width: none; }
-  .cmd .prompt { color: #9a9a9a; }
-  .cmd .status { min-width: 44px; color: var(--muted); font-size: 13px; }
+  .cmd code { font-size: 14px; }
+  .cmd .prompt { color: var(--muted); }
+  .cmd .status { text-align: right; color: var(--muted); font-size: 14px; }
 
-  .hero > *, .features > * { min-width: 0; }
-  .hero { display: grid; grid-template-columns: 1fr 1fr; gap: 72px; align-items: end; padding-top: 96px; padding-bottom: 120px; }
-  h1 { font-size: 112px; line-height: .95; letter-spacing: -.05em; margin: 0; font-weight: 650; }
-  .sub { font-size: 21px; margin: 32px 0 36px; max-width: 28ch; color: var(--text); }
+  section { margin-top: 200px; }
+  h2 { margin: 0 0 16px; font-size: 30px; line-height: 1.15; letter-spacing: -.025em; font-weight: 650; }
+  p { margin: 0 0 16px; }
+  .small { font-size: 14px; color: var(--muted); }
 
-  .bars { display: grid; gap: 22px; margin: 0; }
-  .bars figcaption { color: var(--muted); }
-  .bar { display: grid; grid-template-columns: 64px 1fr 72px; gap: 16px; align-items: center; font-size: 15px; font-variant-numeric: tabular-nums; }
-  .bar i { display: block; height: 44px; background: var(--ink); border-radius: 3px; transform-origin: left; animation: grow 900ms var(--ease) both; }
-  .bar.other { color: var(--muted); }
-  .bar.other i { opacity: .22; }
-  .bar:nth-of-type(2) i { animation-delay: 120ms; }
-  .bar:nth-of-type(3) i { animation-delay: 240ms; }
-  @keyframes grow { from { transform: scaleX(0); } }
+  .choices { display: flex; flex-wrap: wrap; gap: 6px; margin: 24px 0 8px; }
+  .choices + .choices { margin-top: 0; }
+  .choices button { all: unset; cursor: pointer; padding: 6px 12px; font-size: 15px; background: var(--tone); transition: background-color 150ms var(--ease), color 150ms var(--ease); }
+  .choices button:hover { background: var(--tone-2); }
+  .choices button[aria-pressed="true"] { background: var(--ink); color: #fff; }
+  .choices button:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+  .task-note { margin: 16px 0; font-size: 15px; color: var(--muted); }
+  .bar { display: grid; grid-template-columns: 110px 1fr 96px; gap: 14px; align-items: center; padding: 7px 0; font-size: 16px; }
+  .bar i { display: block; height: 6px; background: var(--tone); }
+  .bar i b { display: block; height: 100%; background: #b5b5b5; transition: width 400ms var(--ease); }
+  .bar.me { font-weight: 650; }
+  .bar.me i b { background: var(--ink); }
+  .bar span:last-child { text-align: right; font-variant-numeric: tabular-nums; }
 
-  .figs { display: grid; grid-template-columns: repeat(4, 1fr); background: var(--tone); border-radius: 16px; margin-bottom: 140px; }
-  .fig { padding: 36px 28px; }
-  .fig strong { display: block; font-size: 48px; letter-spacing: -.04em; font-weight: 600; line-height: 1; font-variant-numeric: tabular-nums; }
-  .fig span { display: block; margin-top: 12px; font-size: 15px; color: #444; }
-  .fig em { font-style: normal; color: #8a8a8a; }
+  .panel { margin-top: 24px; padding: 18px; background: #111; color: #ddd; font-size: 15px; line-height: 1.9; }
+  .panel div { display: flex; justify-content: space-between; padding: 0 8px; }
+  .panel .selected { background: #2b2b2b; color: #fff; }
+  .panel .dim { color: #8a8a8a; }
 
-  .features { display: grid; grid-template-columns: 1fr 2fr; gap: 64px; padding-bottom: 140px; }
-  h2 { font-size: 40px; letter-spacing: -.03em; margin: 0; font-weight: 600; line-height: 1.05; }
-  .features p.note { color: var(--muted); margin: 16px 0 0; font-size: 15px; }
-  .row { display: grid; grid-template-columns: 1fr 1.5fr; gap: 32px; padding: 20px 0; }
-  .row + .row { border-top: 1px solid var(--line); }
-  .row h3 { margin: 0; font-size: 18px; font-weight: 600; }
-  .row p { margin: 0; color: #444; font-size: 15px; }
+  dl { margin: 24px 0 0; }
+  dt { margin-top: 22px; font-weight: 650; }
+  dd { margin: 4px 0 0; }
 
-  .env { display: grid; grid-template-columns: 1fr 1fr; gap: 56px; padding: 72px 56px; background: var(--ink); color: #fff; border-radius: 20px; margin-bottom: 140px; }
-  .env p { color: #bdbdbd; margin: 20px 0 0; font-size: 17px; max-width: 40ch; }
-  .env ol { margin: 28px 0 0; padding: 0; list-style: none; display: grid; gap: 14px; }
-  .env li { display: grid; grid-template-columns: 28px 1fr; color: #ddd; }
-  .env li b { color: #7a7a7a; font-weight: 500; }
-  .env li code { background: #1d1d1d; padding: 2px 8px; border-radius: 6px; color: #fff; }
-  .env .panel { align-self: center; min-width: 0; overflow-x: auto; background: #1d1d1d; color: #e8e8e8; border-radius: 14px; padding: 22px 24px; font: 14px/1.7 ui-monospace, SFMono-Regular, Menlo, monospace; }
-  .env .title { color: #fff; font-weight: 600; }
-  .env-row { display: flex; justify-content: space-between; gap: 24px; margin: 0 -10px; padding: 0 10px; border-radius: 4px; }
-  .env-row span + span, .env .hint { color: #7a7a7a; }
-  .env-row.selected { background: #2a2a2a; }
-  .env .hint { display: flex; flex-wrap: wrap; column-gap: 18px; margin-top: 1.7em; }
-  .env p.small { font-size: 15px; color: #7a7a7a; }
+  footer { margin-top: 200px; padding: 40px 0 48px; display: flex; flex-wrap: wrap; gap: 12px 24px; font-size: 15px; color: var(--muted); }
 
-  .band { display: flex; justify-content: space-between; align-items: center; gap: 40px; flex-wrap: wrap; padding: 72px 56px; background: var(--ink); color: #fff; border-radius: 20px; margin-bottom: 56px; }
-  .band .cmd { background: #1d1d1d; color: #fff; }
-  .band .cmd:hover { background: #2a2a2a; }
-  .band .cmd:focus-visible { outline-color: #fff; }
-  .band .cmd .status { color: #9a9a9a; }
-
-  footer { display: flex; justify-content: space-between; align-items: center; gap: 16px; flex-wrap: wrap; padding-top: 32px; padding-bottom: 48px; font-size: 14px; color: var(--muted); }
-  footer a { text-decoration: none; }
-  footer a:hover { color: var(--ink); }
-
-  .reveal { animation: rise 700ms var(--ease) both; }
-  .reveal:nth-child(2) { animation-delay: 80ms; }
-  .reveal:nth-child(3) { animation-delay: 160ms; }
-  @keyframes rise { from { opacity: 0; transform: translateY(20px); } }
-
+  .js .rise { opacity: 0; transform: translateY(20px); transition: opacity 500ms var(--ease), transform 500ms var(--ease); }
+  .js .rise.in { opacity: 1; transform: none; }
+  @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } .js .rise { opacity: 1; transform: none; transition: none; } .bar i b { transition: none; } }
   @media (max-width: 860px) {
-    .wrap { padding: 0 20px; }
-    .links a:not(.btn) { display: none; }
-    .hero, .features, .row, .env { grid-template-columns: 1fr; gap: 36px; }
-    .env { padding: 40px 24px; margin-bottom: 96px; }
-    .row { gap: 6px; }
-    .hero { padding-top: 40px; padding-bottom: 80px; }
-    h1 { font-size: 64px; }
-    .sub { font-size: 19px; }
-    .figs { grid-template-columns: 1fr 1fr; margin-bottom: 96px; }
-    .fig { padding: 28px 20px; }
-    .fig strong { font-size: 36px; }
-    .features { padding-bottom: 96px; }
-    h2 { font-size: 32px; }
-    .band { padding: 40px 24px; gap: 28px; margin-bottom: 20px; }
+    nav { padding: 20px; }
+    .col { margin-left: 20px; }
+    h1 { margin-top: 16vh; width: auto; }
+    section, footer { margin-top: 120px; }
+    .bar { grid-template-columns: 90px 1fr 84px; font-size: 15px; }
   }
-  @media (prefers-reduced-motion: reduce) {
-    html { scroll-behavior: auto; }
-    .reveal, .bar i { animation: none; }
-  }
+  @media (max-width: 600px) { .cmd { white-space: normal; align-items: flex-end; } .cmd code { min-width: 0; font-size: 13px; } }
+  @media (max-width: 480px) { nav .links a:nth-child(3) { display: none; } }
 </style>
 </head>
 <body>
-<div class="wrap">
-  <nav>
-    <a class="brand" href="/"><svg width="28" height="15" viewBox="3 9 26 14" aria-hidden="true"><g fill="currentColor"><rect x="3" y="9" width="4" height="14" opacity=".25"/><rect x="7" y="9" width="4" height="14" opacity=".5"/><rect x="11" y="9" width="4" height="14" opacity=".75"/><rect x="15" y="9" width="5" height="14"/><path d="M21 9l8 7-8 7z"/></g></svg>agent</a>
-    <div class="links"><a href="#benchmark">Benchmark</a><a href="#env">/env</a><a href="#features">Features</a><a href="https://github.com/rokartur/agent">GitHub</a><a class="btn" href="#install">Install</a></div>
-  </nav>
+<nav>
+  <a class="brand" href="/"><svg width="28" height="15" viewBox="3 9 26 14" aria-hidden="true"><g fill="currentColor"><rect x="3" y="9" width="4" height="14" opacity=".25"/><rect x="7" y="9" width="4" height="14" opacity=".5"/><rect x="11" y="9" width="4" height="14" opacity=".75"/><rect x="15" y="9" width="5" height="14"/><path d="M21 9l8 7-8 7z"/></g></svg>agent</a>
+  <div class="links"><a href="#benchmark">Benchmark</a><a href="#env">/env</a><a href="#features">Features</a><a href="https://github.com/rokartur/agent">GitHub</a></div>
+</nav>
 
-  <main>
-    <section class="hero">
-      <div>
-        <h1 class="reveal">25 MB idle.</h1>
-        <p class="sub reveal">A coding agent in one Rust binary. Bring your Claude or ChatGPT login and start.</p>
-        <button class="cmd reveal" type="button" aria-label="Copy install command"><code><span class="prompt">$ </span>curl -fsSL https://agent.rokartur.com/install.sh | sh</code><span class="status" role="status">Copy</span></button>
-      </div>
-      <figure class="bars" id="benchmark">
-        <figcaption>Memory when idle</figcaption>
-        <div class="bar"><b>agent</b><i style="width: 18.5%"></i><span>25 MB</span></div>
-        <div class="bar other"><span>jcode</span><i style="width: 33.3%"></i><span>45 MB</span></div>
-        <div class="bar other"><span>pi</span><i style="width: 100%"></i><span>135 MB</span></div>
-      </figure>
-    </section>
+<main class="col">
+  <h1 class="rise">A coding agent<br>in 25 MB.</h1>
+  <p class="sub rise">One Rust binary. Bring your Claude or ChatGPT login and start.</p>
+  <button class="cmd rise" type="button" aria-label="Copy install command"><code><span class="prompt">$ </span>curl -fsSL https://agent.rokartur.com/install.sh | sh</code><span class="status" role="status">Copy</span></button>
 
-    <section class="figs" aria-label="Benchmark">
-      <div class="fig"><strong>3 of 3</strong><span>jq interpreters done in 40 min <em>Claude Code finished 2, pi 0, jcode 0</em></span></div>
-      <div class="fig"><strong>3.2k</strong><span>tokens of base context <em>jcode sends 23.4k</em></span></div>
-      <div class="fig"><strong>7.0</strong><span>tool calls for the difflib port <em>jcode needs 12.0</em></span></div>
-      <div class="fig"><strong>0.04 s</strong><span>of CPU when idle <em>pi uses 0.49 s</em></span></div>
-    </section>
+  <section id="benchmark" aria-labelledby="benchmark-title">
+    <h2 id="benchmark-title" class="rise">The cheapest of four harnesses</h2>
+    <p class="rise">Same model, same prompt, three large tasks, three runs each. Pick a task and see what each harness spent on it.</p>
+    <div class="rise">
+      <div class="choices" role="group" aria-label="Task" data-tasks></div>
+      <div class="choices" role="group" aria-label="Measure" data-measures></div>
+      <p class="task-note" data-note>Write a jq interpreter in TypeScript, checked on 388 programs, 40 minute limit. Finished in time: agent 3 of 3, Claude Code 2 of 3, jcode 0, pi 0.</p>
+      <div data-bars>
+        <div class="bar me"><span>agent</span><i><b style="width: 55.2%"></b></i><span>$4.08</span></div>
+        <div class="bar"><span>Claude Code</span><i><b style="width: 100%"></b></i><span>$7.39</span></div>
+        <div class="bar"><span>jcode</span><i><b style="width: 66.6%"></b></i><span>$4.92</span></div>
+        <div class="bar"><span>pi</span><i><b style="width: 69.3%"></b></i><span>$5.12</span></div>
+      </div>
+      <p class="small">Claude Opus 5.5, medium thinking. Claude Code ran the same tasks a day later, alone, on a Mac with the same chip. Lower is better. <a href="https://github.com/rokartur/agent#compared-with-claude-code-jcode-and-pi">Full table</a></p>
+    </div>
+  </section>
 
-    <section class="env" id="env">
-      <div>
-        <h2>Switch computers with /env</h2>
-        <p>Pick one of your computers on the tailnet and a new session starts there, in this terminal. Its files, its shell, its accounts. No cloud relay, no pairing.</p>
-        <ol>
-          <li><b>1</b><span><code>agent service install</code> on the other computer</span></li>
-          <li><b>2</b><span><code>/env studio</code> here. The session you leave keeps running.</span></li>
-        </ol>
-        <p class="small"><a href="https://github.com/rokartur/agent/blob/main/docs/remote-sessions.md">Setup</a></p>
-      </div>
-      <div class="panel" role="img" aria-label="The /env panel: local is this session, studio is saved and selected, linux-box, and a row to add an environment">
-        <div class="title">Environments</div>
-        <div class="env-row"><span>local</span><span>this session</span></div>
-        <div class="env-row selected"><span>studio</span><span>saved</span></div>
-        <div class="env-row"><span>linux-box</span><span></span></div>
-        <div class="env-row"><span>Add environment</span><span>enter name</span></div>
-        <div class="hint"><span>↑↓ navigate</span><span>enter start a session there</span><span>d remove</span><span>esc close</span></div>
-      </div>
-    </section>
+  <section id="env" aria-labelledby="env-title">
+    <h2 id="env-title" class="rise">Switch computers with /env</h2>
+    <p class="rise">Pick one of your computers on the tailnet and a new session starts there, in this terminal. Its files, its shell, its accounts. No cloud relay, no pairing. Run <code>agent service install</code> on it once, then <code>/env studio</code> here; the session you leave keeps running.</p>
+    <div class="panel rise" data-ui role="img" aria-label="The /env panel: local is this session, studio is saved and selected, linux-box, and a row to add an environment">
+      <div><span>local</span><span class="dim">this session</span></div>
+      <div class="selected"><span>studio</span><span>saved</span></div>
+      <div><span>linux-box</span><span></span></div>
+      <div><span>Add environment</span><span class="dim">enter name</span></div>
+    </div>
+    <p class="small rise"><a href="https://github.com/rokartur/agent/blob/main/docs/remote-sessions.md">Setup</a></p>
+  </section>
 
-    <section class="features" id="features">
-      <div>
-        <h2>Small binary, full agent</h2>
-        <p class="note">Benchmark: same model, same prompt, three large tasks, 3 runs each. agent costs the least on all three. pi sends a smaller base context. <a href="https://github.com/rokartur/agent#compared-with-claude-code-jcode-and-pi">Full table</a></p>
-      </div>
-      <div>
-        <div class="row"><h3>Every account you have</h3><p>Claude, ChatGPT and GitHub Copilot logins, Anthropic and OpenRouter keys. When one hits its limit, it moves to the next. /usage shows what is left.</p></div>
-        <div class="row"><h3>Local and open models</h3><p>Run offline on Ollama or LM Studio, or bring a key for one of 38 hosted providers, from DeepSeek and Groq to Kimi and Z.AI. Any OpenAI- or Anthropic-compatible server works with one line of settings.</p></div>
-        <div class="row"><h3>Edits by line anchor</h3><p>If the file changed since it last read it, the edit is refused. No silent overwrites.</p></div>
-        <div class="row"><h3>Checks its own work</h3><p>Language server errors and your edit hooks after every change. It fixes what they find.</p></div>
-        <div class="row"><h3>Rewind</h3><p>Esc twice goes back to an earlier prompt, and your files go back with it.</p></div>
-        <div class="row"><h3>Subagents</h3><p>Big work splits into parallel child agents, tuned in a plain Markdown prompt.</p></div>
-        <div class="row"><h3>Plugins, MCP, skills</h3><p>Plugins in any language over JSON-RPC. MCP servers with OAuth. Skills, with /skill-usage to find the dead ones.</p></div>
-        <div class="row"><h3>Scripts and CI</h3><p><code>agent -p</code> prints and exits, <code>--headless</code> streams JSONL, <code>agent acp</code> talks to Zed.</p></div>
-      </div>
-    </section>
-
-    <section class="band" id="install">
-      <h2>One line to install.</h2>
-      <button class="cmd" type="button" aria-label="Copy install command"><code><span class="prompt">$ </span>curl -fsSL https://agent.rokartur.com/install.sh | sh</code><span class="status" role="status">Copy</span></button>
-    </section>
-  </main>
+  <section id="features" aria-labelledby="features-title">
+    <h2 id="features-title" class="rise">What else is in the binary</h2>
+    <dl class="rise">
+      <dt>Every account you have</dt><dd>Claude, ChatGPT and GitHub Copilot logins, Anthropic and OpenRouter keys. When one hits its limit, it moves to the next. /usage shows what is left.</dd>
+      <dt>Local and open models</dt><dd>Run offline on Ollama or LM Studio, or bring a key for one of 38 hosted providers, from DeepSeek and Groq to Kimi and Z.AI. Any OpenAI- or Anthropic-compatible server works with one line of settings.</dd>
+      <dt>Edits by line anchor</dt><dd>If the file changed since it last read it, the edit is refused. No silent overwrites.</dd>
+      <dt>Checks its own work</dt><dd>Language server errors and your edit hooks after every change. It fixes what they find.</dd>
+      <dt>Rewind</dt><dd>Esc twice goes back to an earlier prompt, and your files go back with it.</dd>
+      <dt>Subagents</dt><dd>Big work splits into parallel child agents, tuned in a plain Markdown prompt.</dd>
+      <dt>Plugins, MCP, skills</dt><dd>Plugins in any language over JSON-RPC. MCP servers with OAuth. Skills, with /skill-usage to find the dead ones.</dd>
+      <dt>Scripts and CI</dt><dd><code>agent -p</code> prints and exits, <code>--headless</code> streams JSONL, <code>agent acp</code> talks to Zed.</dd>
+    </dl>
+  </section>
 
   <footer>
     <span>macOS and Linux. Updates itself. GPL-3.0.</span>
     <a href="https://github.com/rokartur/agent">github.com/rokartur/agent</a>
     <a href="https://aiagentslisting.com/agent">Listed on AI Agents Listing</a>
   </footer>
-</div>
+</main>
+
 <script>
+  document.documentElement.classList.add("js");
+
+  const harnesses = ["agent", "Claude Code", "jcode", "pi"];
+  const tasks = [
+    { name: "jq interpreter", note: "Write a jq interpreter in TypeScript, checked on 388 programs, 40 minute limit. Finished in time: agent 3 of 3, Claude Code 2 of 3, jcode 0, pi 0.",
+      measures: { Cost: [4.08, 7.39, 4.92, 5.12], Time: [1208, 1955, 2400, 2400] } },
+    { name: "Markdown bug fixes", note: "Fix 11 reported bugs in marked, a 4,000 line Markdown renderer, where 1687 inputs must render byte for byte as the original.",
+      measures: { Cost: [0.35, 0.58, 0.89, 0.38], Time: [69.6, 94.9, 197.3, 70.7], Tokens: [260, 645, 954, 289] } },
+    { name: "difflib port", note: "Port Python's difflib to TypeScript, checked on 2916 cases from CPython.",
+      measures: { Cost: [0.43, 0.56, 0.79, 0.49], Time: [161.3, 128.6, 224.0, 229.4], Tokens: [144, 348, 575, 202] } },
+    { name: "Idle", note: "No work: the reply to \u201cOK\u201d, median of 15, and the process at rest.",
+      measures: { Memory: [25, 299, 45, 135], Reply: [1.10, 3.08, 5.24, 1.44], "Base context": [3.2, 20.2, 23.4, 2.6] } },
+  ];
+  const format = {
+    Cost: (v) => "$" + v.toFixed(2),
+    Time: (v) => (v >= 2400 ? "40 min, cut" : v + " s"),
+    Tokens: (v) => v + "k",
+    Memory: (v) => v + " MB",
+    Reply: (v) => v.toFixed(2) + " s",
+    "Base context": (v) => v + "k",
+  };
+  let task = tasks[0];
+  let measure = "Cost";
+
+  function choice(label, pressed, onPress) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = label;
+    button.setAttribute("aria-pressed", String(pressed));
+    button.addEventListener("click", onPress);
+    return button;
+  }
+
+  function renderBenchmark() {
+    const values = task.measures[measure];
+    const max = Math.max(...values);
+    document.querySelector("[data-tasks]").replaceChildren(...tasks.map((t) => choice(t.name, t === task, () => { task = t; measure = Object.keys(t.measures)[0]; renderBenchmark(); })));
+    document.querySelector("[data-measures]").replaceChildren(...Object.keys(task.measures).map((m) => choice(m, m === measure, () => { measure = m; renderBenchmark(); })));
+    document.querySelector("[data-note]").textContent = task.note;
+    document.querySelectorAll("[data-bars] .bar").forEach((bar, i) => {
+      bar.querySelector("b").style.width = (values[i] / max) * 100 + "%";
+      bar.lastElementChild.textContent = format[measure](values[i]);
+    });
+  }
+  renderBenchmark();
+
   for (const button of document.querySelectorAll(".cmd")) {
     const status = button.querySelector("[role=status]");
-    let resetStatus;
     button.addEventListener("click", async () => {
       await navigator.clipboard.writeText(button.querySelector("code").textContent.slice(2));
       status.textContent = "Copied";
-      clearTimeout(resetStatus);
-      resetStatus = setTimeout(() => { status.textContent = "Copy"; }, 1500);
+      setTimeout(() => { status.textContent = "Copy"; }, 1500);
     });
   }
+
+  const reveal = new IntersectionObserver((entries) => {
+    for (const entry of entries) {
+      if (!entry.isIntersecting) continue;
+      entry.target.classList.add("in");
+      reveal.unobserve(entry.target);
+    }
+  }, { rootMargin: "0px 0px -10% 0px" });
+  document.querySelectorAll(".rise").forEach((el, i) => {
+    el.style.transitionDelay = (el.closest("section") ? 0 : i * 80) + "ms";
+    reveal.observe(el);
+  });
 </script>
 </body>
 </html>
