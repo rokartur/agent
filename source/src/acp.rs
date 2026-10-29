@@ -196,6 +196,9 @@ fn handle(agent: &mut Agent, connection: &mut Connection, message: &Value) -> Re
         }
         "session/prompt" => {
             known_session(params, session_id)?;
+            // A profile turned on in the TUI since the last prompt changes which skills exist.
+            *commands = Commands::load(agent).map_err(|error| (INTERNAL_ERROR, error))?;
+            send(&json!({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": session_id, "update": commands.update()}}));
             let text = commands.expand(&prompt_text(&params["prompt"])).map_err(|error| (INTERNAL_ERROR, error))?;
             let images: Vec<Value> = image_blocks(&params["prompt"]).map(crate::image::from_base64).collect::<Result<_, _>>().map_err(|error| (INVALID_PARAMS, error))?;
             agent.images.extend(images);
