@@ -372,3 +372,18 @@ fn a_closed_session_is_listed_and_loads_with_its_history_replayed() {
     assert_eq!(replayed, ["user_message_chunk What is here?", "agent_message_chunk Let me look.", "tool_call toolu_ls", "tool_call_update toolu_ls", "agent_message_chunk Nothing here."]);
     assert!(editor.seen.iter().all(|message| message["params"]["sessionId"] == json!(session_id)));
 }
+
+#[test]
+fn a_session_gets_a_title_from_its_first_prompt() {
+    let home = Home::new("title");
+    let api = fake_api(vec![reply(&[text("One.")], "end_turn"), reply(&[text("Two.")], "end_turn")]);
+    let mut editor = Editor::start(&home, &api);
+    let session_id = editor.new_session(&home.project());
+
+    // The title arrives at the end of the first prompt the naming request finished during.
+    editor.prompt(&session_id, "Count.").unwrap();
+    editor.prompt(&session_id, "Again.").unwrap();
+
+    let titles: Vec<&str> = editor.updates("session_info_update").iter().map(|update| update["title"].as_str().unwrap()).collect();
+    assert_eq!(titles, ["project｜Fake title"]);
+}

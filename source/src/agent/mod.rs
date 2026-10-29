@@ -1353,7 +1353,7 @@ impl Agent {
     }
 
     /// Names a fresh session from its first prompt on a background thread; `prompt` emits the title once it is ready.
-    fn start_naming(&mut self, text: &str) {
+    pub fn start_naming(&mut self, text: &str) {
         let request = self.naming_request(text);
         let (client, session, cwd) = (self.client.clone(), self.session.clone(), self.cwd.clone());
         self.pending_title = Some(std::thread::spawn(move || name_session(&client, &session, &cwd, &request)));

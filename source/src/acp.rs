@@ -179,6 +179,10 @@ fn handle(agent: &mut Agent, connection: &mut Connection, message: &Value) -> Re
             let text = commands.expand(&prompt_text(&params["prompt"])).map_err(|error| (INTERNAL_ERROR, error))?;
             let images: Vec<Value> = image_blocks(&params["prompt"]).map(crate::image::from_base64).collect::<Result<_, _>>().map_err(|error| (INVALID_PARAMS, error))?;
             agent.images.extend(images);
+            // Only the TUI's sessions name themselves, and an editor lists its sessions by title.
+            if agent.messages.is_empty() {
+                agent.start_naming(&text);
+            }
             let first_new_message = agent.messages.len();
             let mut turn = Turn { cwd: agent.cwd.clone(), todos: agent.todos.clone(), context_window: agent.context_window, notices: !client["session"]["notices"].is_null(), ..Turn::default() };
             cancelled.store(false, Ordering::Relaxed);
