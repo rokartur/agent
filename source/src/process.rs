@@ -50,6 +50,8 @@ pub fn command(program: impl AsRef<OsStr>) -> Command {
     let mut command = Command::new(program);
     command.stdin(Stdio::null());
     command.env_remove(crate::mcp::CLIENT_SERVERS_ENV);
+    // Set for a session's process only: an `agent acp` its Bash starts routes again.
+    command.env_remove(crate::acp::SESSION_ENV);
     // SAFETY: the hook only calls setsid, which is async-signal-safe.
     unsafe { command.pre_exec(new_session) };
     command
@@ -227,6 +229,12 @@ pub fn installed(binary: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_child_gets_no_variable_meant_for_its_parent_alone() {
+        let removed: Vec<_> = command("true").get_envs().filter(|(_, value)| value.is_none()).map(|(name, _)| name.to_owned()).collect();
+        assert!(removed.contains(&crate::acp::SESSION_ENV.into()) && removed.contains(&crate::mcp::CLIENT_SERVERS_ENV.into()), "{removed:?}");
+    }
 
     #[test]
     fn installed_finds_only_executables_on_path() {
