@@ -11,7 +11,8 @@ use std::sync::{Arc, Mutex};
 use serde_json::{Value, json};
 
 use crate::agent::permissions::{Decision, Request};
-use crate::agent::{Agent, Event};
+use crate::agent::prompt::{self, Skill};
+use crate::agent::{Agent, Event, workflow};
 use crate::tools::todo::{Status, Todos};
 
 const PROTOCOL_VERSION: u64 = 1;
@@ -22,17 +23,22 @@ const INTERNAL_ERROR: i64 = -32603;
 pub fn serve(agent: &mut Agent) -> Result<(), String> {
     let cancelled = Arc::new(AtomicBool::new(false));
     let (requests, replies) = read_stdin(agent.abort.clone(), cancelled.clone());
-    let mut connection = Connection { replies, cancelled, session_id: String::new(), client: Value::Null };
+    let mut connection = Connection { replies, cancelled, session_id: String::new(), client: Value::Null, commands: Commands::default() };
     for message in requests {
         let result = handle(agent, &mut connection, &message);
         let id = &message["id"];
         if id.is_null() {
             continue;
         }
+        let started_session = message["method"] == "session/new" && result.is_ok();
         send(&match result {
             Ok(result) => json!({"jsonrpc": "2.0", "id": id, "result": result}),
             Err((code, error)) => json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": error}}),
         });
+        // After the answer, so the editor knows the session the update is for.
+        if started_session {
+            send(&json!({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": connection.session_id, "update": connection.commands.update()}}));
+        }
     }
     Ok(())
 }
@@ -81,10 +87,11 @@ struct Connection {
     session_id: String,
     /// `clientCapabilities` from initialize.
     client: Value,
+    commands: Commands,
 }
 
 fn handle(agent: &mut Agent, connection: &mut Connection, message: &Value) -> Result<Value, (i64, String)> {
-    let Connection { replies, cancelled, session_id, client } = connection;
+    let Connection { replies, cancelled, session_id, client, commands } = connection;
     let params = &message["params"];
     match message["method"].as_str().unwrap_or_default() {
         "initialize" => {
@@ -113,6 +120,7 @@ fn handle(agent: &mut Agent, connection: &mut Connection, message: &Value) -> Re
                 agent.new_session().map_err(|error| (INTERNAL_ERROR, error))?;
             }
             *session_id = agent.session.id.clone();
+            *commands = Commands::load(agent).map_err(|error| (INTERNAL_ERROR, error))?;
             Ok(json!({"sessionId": session_id}))
         }
         "session/prompt" => {
@@ -120,7 +128,7 @@ fn handle(agent: &mut Agent, connection: &mut Connection, message: &Value) -> Re
             if session_id.is_empty() || asked != session_id {
                 return Err((INVALID_PARAMS, format!("Unknown session {asked}.")));
             }
-            let text = prompt_text(&params["prompt"]);
+            let text = commands.expand(&prompt_text(&params["prompt"])).map_err(|error| (INTERNAL_ERROR, error))?;
             let images: Vec<Value> = image_blocks(&params["prompt"]).map(crate::image::from_base64).collect::<Result<_, _>>().map_err(|error| (INVALID_PARAMS, error))?;
             agent.images.extend(images);
             let first_new_message = agent.messages.len();
@@ -167,6 +175,40 @@ fn handle(agent: &mut Agent, connection: &mut Connection, message: &Value) -> Re
             Ok(json!({"stopReason": stop_reason}))
         }
         method => Err((METHOD_NOT_FOUND, format!("Method not found: {method}"))),
+    }
+}
+
+/// The editor's `/` commands: skills as `skill:<name>`, like the TUI, and saved workflows by name.
+#[derive(Default)]
+struct Commands {
+    skills: Vec<Skill>,
+    workflows: Vec<workflow::Saved>,
+}
+
+impl Commands {
+    fn load(agent: &Agent) -> Result<Commands, String> {
+        let settings = crate::settings::load(&agent.home)?;
+        let skills = prompt::load_skills(&agent.agent_dir, &agent.cwd, settings.trusts(&agent.cwd), |skill| settings.skill_enabled(skill), settings.prefer_global());
+        Ok(Commands { skills, workflows: agent.saved_workflows() })
+    }
+
+    fn update(&self) -> Value {
+        let skills = self.skills.iter().map(|skill| json!({"name": format!("skill:{}", skill.name), "description": skill.description, "input": {"hint": "what to do"}}));
+        let workflows = self.workflows.iter().map(|saved| json!({"name": saved.meta.name, "description": saved.meta.description, "input": {"hint": "input"}}));
+        json!({"sessionUpdate": "available_commands_update", "availableCommands": skills.chain(workflows).collect::<Vec<_>>()})
+    }
+
+    /// `text` as the model gets it: the skill for `/skill:<name> args`, a Workflow call for `/<workflow> input`.
+    fn expand(&self, text: &str) -> Result<String, String> {
+        if text.starts_with("/skill:") {
+            return prompt::expand_skill(text, &self.skills);
+        }
+        let Some(command) = text.strip_prefix('/') else { return Ok(text.to_string()) };
+        let (name, input) = command.split_once(char::is_whitespace).unwrap_or((command, ""));
+        if self.workflows.iter().any(|saved| saved.meta.name == name) {
+            return Ok(workflow::command_prompt(name, input));
+        }
+        Ok(text.to_string())
     }
 }
 

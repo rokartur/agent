@@ -270,3 +270,23 @@ fn an_image_in_the_prompt_reaches_the_model_next_to_the_text() {
     assert_eq!(content[1]["text"], "What is this?");
     assert!(broken.is_err(), "{broken:?}");
 }
+
+#[test]
+fn skills_are_slash_commands_that_reach_the_model_expanded() {
+    let home = Home::new("skill");
+    let skill = home.dir.join(".agents/skills/greet");
+    std::fs::create_dir_all(&skill).unwrap();
+    std::fs::write(skill.join("SKILL.md"), "---\nname: greet\ndescription: Greets someone.\n---\nSay hello in Polish.\n").unwrap();
+    let api = fake_api(vec![reply(&[text("Cześć, Bob.")], "end_turn")]);
+    let mut editor = Editor::start(&home, &api);
+    let session_id = editor.new_session(&home.project());
+
+    editor.prompt(&session_id, "/skill:greet Bob").unwrap();
+
+    let offered = editor.updates("available_commands_update");
+    let names: Vec<&str> = offered[0]["availableCommands"].as_array().unwrap().iter().map(|command| command["name"].as_str().unwrap()).collect();
+    assert!(names.contains(&"skill:greet") && names.contains(&"deep-research"), "{names:?}");
+    let request = api.requests.recv_timeout(WAIT).unwrap();
+    let sent = request["messages"].as_array().unwrap().last().unwrap()["content"].to_string();
+    assert!(sent.contains("<skill name=\\\"greet\\\"") && sent.contains("Say hello in Polish.") && sent.contains("Bob"), "{sent}");
+}

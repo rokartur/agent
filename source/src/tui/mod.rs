@@ -2503,7 +2503,7 @@ impl App {
             },
             name if self.saved_workflows.iter().any(|saved| saved.meta.name == name) => {
                 self.push(Item::User(text.clone()));
-                self.start(Command::Prompt(workflow_command_prompt(name, args), Vec::new()));
+                self.start(Command::Prompt(workflow::command_prompt(name, args), Vec::new()));
             }
             _ => {
                 self.push(Item::User(text.clone()));
@@ -5478,15 +5478,6 @@ fn mentions_ultracode(text: &str) -> bool {
     text.split(|c: char| !c.is_alphanumeric()).any(|word| word.eq_ignore_ascii_case("ultracode"))
 }
 
-/// `/<workflow> [input]`: the model runs the saved workflow and shapes the input into the script's `args`.
-fn workflow_command_prompt(name: &str, input: &str) -> String {
-    let call = format!("Run the saved workflow `{name}` now: call the Workflow tool with name \"{name}\".");
-    if input.trim().is_empty() {
-        return call;
-    }
-    format!("{call} Pass this input as `args`, as structured data where it is a list or has fields:\n\n{}", input.trim())
-}
-
 /// What the slash menu completes: the `/word` up to the cursor when the cursor sits in the text's first word, else the whole text.
 fn slash_query<'a>(text: &'a str, before_cursor: &'a str) -> &'a str {
     if text.starts_with(before_cursor) && !before_cursor.contains(char::is_whitespace) { before_cursor } else { text }
@@ -6556,12 +6547,6 @@ mod tests {
         assert!(super::mentions_ultracode("ultracode: audit src/routes"));
         assert!(super::mentions_ultracode("please UltraCode this"));
         assert!(!super::mentions_ultracode("ultracoder notes"));
-    }
-
-    #[test]
-    fn a_workflow_command_passes_its_input_as_args() {
-        assert!(!super::workflow_command_prompt("deep-research", " ").contains("args"));
-        assert!(super::workflow_command_prompt("deep-research", "rust async").ends_with("\n\nrust async"));
     }
 
     #[test]
