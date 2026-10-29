@@ -35,14 +35,19 @@ pub fn serve(agent: &mut Agent) -> Result<(), String> {
         if id.is_null() {
             continue;
         }
-        let started_session = message["method"] == "session/new" && result.is_ok();
+        let method = message["method"].as_str().unwrap_or_default();
+        let opened_session = matches!(method, "session/new" | "session/load" | "session/resume") && result.is_ok();
+        let closed_session = method == "session/close" && result.is_ok();
         send(&match result {
             Ok(result) => json!({"jsonrpc": "2.0", "id": id, "result": result}),
             Err((code, error)) => json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": error}}),
         });
         // After the answer, so the editor knows the session the update is for.
-        if started_session {
+        if opened_session {
             send(&json!({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": connection.session_id, "update": connection.commands.update()}}));
+        }
+        if closed_session {
+            break;
         }
     }
     Ok(())
@@ -105,7 +110,7 @@ fn handle(agent: &mut Agent, connection: &mut Connection, message: &Value) -> Re
             *client = params["clientCapabilities"].clone();
             Ok(initialize_result())
         }
-        "session/new" => {
+        method @ ("session/new" | "session/load" | "session/resume") => {
             let cwd = params["cwd"].as_str().unwrap_or_default();
             // macOS: /tmp is a link to /private/tmp, and agent.cwd is resolved.
             if std::fs::canonicalize(cwd).ok().as_deref() != Some(agent.cwd.as_path()) {
@@ -117,12 +122,30 @@ fn handle(agent: &mut Agent, connection: &mut Connection, message: &Value) -> Re
             for dir in params["additionalDirectories"].as_array().into_iter().flatten() {
                 agent.add_dir(dir.as_str().unwrap_or_default()).map_err(|error| (INVALID_PARAMS, error))?;
             }
-            if !agent.messages.is_empty() {
-                agent.new_session().map_err(|error| (INTERNAL_ERROR, error))?;
+            if method == "session/new" {
+                if !agent.messages.is_empty() {
+                    agent.new_session().map_err(|error| (INTERNAL_ERROR, error))?;
+                }
+                *session_id = agent.session.id.clone();
+            } else {
+                // shortcut: a session the model moved with `cd` opens as it was before the move; follow its copy when that bites.
+                let asked = params["sessionId"].as_str().unwrap_or_default();
+                let (messages, _) = agent.open_session(asked).map_err(|error| (INVALID_PARAMS, error))?;
+                *session_id = asked.to_string();
+                if method == "session/load" {
+                    replay(&messages, agent, session_id);
+                }
             }
-            *session_id = agent.session.id.clone();
             *commands = Commands::load(agent).map_err(|error| (INTERNAL_ERROR, error))?;
-            Ok(json!({"sessionId": session_id, "modes": modes(agent), "configOptions": config_options(agent)}))
+            let mut answer = json!({"modes": modes(agent), "configOptions": config_options(agent)});
+            if method == "session/new" {
+                answer["sessionId"] = json!(session_id);
+            }
+            Ok(answer)
+        }
+        "session/close" => {
+            known_session(params, session_id)?;
+            Ok(json!({}))
         }
         "session/set_mode" => {
             known_session(params, session_id)?;
@@ -208,10 +231,10 @@ fn initialize_result() -> Value {
     json!({
         "protocolVersion": PROTOCOL_VERSION,
         "agentCapabilities": {
-            "loadSession": false,
+            "loadSession": true,
             "promptCapabilities": {"image": true, "audio": false, "embeddedContext": true},
             "mcpCapabilities": {"http": true, "sse": false},
-            "sessionCapabilities": {"additionalDirectories": {}},
+            "sessionCapabilities": {"additionalDirectories": {}, "list": {}, "resume": {}, "close": {}},
         },
         "agentInfo": {"name": "agent", "title": "agent", "version": env!("CARGO_PKG_VERSION")},
         "authMethods": [],
@@ -304,6 +327,44 @@ fn prompt_text(blocks: &Value) -> String {
 /// The base64 data of each image block; `prompt_text` leaves them out.
 fn image_blocks(blocks: &Value) -> impl Iterator<Item = &str> {
     blocks.as_array().into_iter().flatten().filter(|block| block["type"] == "image").map(|block| block["data"].as_str().unwrap_or_default())
+}
+
+/// Sends a loaded session's history as the updates its turns sent, before the answer to session/load.
+fn replay(messages: &[Value], agent: &Agent, session_id: &str) {
+    let mut turn = Turn { cwd: agent.cwd.clone(), todos: agent.todos.clone(), ..Turn::default() };
+    let update = |update: Value| send(&json!({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": session_id, "update": update}}));
+    for message in messages {
+        let user = message["role"] == "user";
+        let blocks = match &message["content"] {
+            Value::String(text) => vec![json!({"type": "text", "text": text})],
+            content => content.as_array().cloned().unwrap_or_default(),
+        };
+        for block in blocks {
+            let text = |key: &str| block[key].as_str().unwrap_or_default().to_string();
+            let event = match block["type"].as_str() {
+                Some("text") if user => {
+                    update(json!({"sessionUpdate": "user_message_chunk", "content": {"type": "text", "text": block["text"]}}));
+                    continue;
+                }
+                Some("text") => Event::Text(text("text")),
+                Some("thinking") => Event::Thinking(text("thinking")),
+                Some("tool_use") => Event::ToolStart { id: text("id"), name: text("name"), input: block["input"].clone() },
+                Some("tool_result") => Event::ToolEnd { id: text("tool_use_id"), output: result_text(&block["content"]), is_error: block["is_error"] == true },
+                _ => continue,
+            };
+            turn.session_updates(&event).into_iter().for_each(update);
+            // A diff needs the file as it was before the edit, which is gone by now.
+            turn.before_edit.clear();
+        }
+    }
+}
+
+/// A tool result's text, whether the API got a string or blocks.
+fn result_text(content: &Value) -> String {
+    match content {
+        Value::String(text) => text.clone(),
+        blocks => blocks.as_array().into_iter().flatten().filter_map(|block| block["text"].as_str()).collect::<Vec<_>>().join("\n"),
+    }
 }
 
 /// The client's answer to our request `id`; a cancelled request or a closed stdin denies.

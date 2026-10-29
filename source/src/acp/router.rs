@@ -10,6 +10,8 @@ use std::sync::{Arc, Mutex};
 use serde_json::{Value, json};
 
 use super::{INTERNAL_ERROR, INVALID_PARAMS, METHOD_NOT_FOUND, send};
+use crate::agent::Session;
+use crate::tools::web::providers::iso_from_ms;
 
 /// Set for a session's process, so its `agent acp` serves one session instead of routing.
 pub const SESSION_ENV: &str = "AGENT_ACP_SESSION";
@@ -52,6 +54,16 @@ pub fn route(args: &[String]) -> Result<(), String> {
                 Ok(Some(super::initialize_result()))
             }
             "session/new" => start(&message, None, &initialize, args, &routes).map(|()| None),
+            "session/load" | "session/resume" => {
+                let session_id = message["params"]["sessionId"].as_str().map(String::from);
+                start(&message, session_id, &initialize, args, &routes).map(|()| None)
+            }
+            "session/list" => list(&message["params"]).map(Some),
+            // Routed no more right away, so a prompt sent while the process exits gets an error, not silence.
+            "session/close" => forward(&message, &routes).map(|()| {
+                routes.lock().unwrap().sessions.remove(message["params"]["sessionId"].as_str().unwrap_or_default());
+                None
+            }),
             _ => forward(&message, &routes).map(|()| None),
         };
         let id = &message["id"];
@@ -120,6 +132,22 @@ fn relay(mut child: Child, stdout: ChildStdout, writer: Writer, starting: Value,
     }
     drop(writer);
     let _ = child.wait();
+}
+
+/// The saved sessions, newest first, of `cwd` when the editor names one.
+fn list(params: &Value) -> Result<Value, (i64, String)> {
+    let sessions_dir = crate::home().map_err(|error| (INTERNAL_ERROR, error))?.join(".agents/sessions");
+    // macOS: /tmp is a link to /private/tmp, and sessions record the resolved directory.
+    let cwd = params["cwd"].as_str().map(|cwd| std::fs::canonicalize(cwd).map_or(cwd.to_string(), |cwd| cwd.display().to_string()));
+    let sessions: Vec<Value> = Session::list(&sessions_dir)
+        .into_iter()
+        .filter(|info| cwd.as_ref().is_none_or(|cwd| info.cwd == *cwd))
+        .map(|info| {
+            let updated = info.modified.duration_since(std::time::UNIX_EPOCH).map_or(0, |since| since.as_millis() as u64);
+            json!({"sessionId": info.id, "cwd": info.cwd, "title": info.name.unwrap_or(info.title), "updatedAt": iso_from_ms(updated)})
+        })
+        .collect();
+    Ok(json!({"sessions": sessions}))
 }
 
 /// Passes a request or notification to the process of the session it names.
