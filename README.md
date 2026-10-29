@@ -79,7 +79,7 @@ agent -p --trust "Fix the lint"          # load this project's .agents and run i
 "agent_servers": {"agent": {"type": "custom", "command": "agent", "args": ["acp"]}}
 ```
 
-Each thread runs in its own process, in its own directory. The editor shows diffs, the task list and permission requests, offers skills and saved workflows after `/`, and picks the permission mode, model and effort. Saved sessions open from its history. When the editor supports them, reads and edits go through its buffers, Bash runs in its terminal, questions and plan approval come as forms, and a missing account opens `/login` in a terminal.
+Each thread runs in its own process, in its own directory. The editor shows diffs, the task list and permission requests, offers skills and saved workflows after `/`, and picks the permission mode, model and effort. Saved sessions open from its history. When the editor supports them, reads and edits of the project's files go through its buffers, Bash runs in its terminal, questions and plan approval come as forms, and a missing account opens `/login` in a terminal.
 
 ## Other providers
 
