@@ -4,7 +4,7 @@
 mod router;
 pub use router::{SESSION_ENV, route};
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -351,8 +351,8 @@ struct EditorClient {
     replies: Arc<Mutex<Receiver<Value>>>,
     next_id: AtomicU64,
     files: bool,
-    /// The terminal each Bash call ran in, so the call's card keeps showing it.
-    terminals: Mutex<HashMap<String, String>>,
+    /// The Bash calls that ran in a terminal, whose card keeps showing it.
+    terminals: Mutex<HashSet<String>>,
 }
 
 impl EditorClient {
@@ -396,7 +396,7 @@ impl EditorTerminal for EditorClient {
         let create = json!({"sessionId": self.session_id, "command": "bash", "args": ["-c", script], "cwd": cwd, "outputByteLimit": TERMINAL_OUTPUT_BYTES});
         let created = self.request("terminal/create", create)?;
         let terminal_id = created["terminalId"].as_str().ok_or("The editor sent no terminal id.")?.to_string();
-        self.terminals.lock().unwrap().insert(call.to_string(), terminal_id.clone());
+        self.terminals.lock().unwrap().insert(call.to_string());
         let shown = json!({"sessionUpdate": "tool_call_update", "toolCallId": call, "content": [{"type": "terminal", "terminalId": terminal_id}]});
         send(&json!({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": self.session_id, "update": shown}}));
         let terminal = json!({"sessionId": self.session_id, "terminalId": terminal_id});
@@ -632,24 +632,23 @@ impl Turn {
                 update
             }
             Event::ToolEnd { id, output, is_error } => {
-                // A Bash call that ran in the editor's terminal keeps showing it, not its output as text.
-                let terminal = self.editor.as_ref().and_then(|editor| editor.terminals.lock().unwrap().remove(id));
-                let mut content = match terminal {
-                    Some(terminal_id) => vec![json!({"type": "terminal", "terminalId": terminal_id})],
-                    None => vec![json!({"type": "content", "content": {"type": "text", "text": output}})],
-                };
+                // A Bash terminal is released by now and Zed rejects an update naming it; with no content the card keeps it.
+                let in_terminal = self.editor.as_ref().is_some_and(|editor| editor.terminals.lock().unwrap().remove(id));
+                let mut content = if in_terminal { Vec::new() } else { vec![json!({"type": "content", "content": {"type": "text", "text": output}})] };
                 if let Some((path, old_text)) = self.before_edit.remove(id)
                     && !is_error
                     && let Some(new_text) = self.read_text(&path)
                 {
                     content.insert(0, json!({"type": "diff", "path": path, "oldText": old_text, "newText": new_text}));
                 }
-                let update = json!({
+                let mut update = json!({
                     "sessionUpdate": "tool_call_update",
                     "toolCallId": id,
                     "status": if *is_error { "failed" } else { "completed" },
-                    "content": content,
                 });
+                if !content.is_empty() {
+                    update["content"] = content.into();
+                }
                 if !is_error && self.started.get(id).is_some_and(|call| call["name"] == "Todo") {
                     return vec![update, plan(&self.todos.lock().unwrap())];
                 }

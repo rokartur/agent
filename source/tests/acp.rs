@@ -626,6 +626,9 @@ fn bash_runs_in_the_editor_terminal_and_the_model_gets_the_same_result() {
     let result = api.requests.try_iter().nth(1).unwrap()["messages"].as_array().unwrap().last().unwrap()["content"][0].clone();
     assert_eq!(result["is_error"], true);
     assert!(result["content"].to_string().contains("from-terminal") && result["content"].to_string().contains("Command exited with code 3"), "{result}");
+    // Zed rejects an update that names a released terminal; the card keeps the terminal it was given at the start.
+    let released = editor.seen.iter().position(|message| message["method"] == "terminal/release").expect("a released terminal");
+    assert!(editor.seen[released + 1..].iter().all(|message| !message.to_string().contains("term-0")), "{:?}", &editor.seen[released + 1..]);
     let ended = editor.updates("tool_call_update").into_iter().rfind(|update| update["toolCallId"] == "toolu_sh").unwrap();
-    assert_eq!(ended["content"], json!([{"type": "terminal", "terminalId": "term-0"}]));
+    assert_eq!((&ended["status"], ended.get("content")), (&json!("failed"), None));
 }
