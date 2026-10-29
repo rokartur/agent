@@ -10,9 +10,10 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
 
-use crate::agent::permissions::{Decision, Request};
+use crate::agent::permissions::{Decision, MODES, Mode, Request};
 use crate::agent::prompt::{self, Skill};
 use crate::agent::{Agent, Event, workflow};
+use crate::settings::THINKING_LEVELS;
 use crate::tools::todo::{Status, Todos};
 
 const PROTOCOL_VERSION: u64 = 1;
@@ -121,13 +122,37 @@ fn handle(agent: &mut Agent, connection: &mut Connection, message: &Value) -> Re
             }
             *session_id = agent.session.id.clone();
             *commands = Commands::load(agent).map_err(|error| (INTERNAL_ERROR, error))?;
-            Ok(json!({"sessionId": session_id}))
+            Ok(json!({"sessionId": session_id, "modes": modes(agent), "configOptions": config_options(agent)}))
+        }
+        "session/set_mode" => {
+            known_session(params, session_id)?;
+            let asked = params["modeId"].as_str().unwrap_or_default();
+            let mode = MODES.into_iter().find(|mode| mode_id(*mode) == asked).ok_or((INVALID_PARAMS, format!("Unknown mode {asked}.")))?;
+            *agent.permission_mode.lock().unwrap() = mode;
+            Ok(json!({}))
+        }
+        "session/set_config_option" => {
+            known_session(params, session_id)?;
+            let value = params["value"].as_str().unwrap_or_default();
+            let option = config_options(agent).into_iter().find(|option| option["id"] == params["configId"]);
+            let Some(option) = option else { return Err((INVALID_PARAMS, format!("Unknown config option {}.", params["configId"]))) };
+            if !option["options"].as_array().into_iter().flatten().any(|offered| offered["value"] == value) {
+                return Err((INVALID_PARAMS, format!("{} cannot be {value}.", option["name"].as_str().unwrap_or_default())));
+            }
+            let mut settings = crate::settings::load(&agent.home).map_err(|error| (INTERNAL_ERROR, error))?;
+            // settle_model applies every setting, so the session keeps what it changed and only this option moves.
+            settings.model = agent.model.clone();
+            settings.thinking = agent.effort.clone();
+            settings.permission_mode = *agent.permission_mode.lock().unwrap();
+            match option["id"].as_str() {
+                Some("model") => settings.model = value.to_string(),
+                _ => settings.thinking = value.to_string(),
+            }
+            agent.settle_model(&mut settings).map_err(|error| (INTERNAL_ERROR, error))?;
+            Ok(json!({"configOptions": config_options(agent)}))
         }
         "session/prompt" => {
-            let asked = params["sessionId"].as_str().unwrap_or_default();
-            if session_id.is_empty() || asked != session_id {
-                return Err((INVALID_PARAMS, format!("Unknown session {asked}.")));
-            }
+            known_session(params, session_id)?;
             let text = commands.expand(&prompt_text(&params["prompt"])).map_err(|error| (INTERNAL_ERROR, error))?;
             let images: Vec<Value> = image_blocks(&params["prompt"]).map(crate::image::from_base64).collect::<Result<_, _>>().map_err(|error| (INVALID_PARAMS, error))?;
             agent.images.extend(images);
@@ -176,6 +201,37 @@ fn handle(agent: &mut Agent, connection: &mut Connection, message: &Value) -> Re
         }
         method => Err((METHOD_NOT_FOUND, format!("Method not found: {method}"))),
     }
+}
+
+/// Errs unless `params` names the session this connection started.
+fn known_session(params: &Value, session_id: &str) -> Result<(), (i64, String)> {
+    let asked = params["sessionId"].as_str().unwrap_or_default();
+    if session_id.is_empty() || asked != session_id {
+        return Err((INVALID_PARAMS, format!("Unknown session {asked}.")));
+    }
+    Ok(())
+}
+
+/// Permission modes as ACP session modes. Plan mode stays out until plan approval can reach the editor.
+fn modes(agent: &Agent) -> Value {
+    let available: Vec<Value> = MODES.iter().map(|mode| json!({"id": mode_id(*mode), "name": mode.label(), "description": mode.description()})).collect();
+    json!({"currentModeId": mode_id(*agent.permission_mode.lock().unwrap()), "availableModes": available})
+}
+
+fn mode_id(mode: Mode) -> String {
+    mode.label().replace(' ', "-")
+}
+
+/// The model, from the models an account lists, and the effort.
+fn config_options(agent: &Agent) -> Vec<Value> {
+    let catalog = agent.client.catalog();
+    let models: Vec<Value> =
+        catalog.iter().filter(|model| !model.accounts.is_empty() || model.id == agent.model).map(|model| json!({"value": model.id, "name": model.name, "description": model.provider})).collect();
+    let efforts: Vec<Value> = THINKING_LEVELS.iter().map(|level| json!({"value": level, "name": level})).collect();
+    vec![
+        json!({"id": "model", "name": "Model", "category": "model", "type": "select", "currentValue": agent.model, "options": models}),
+        json!({"id": "effort", "name": "Effort", "category": "thought_level", "type": "select", "currentValue": agent.effort, "options": efforts}),
+    ]
 }
 
 /// The editor's `/` commands: skills as `skill:<name>`, like the TUI, and saved workflows by name.

@@ -66,7 +66,7 @@ fn fake_api(replies: Vec<String>) -> FakeApi {
             let mut body = vec![0; length];
             reader.read_exact(&mut body).unwrap();
             let (status, body) = if request_line.contains("/v1/models") {
-                (200, r#"{"data":[{"id":"claude-haiku-9","max_input_tokens":200000,"max_tokens":8192}]}"#.to_string())
+                (200, r#"{"data":[{"id":"claude-haiku-9","max_input_tokens":200000,"max_tokens":8192},{"id":"claude-sonnet-9","max_input_tokens":200000,"max_tokens":8192}]}"#.to_string())
             } else if request_line.starts_with("GET") {
                 (404, "{}".to_string())
             } else {
@@ -289,4 +289,31 @@ fn skills_are_slash_commands_that_reach_the_model_expanded() {
     let request = api.requests.recv_timeout(WAIT).unwrap();
     let sent = request["messages"].as_array().unwrap().last().unwrap()["content"].to_string();
     assert!(sent.contains("<skill name=\\\"greet\\\"") && sent.contains("Say hello in Polish.") && sent.contains("Bob"), "{sent}");
+}
+
+#[test]
+fn the_editor_sets_the_permission_mode_model_and_effort_of_the_next_prompt() {
+    let home = Home::new("config");
+    let api = fake_api(vec![reply(&[tool_use("toolu_touch", "Bash", json!({"command": "touch made"}))], "tool_use"), reply(&[text("Done.")], "end_turn")]);
+    let mut editor = Editor::start(&home, &api);
+    let session = editor.request("session/new", json!({"cwd": home.project(), "mcpServers": []})).unwrap();
+    let session_id = session["sessionId"].as_str().unwrap();
+    let mode_ids: Vec<&str> = session["modes"]["availableModes"].as_array().unwrap().iter().map(|mode| mode["id"].as_str().unwrap()).collect();
+    assert_eq!(mode_ids, ["ask", "auto", "full-access"]);
+    let set = |editor: &mut Editor, config_id: &str, value: &str| editor.request("session/set_config_option", json!({"sessionId": session_id, "configId": config_id, "value": value}));
+
+    assert!(editor.request("session/set_mode", json!({"sessionId": session_id, "modeId": "plan"})).is_err());
+    editor.request("session/set_mode", json!({"sessionId": session_id, "modeId": "full-access"})).unwrap();
+    assert!(set(&mut editor, "model", "gpt-unknown").is_err());
+    assert!(set(&mut editor, "effort", "extreme").is_err());
+    assert!(set(&mut editor, "speed", "fast").is_err());
+    set(&mut editor, "model", "claude-sonnet-9").unwrap();
+    let options = set(&mut editor, "effort", "low").unwrap()["configOptions"].clone();
+    editor.prompt(session_id, "Make a file.").unwrap();
+
+    let current: Vec<&str> = options.as_array().unwrap().iter().map(|option| option["currentValue"].as_str().unwrap()).collect();
+    assert_eq!(current, ["claude-sonnet-9", "low"]);
+    assert_eq!(api.requests.recv_timeout(WAIT).unwrap()["model"], "claude-sonnet-9");
+    assert!(!editor.seen.iter().any(|message| message["method"] == "session/request_permission"), "full access asks nothing");
+    assert!(home.project().join("made").exists());
 }
