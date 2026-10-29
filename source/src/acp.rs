@@ -228,12 +228,16 @@ fn handle(agent: &mut Agent, connection: &mut Connection, message: &Value) -> Re
                         ],
                     }}));
                     let decision = wait_for_decision(&replies.lock().unwrap(), &id);
-                    // An edit hook's check has no tool call whose end would close its card.
-                    if call.is_none() {
-                        let status = if matches!(decision, Decision::Deny) { "failed" } else { "completed" };
-                        let update = json!({"sessionUpdate": "tool_call_update", "toolCallId": tool_call["toolCallId"], "status": status});
-                        send(&json!({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": session_id, "update": update}}));
-                    }
+                    let update = match call.as_deref().and_then(|id| turn.started.get(id)) {
+                        // Zed keeps the question as the card's title, so the answer gives the call its own title back.
+                        Some(started) => json!({"sessionUpdate": "tool_call_update", "toolCallId": started["toolCallId"], "title": started["title"]}),
+                        // An edit hook's check has no tool call whose end would close its card.
+                        None => {
+                            let status = if matches!(decision, Decision::Deny) { "failed" } else { "completed" };
+                            json!({"sessionUpdate": "tool_call_update", "toolCallId": tool_call["toolCallId"], "status": status})
+                        }
+                    };
+                    send(&json!({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": session_id, "update": update}}));
                     let _ = reply.send(decision);
                 }
                 Event::Ask { questions, reply } => {

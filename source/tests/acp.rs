@@ -294,8 +294,8 @@ fn the_session_id_still_works_after_the_model_moves_the_session_with_cd() {
     let again = editor.prompt(&session_id, "And now?");
 
     assert_eq!(again, Ok(json!({"stopReason": "end_turn"})));
-    let ended = editor.updates("tool_call_update");
-    assert!(ended[0]["content"][0]["content"]["text"].as_str().unwrap().contains("Session moved to"), "{ended:?}");
+    let ended = editor.updates("tool_call_update").into_iter().find(|update| update.get("content").is_some()).unwrap();
+    assert!(ended["content"][0]["content"]["text"].as_str().unwrap().contains("Session moved to"), "{ended}");
 }
 
 #[test]
@@ -312,6 +312,11 @@ fn a_permission_request_names_the_call_and_shows_its_input() {
     assert_eq!((&asked["id"], &tool_call["toolCallId"], &tool_call["kind"]), (&json!("permission-toolu_touch"), &json!("toolu_touch"), &json!("execute")));
     assert_eq!(tool_call["rawInput"], json!({"command": "touch made"}));
     assert!(home.project().join("made").exists());
+    // Zed keeps the title a permission request gives the card, so the answer gives the call its own title back.
+    let started = editor.updates("tool_call").into_iter().find(|update| update["toolCallId"] == "toolu_touch").unwrap();
+    let retitled = editor.updates("tool_call_update").into_iter().rfind(|update| update["toolCallId"] == "toolu_touch" && update.get("title").is_some());
+    assert_eq!(tool_call["title"], "Would you like to run the following command? touch made");
+    assert_eq!(retitled.map(|update| &update["title"]), Some(&started["title"]));
 }
 
 #[test]
@@ -602,7 +607,7 @@ fn an_editor_with_fs_serves_reads_and_takes_edits_of_its_buffers() {
     assert!(result.contains("unsaved buffer"), "{result}");
     assert_eq!(editor.buffers[&file.display().to_string()], "edited buffer\n");
     assert_eq!(std::fs::read_to_string(&file).unwrap(), "on disk\n");
-    let edited = editor.updates("tool_call_update").into_iter().find(|update| update["toolCallId"] == "toolu_edit").unwrap();
+    let edited = editor.updates("tool_call_update").into_iter().find(|update| update["toolCallId"] == "toolu_edit" && update.get("content").is_some()).unwrap();
     assert_eq!((&edited["content"][0]["oldText"], &edited["content"][0]["newText"]), (&json!("unsaved buffer\n"), &json!("edited buffer\n")));
 }
 
