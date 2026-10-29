@@ -2,6 +2,7 @@
 // The test plays the editor; no TUI shares its terminal, which is what process::command guards.
 #![allow(clippy::disallowed_methods)]
 
+use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
@@ -112,17 +113,23 @@ fn reply(blocks: &[Value], stop_reason: &str) -> String {
     events.iter().map(|event| format!("data: {event}\n\n")).collect()
 }
 
-/// `agent acp` as an editor sees it. Every message the agent sends lands in `seen`; permission requests get `allow_once`.
+/// `agent acp` as an editor sees it. Every message the agent sends lands in `seen`; permission requests get `allow_once`,
+/// and forms the next of `form_replies`, or a decline.
 struct Editor {
     child: Child,
     stdin: ChildStdin,
     lines: Receiver<Value>,
     next_id: u64,
     seen: Vec<Value>,
+    form_replies: VecDeque<Value>,
 }
 
 impl Editor {
     fn start(home: &Home, api: &FakeApi) -> Editor {
+        Editor::start_with(home, api, json!({}))
+    }
+
+    fn start_with(home: &Home, api: &FakeApi, capabilities: Value) -> Editor {
         let mut child = Command::new(env!("CARGO_BIN_EXE_agent"))
             .arg("acp")
             .current_dir(home.project())
@@ -147,8 +154,8 @@ impl Editor {
                 }
             }
         });
-        let mut editor = Editor { child, stdin, lines, next_id: 0, seen: Vec::new() };
-        editor.request("initialize", json!({"protocolVersion": 1, "clientCapabilities": {}})).unwrap();
+        let mut editor = Editor { child, stdin, lines, next_id: 0, seen: Vec::new(), form_replies: VecDeque::new() };
+        editor.request("initialize", json!({"protocolVersion": 1, "clientCapabilities": capabilities})).unwrap();
         editor
     }
 
@@ -175,6 +182,10 @@ impl Editor {
             }
             if message["method"] == "session/request_permission" {
                 self.send(&json!({"jsonrpc": "2.0", "id": message["id"], "result": {"outcome": {"outcome": "selected", "optionId": "allow_once"}}}));
+            }
+            if message["method"] == "elicitation/create" {
+                let result = self.form_replies.pop_front().unwrap_or(json!({"action": "decline"}));
+                self.send(&json!({"jsonrpc": "2.0", "id": message["id"], "result": result}));
             }
             self.seen.push(message);
         }
@@ -386,4 +397,61 @@ fn a_session_gets_a_title_from_its_first_prompt() {
 
     let titles: Vec<&str> = editor.updates("session_info_update").iter().map(|update| update["title"].as_str().unwrap()).collect();
     assert_eq!(titles, ["project｜Fake title"]);
+}
+
+fn offered_tools(request: &Value) -> Vec<&str> {
+    request["tools"].as_array().unwrap().iter().filter_map(|tool| tool["name"].as_str()).collect()
+}
+
+#[test]
+fn an_editor_with_forms_answers_ask_user_question() {
+    let home = Home::new("ask");
+    let question = json!({"question": "Which color?", "header": "Color", "options": [{"label": "Red", "description": "warm"}, {"label": "Blue", "description": "cold"}]});
+    let api = fake_api(vec![
+        reply(&[tool_use("toolu_ask", "AskUserQuestion", json!({"questions": [question]}))], "tool_use"),
+        reply(&[text("Blue it is.")], "end_turn"),
+        reply(&[text("No forms.")], "end_turn"),
+    ]);
+    let mut editor = Editor::start_with(&home, &api, json!({"elicitation": {"form": {}}}));
+    editor.form_replies.push_back(json!({"action": "accept", "content": {"q0": "Blue"}}));
+    let session_id = editor.new_session(&home.project());
+    editor.prompt(&session_id, "Pick a color.").unwrap();
+    let mut without_forms = Editor::start(&home, &api);
+    let other = without_forms.new_session(&home.project());
+    without_forms.prompt(&other, "Pick a color.").unwrap();
+
+    let form = editor.seen.iter().find(|message| message["method"] == "elicitation/create").expect("a form");
+    assert_eq!(form["params"]["requestedSchema"]["properties"]["q0"]["oneOf"][1]["const"], "Blue");
+    let asked = api.requests.recv_timeout(WAIT).unwrap();
+    let answered = api.requests.recv_timeout(WAIT).unwrap();
+    let plain = api.requests.recv_timeout(WAIT).unwrap();
+    assert!(offered_tools(&asked).contains(&"AskUserQuestion") && offered_tools(&asked).contains(&"EnterPlanMode"));
+    assert!(!offered_tools(&plain).contains(&"AskUserQuestion") && !offered_tools(&plain).contains(&"EnterPlanMode"));
+    let result = answered["messages"].as_array().unwrap().last().unwrap()["content"][0]["content"].to_string();
+    assert!(result.contains("Which color?") && result.contains("Blue"), "{result}");
+}
+
+#[test]
+fn an_approved_plan_is_implemented_in_the_same_prompt() {
+    let home = Home::new("plan");
+    let api = fake_api(vec![
+        reply(&[tool_use("toolu_enter", "EnterPlanMode", json!({}))], "tool_use"),
+        reply(&[tool_use("toolu_exit", "ExitPlanMode", json!({"plan": "# Plan\nTouch made."}))], "tool_use"),
+        reply(&[text("Here is the plan.")], "end_turn"),
+        reply(&[tool_use("toolu_touch", "Bash", json!({"command": "touch made"}))], "tool_use"),
+        reply(&[text("Implemented.")], "end_turn"),
+    ]);
+    let mut editor = Editor::start_with(&home, &api, json!({"elicitation": {"form": {}}}));
+    editor.form_replies.push_back(json!({"action": "accept", "content": {"q0": "Yes, enter plan mode"}}));
+    editor.form_replies.push_back(json!({"action": "accept", "content": {"next": "implement"}}));
+    let session_id = editor.new_session(&home.project());
+
+    assert_eq!(editor.prompt(&session_id, "Plan, then make a file.").unwrap(), json!({"stopReason": "end_turn"}));
+
+    let forms: Vec<&str> = editor.seen.iter().filter(|message| message["method"] == "elicitation/create").map(|message| message["params"]["message"].as_str().unwrap()).collect();
+    assert_eq!(forms.len(), 2, "{forms:?}");
+    assert!(forms[1].contains("Touch made."), "{forms:?}");
+    let implementing = api.requests.try_iter().nth(3).unwrap();
+    assert!(implementing["messages"].to_string().contains("Implement this plan:"), "{implementing}");
+    assert!(home.project().join("made").exists());
 }

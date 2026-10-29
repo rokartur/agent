@@ -640,6 +640,7 @@ fn run(options: Options) -> Result<(), String> {
         return result;
     }
     agent.interactive = true;
+    agent.asks = true;
     // Its card is how `agent attach` finds this session, so a session server without one would be unreachable.
     agent.inbox = Some(agent::peers::open(&home, &agent.follow_ups).map_err(|error| format!("Cannot list this session for agent attach: {error}"))?);
     agent.describe_to_peers(false);

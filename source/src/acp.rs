@@ -18,6 +18,8 @@ use crate::agent::permissions::{Decision, MODES, Mode, Request};
 use crate::agent::prompt::{self, Skill};
 use crate::agent::{Agent, Event, workflow};
 use crate::settings::THINKING_LEVELS;
+use crate::tools::ask::{self, Answer, Question};
+use crate::tools::plan::Plan;
 use crate::tools::todo::{Status, Todos};
 
 const PROTOCOL_VERSION: u64 = 1;
@@ -119,6 +121,7 @@ fn handle(agent: &mut Agent, connection: &mut Connection, message: &Value) -> Re
             let settings = crate::settings::load(&agent.home).map_err(|error| (INTERNAL_ERROR, error))?;
             agent.mcp.set_client_servers(&params["mcpServers"], &settings.disabled_mcp, &settings.approved_mcp).map_err(|error| (INVALID_PARAMS, error))?;
             agent.mcp.settled();
+            agent.asks = !client["elicitation"]["form"].is_null();
             for dir in params["additionalDirectories"].as_array().into_iter().flatten() {
                 agent.add_dir(dir.as_str().unwrap_or_default()).map_err(|error| (INVALID_PARAMS, error))?;
             }
@@ -186,7 +189,7 @@ fn handle(agent: &mut Agent, connection: &mut Connection, message: &Value) -> Re
             let first_new_message = agent.messages.len();
             let mut turn = Turn { cwd: agent.cwd.clone(), todos: agent.todos.clone(), context_window: agent.context_window, notices: !client["session"]["notices"].is_null(), ..Turn::default() };
             cancelled.store(false, Ordering::Relaxed);
-            let result = agent.prompt(&text, &mut |event| match event {
+            let mut on_event = |event: Event| match event {
                 Event::Permission { call, request, reply } => {
                     let tool_call = turn.permission_tool_call(call.as_deref(), &request);
                     // Tool call ids are unique, so a late reply from an earlier turn cannot answer this request.
@@ -209,12 +212,31 @@ fn handle(agent: &mut Agent, connection: &mut Connection, message: &Value) -> Re
                     }
                     let _ = reply.send(decision);
                 }
+                Event::Ask { questions, reply } => {
+                    let message = questions.iter().map(|question| question.question.as_str()).collect::<Vec<_>>().join("\n");
+                    let content = elicit(replies, session_id, &message, question_form(&questions));
+                    // No answers at all is how the TUI declines.
+                    let _ = reply.send(content.map_or_else(Vec::new, |content| form_answers(&questions, &content)));
+                }
                 event => {
                     for update in turn.session_updates(&event) {
                         send(&json!({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": session_id, "update": update}}));
                     }
                 }
-            });
+            };
+            let mut result = agent.prompt(&text, &mut on_event);
+            let planned = agent.plan.lock().unwrap().clone();
+            if let (Ok(_), Plan::Ready(plan)) = (&result, planned)
+                && agent.asks
+                && !cancelled.load(Ordering::Relaxed)
+            {
+                let implement = approve_plan(replies, session_id, &plan);
+                *agent.plan.lock().unwrap() = if implement { Plan::Off } else { Plan::Drafting };
+                agent.save_plan().map_err(|error| (INTERNAL_ERROR, error))?;
+                if implement {
+                    result = agent.prompt(&format!("Implement this plan:\n\n{plan}"), &mut on_event);
+                }
+            }
             let stop_reason = turn.stop_reason(cancelled.load(Ordering::Relaxed));
             // The ACP spec wants `cancelled`, not an error, for a turn the client cancelled.
             if stop_reason != "cancelled" {
@@ -373,17 +395,68 @@ fn result_text(content: &Value) -> String {
 
 /// The client's answer to our request `id`; a cancelled request or a closed stdin denies.
 fn wait_for_decision(replies: &Receiver<Value>, id: &str) -> Decision {
-    for reply in replies.iter() {
-        if reply["id"] != id {
-            continue;
-        }
-        return match reply["result"]["outcome"]["optionId"].as_str() {
-            Some("allow_once") => Decision::Allow,
-            Some("allow_always") => Decision::AllowAlways,
-            _ => Decision::Deny,
-        };
+    let reply = wait_for_reply(replies, id).unwrap_or_default();
+    match reply["result"]["outcome"]["optionId"].as_str() {
+        Some("allow_once") => Decision::Allow,
+        Some("allow_always") => Decision::AllowAlways,
+        _ => Decision::Deny,
     }
-    Decision::Deny
+}
+
+/// The client's reply to our request `id`, None once stdin closes. Replies to earlier requests are dropped.
+fn wait_for_reply(replies: &Receiver<Value>, id: &str) -> Option<Value> {
+    replies.iter().find(|reply| reply["id"] == id)
+}
+
+/// Asks the editor to fill in a form; the content, or None when the user declines or cancels.
+fn elicit(replies: &Receiver<Value>, session_id: &str, message: &str, schema: Value) -> Option<Value> {
+    let id = format!("elicitation-{}", crate::process::now_ms());
+    let params = json!({"sessionId": session_id, "mode": "form", "message": message, "requestedSchema": schema});
+    send(&json!({"jsonrpc": "2.0", "id": id, "method": "elicitation/create", "params": params}));
+    let reply = wait_for_reply(replies, &id)?;
+    (reply["result"]["action"] == "accept").then(|| reply["result"]["content"].clone())
+}
+
+/// AskUserQuestion as a form: per question a pick of its options and a field to type an answer, like the TUI's "Type something.".
+fn question_form(questions: &[Question]) -> Value {
+    let mut properties = serde_json::Map::new();
+    for (index, question) in questions.iter().enumerate() {
+        let options: Vec<Value> = question.options.iter().map(|choice| json!({"const": choice.label, "title": choice.label, "description": choice.description})).collect();
+        let pick = if question.multi {
+            json!({"type": "array", "title": question.header, "description": question.question, "items": {"anyOf": options}})
+        } else {
+            json!({"type": "string", "title": question.header, "description": question.question, "oneOf": options})
+        };
+        properties.insert(format!("q{index}"), pick);
+        properties.insert(format!("q{index}_typed"), json!({"type": "string", "title": ask::TYPE_SOMETHING}));
+    }
+    json!({"type": "object", "properties": properties})
+}
+
+/// The filled-in `question_form` as answers; None for a question left empty, and a typed answer over a pick.
+fn form_answers(questions: &[Question], content: &Value) -> Vec<Option<Answer>> {
+    let mut answers = Vec::new();
+    for (index, question) in questions.iter().enumerate() {
+        let typed = content[format!("q{index}_typed")].as_str().unwrap_or_default().trim().to_string();
+        let position = |label: &Value| question.options.iter().position(|choice| Some(choice.label.as_str()) == label.as_str());
+        let picked = &content[format!("q{index}")];
+        answers.push(if question.multi {
+            let picked: Vec<usize> = picked.as_array().into_iter().flatten().filter_map(position).collect();
+            (!picked.is_empty() || !typed.is_empty()).then_some(Answer::Multi { picked, typed })
+        } else if !typed.is_empty() {
+            Some(Answer::Typed(typed))
+        } else {
+            position(picked).map(Answer::Picked)
+        });
+    }
+    answers
+}
+
+/// ExitPlanMode leaves a plan for the user to approve, which the TUI does in a panel. True to implement it now.
+fn approve_plan(replies: &Receiver<Value>, session_id: &str, plan: &str) -> bool {
+    let next = json!({"type": "string", "title": "Next", "oneOf": [{"const": "implement", "title": "Implement the plan"}, {"const": "keep", "title": "Keep planning"}]});
+    let schema = json!({"type": "object", "properties": {"next": next}, "required": ["next"]});
+    elicit(replies, session_id, &format!("The plan is ready.\n\n{plan}"), schema).is_some_and(|content| content["next"] == "implement")
 }
 
 /// What one session/prompt remembers between the agent's events.
@@ -625,6 +698,24 @@ mod tests {
         assert!(turn.session_updates(&Event::Notice("Compacted.".into())).is_empty());
         turn.notices = true;
         assert_eq!(turn.session_updates(&Event::Notice("Compacted.".into())), [json!({"sessionUpdate": "notice", "severity": "info", "title": "Compacted."})]);
+    }
+
+    #[test]
+    fn form_answers_read_picks_typed_text_and_multi_select() {
+        let questions = ask::parse(&json!({"questions": [
+            {"question": "One?", "header": "One", "options": [{"label": "A"}, {"label": "B"}]},
+            {"question": "Many?", "header": "Many", "multiSelect": true, "options": [{"label": "X"}, {"label": "Y"}]},
+            {"question": "Own?", "header": "Own", "options": [{"label": "C"}, {"label": "D"}]},
+            {"question": "Skip?", "header": "Skip", "options": [{"label": "E"}, {"label": "F"}]},
+        ]}))
+        .unwrap();
+        let form = question_form(&questions);
+        assert_eq!(form["properties"]["q1"]["items"]["anyOf"][1]["const"], "Y");
+
+        let answers = form_answers(&questions, &json!({"q0": "B", "q1": ["X", "Y"], "q1_typed": "Z", "q2": "C", "q2_typed": "mine"}));
+
+        assert_eq!(answers, [Some(Answer::Picked(1)), Some(Answer::Multi { picked: vec![0, 1], typed: "Z".into() }), Some(Answer::Typed("mine".into())), None]);
+        assert!(ask::response(&questions, &answers).contains("\"Many?\"=\"X, Y, Z\""));
     }
 
     #[test]

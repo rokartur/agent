@@ -275,6 +275,8 @@ pub struct Agent {
     pub spent: Spent,
     /// False in print mode: tools that need the user fail instead of waiting.
     pub interactive: bool,
+    /// Someone answers `Event::Ask`: the TUI, or an editor with form elicitation. AskUserQuestion and EnterPlanMode need it.
+    pub asks: bool,
     /// pi's agent dir, for rebuilding the system prompt after /worktree.
     pub agent_dir: PathBuf,
     pub home: PathBuf,
@@ -442,6 +444,7 @@ impl Agent {
             only_tools: None,
             spent: Spent::default(),
             interactive: false,
+            asks: false,
             plugins: crate::plugins::Plugins::new(&home),
             mcp: crate::mcp::Mcp::new(&home, &cwd),
             snapshots: None,
@@ -1159,7 +1162,7 @@ impl Agent {
         if *self.plan.lock().unwrap() != Plan::Off {
             return Err("Already in plan mode.".into());
         }
-        if !self.interactive {
+        if !self.asks {
             return Err(ask::NO_UI.into());
         }
         let questions = ask::parse(&json!({"questions": [{
@@ -1343,7 +1346,7 @@ impl Agent {
     }
 
     fn ask_user(&mut self, input: &Value, emit: &mut dyn FnMut(Event)) -> Result<String, String> {
-        if !self.interactive {
+        if !self.asks {
             return Err(ask::NO_UI.into());
         }
         let questions = ask::parse(input)?;
@@ -1800,10 +1803,13 @@ impl Agent {
             system = format!("{system}\n\n{}", plan::PROMPT);
             list.push(plan::tool());
         }
-        // A one-shot run (-p, --headless, acp, a child) has no UI to ask, plan, notify or schedule in: these tools only fail there.
+        // A one-shot run (-p, --headless, acp, a child) has no UI to notify or schedule in, and asks only through an editor: these tools only fail there.
         if !self.interactive {
-            const NEEDS_UI: [&str; 7] = ["AskUserQuestion", "EnterPlanMode", "PushNotification", "CronCreate", "CronDelete", "CronList", "ScheduleWakeup"];
+            const NEEDS_UI: [&str; 5] = ["PushNotification", "CronCreate", "CronDelete", "CronList", "ScheduleWakeup"];
             list.retain(|tool| !NEEDS_UI.contains(&tool["name"].as_str().unwrap_or_default()));
+        }
+        if !self.asks {
+            list.retain(|tool| tool["name"] != "AskUserQuestion" && tool["name"] != "EnterPlanMode");
         }
         // prompt::system_prompt lists the skills under this tag; with none, Skill has nothing to load.
         if !self.system.contains("<skills>\n") {
