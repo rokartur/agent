@@ -1,5 +1,5 @@
 //! `agent acp`: the Agent Client Protocol for editors like Zed, JSON-RPC 2.0 with one message per line on stdin and stdout.
-//! shortcut: one session per process and no session/load, client MCP servers or client fs; add them when an editor needs them.
+//! shortcut: one session per process and no session/load or client fs; add them when an editor needs them.
 
 use std::io::{BufRead, Write};
 use std::sync::Arc;
@@ -70,7 +70,11 @@ fn handle(agent: &mut Agent, message: &Value, replies: &Receiver<Value>) -> Resu
     match message["method"].as_str().unwrap_or_default() {
         "initialize" => Ok(json!({
             "protocolVersion": PROTOCOL_VERSION,
-            "agentCapabilities": {"loadSession": false, "promptCapabilities": {"image": false, "audio": false, "embeddedContext": true}},
+            "agentCapabilities": {
+                "loadSession": false,
+                "promptCapabilities": {"image": false, "audio": false, "embeddedContext": true},
+                "mcpCapabilities": {"http": true, "sse": false},
+            },
             "agentInfo": {"name": "agent", "title": "agent", "version": env!("CARGO_PKG_VERSION")},
             "authMethods": [],
         })),
@@ -80,6 +84,9 @@ fn handle(agent: &mut Agent, message: &Value, replies: &Receiver<Value>) -> Resu
             if std::fs::canonicalize(cwd).ok().as_deref() != Some(agent.cwd.as_path()) {
                 return Err((INVALID_PARAMS, format!("agent acp serves the directory it started in, {}, not {cwd}.", agent.cwd.display())));
             }
+            let settings = crate::settings::load(&agent.home).map_err(|error| (INTERNAL_ERROR, error))?;
+            agent.mcp.set_client_servers(&params["mcpServers"], &settings.disabled_mcp, &settings.approved_mcp).map_err(|error| (INVALID_PARAMS, error))?;
+            agent.mcp.settled();
             if !agent.messages.is_empty() {
                 agent.new_session().map_err(|error| (INTERNAL_ERROR, error))?;
             }

@@ -1,4 +1,4 @@
-//! MCP servers from `mcp.json`, their tools offered to the model as `mcp__<server>__<tool>`.
+//! MCP servers from `mcp.json` and an ACP client, their tools offered to the model as `mcp__<server>__<tool>`.
 
 mod client;
 mod config;
@@ -25,6 +25,8 @@ pub struct Mcp {
 #[derive(Default)]
 struct State {
     servers: Vec<Entry>,
+    /// The servers an ACP client passed with session/new; `sync` runs them next to `mcp.json`'s, over one of the same name.
+    client: Vec<Server>,
     /// Why `mcp.json` could not be read, shown in /mcp.
     error: Option<String>,
     next_run: u64,
@@ -92,9 +94,11 @@ impl Mcp {
     /// Rereads `mcp.json`: connects enabled servers not in `disabled` whose project entry, if any, is in
     /// `approved`, stops the rest, and keeps connections whose command or URL did not change.
     pub fn sync(&self, disabled: &[String], approved: &[String]) {
-        let (servers, error) = config::load(&self.home, &self.cwd);
+        let (mut servers, error) = config::load(&self.home, &self.cwd);
         let mut state = self.state.lock().unwrap();
         state.error = error;
+        servers.retain(|server| !state.client.iter().any(|client| client.name == server.name));
+        servers.extend(state.client.iter().cloned());
         let mut previous = std::mem::take(&mut state.servers);
         for server in servers {
             let is_approved = server.approval.as_ref().is_none_or(|key| approved.contains(key));
@@ -116,6 +120,13 @@ impl Mcp {
                 self.connect(&mut state, index);
             }
         }
+    }
+
+    /// Replaces the servers an ACP client passed before with `list`, the `mcpServers` of its session/new, and syncs.
+    pub fn set_client_servers(&self, list: &Value, disabled: &[String], approved: &[String]) -> Result<(), String> {
+        self.state.lock().unwrap().client = config::client_servers(list, &self.cwd)?;
+        self.sync(disabled, approved);
+        Ok(())
     }
 
     /// Waits until no server is still connecting, so a run without a UI starts with every tool.
@@ -362,6 +373,28 @@ for line in sys.stdin:
         std::fs::remove_dir_all(&root).unwrap();
         assert!(matches!(views[0].status, Status::Ready { tools: 2 }));
         assert_eq!(views[0].approval, None);
+    }
+
+    #[test]
+    fn an_acp_client_server_runs_over_the_same_named_mcp_json_one_until_the_client_drops_it() {
+        let home = std::env::temp_dir().join(format!("agent-mcp-client-{}", std::process::id()));
+        std::fs::create_dir_all(home.join(".agents")).unwrap();
+        std::fs::write(home.join(".agents/mcp.json"), json!({"mcpServers": {"fake": {"command": "false"}}}).to_string()).unwrap();
+        let mcp = Mcp::new(&home, &home);
+        mcp.sync(&[], &[]);
+
+        mcp.set_client_servers(&json!([{"name": "fake", "command": "python3", "args": ["-c", FAKE_SERVER], "env": []}]), &[], &[]).unwrap();
+        mcp.settled();
+        let names: Vec<_> = mcp.tools().iter().map(|tool| tool["name"].clone()).collect();
+        let (views, _) = mcp.list();
+        mcp.set_client_servers(&json!([]), &[], &[]).unwrap();
+        let (views_after, _) = mcp.list();
+        std::fs::remove_dir_all(&home).unwrap();
+
+        assert_eq!(names, ["mcp__fake__echo", "mcp__fake__fail"]);
+        let targets = |views: &[View]| views.iter().map(|view| view.target.clone()).collect::<Vec<_>>();
+        assert_eq!(targets(&views), ["python3"]);
+        assert_eq!(targets(&views_after), ["false"]);
     }
 
     #[test]

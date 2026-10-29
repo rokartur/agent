@@ -85,6 +85,31 @@ pub fn load(home: &Path, cwd: &Path) -> (Vec<Server>, Option<String>) {
     (servers, first_error)
 }
 
+/// The `mcpServers` of an ACP session/new: stdio `{name, command, args, env: [{name, value}]}`, run in `cwd`,
+/// or `{"type": "http", name, url, headers: [{name, value}]}`. The editor chose them, so they need no approval.
+pub fn client_servers(list: &Value, cwd: &Path) -> Result<Vec<Server>, String> {
+    let pairs = |list: &Value| -> Vec<(String, String)> {
+        let pair = |item: &Value| Some((item["name"].as_str()?.to_string(), item["value"].as_str()?.to_string()));
+        list.as_array().into_iter().flatten().filter_map(pair).collect()
+    };
+    let mut servers = Vec::new();
+    for entry in list.as_array().into_iter().flatten() {
+        let name = entry["name"].as_str().ok_or("Every MCP server needs a name.")?;
+        let launch = match (entry["type"].as_str(), entry["command"].as_str(), entry["url"].as_str()) {
+            (None | Some("stdio"), Some(command), _) => Launch::Stdio {
+                command: command.to_string(),
+                args: entry["args"].as_array().into_iter().flatten().filter_map(|arg| arg.as_str().map(String::from)).collect(),
+                env: pairs(&entry["env"]),
+                cwd: cwd.to_path_buf(),
+            },
+            (Some("http"), _, Some(url)) => Launch::Http { url: url.to_string(), headers: pairs(&entry["headers"]) },
+            _ => return Err(format!("MCP server {name}: only stdio servers and http servers with a url are supported.")),
+        };
+        servers.push(Server { name: name.to_string(), launch, enabled: true, approval: None, raw: entry.to_string() });
+    }
+    Ok(servers)
+}
+
 /// The entry as JSON with what runs and where it connects first, so a cut-off approval panel still shows them.
 fn launch_first(entry: &Map<String, Value>) -> String {
     const LAUNCH: [&str; 4] = ["command", "args", "url", "cwd"];
@@ -174,6 +199,21 @@ mod tests {
         assert!(server("bad", &serde_json::json!({}), Path::new("/"), &env).is_err());
         assert!(server("bad", &serde_json::json!({"command": "x", "url": "https://x/mcp"}), Path::new("/"), &env).is_err());
         assert!(server("bad", &serde_json::json!({"type": "sse", "url": "https://x/sse"}), Path::new("/"), &env).is_err());
+    }
+
+    #[test]
+    fn an_acp_client_passes_stdio_and_http_servers_but_no_sse() {
+        let list = serde_json::json!([
+            {"name": "fs", "command": "fs-server", "args": ["--ro"], "env": [{"name": "TOKEN", "value": "${NOT_EXPANDED}"}]},
+            {"type": "http", "name": "web", "url": "https://x/mcp", "headers": [{"name": "Authorization", "value": "Bearer t"}]},
+        ]);
+        let servers = client_servers(&list, Path::new("/repo")).unwrap();
+        let env = vec![("TOKEN".into(), "${NOT_EXPANDED}".into())];
+        assert_eq!(servers[0].launch, Launch::Stdio { command: "fs-server".into(), args: vec!["--ro".into()], env, cwd: "/repo".into() });
+        assert_eq!(servers[1].launch, Launch::Http { url: "https://x/mcp".into(), headers: vec![("Authorization".into(), "Bearer t".into())] });
+        assert!(servers.iter().all(|server| server.enabled && server.approval.is_none()));
+        assert!(client_servers(&serde_json::json!([{"type": "sse", "name": "old", "url": "https://x/sse", "headers": []}]), Path::new("/")).is_err());
+        assert!(client_servers(&serde_json::json!([{"command": "x"}]), Path::new("/")).is_err());
     }
 
     #[test]
