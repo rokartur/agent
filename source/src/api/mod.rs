@@ -849,7 +849,8 @@ impl ApiError {
 const CORE_TOOLS: [&str; 7] = ["Read", "Bash", "Write", "ReplaceLines", "Edit", "InsertLines", "Grep"];
 
 fn defer_rare_tools(body: &mut Value) {
-    let Some(tools) = body["tools"].as_array_mut() else { return };
+    // `body["tools"]` would insert `"tools": null` into a plain request, which the API rejects.
+    let Some(tools) = body.get_mut("tools").and_then(Value::as_array_mut) else { return };
     if tools.iter().all(|tool| CORE_TOOLS.contains(&tool["name"].as_str().unwrap_or_default())) {
         return;
     }
@@ -1281,6 +1282,9 @@ mod tests {
         let before = body.clone();
         defer_rare_tools(&mut body);
         assert_eq!(body, before);
+        let mut summary = plain_request("m", "sys", "prompt", 100);
+        defer_rare_tools(&mut summary);
+        assert!(summary.get("tools").is_none());
     }
 
     #[test]
