@@ -126,6 +126,8 @@ struct Editor {
     buffers: HashMap<String, String>,
     /// The output and exit code of each command a terminal/create ran, by terminal id.
     terminals: HashMap<String, (String, i32)>,
+    /// The directories of the sessions opened, the only ones whose files the fs methods reach, as in Zed.
+    worktrees: Vec<PathBuf>,
 }
 
 impl Editor {
@@ -164,7 +166,7 @@ impl Editor {
                 }
             }
         });
-        let mut editor = Editor { child, stdin, lines, next_id: 0, seen: Vec::new(), form_replies: VecDeque::new(), buffers: HashMap::new(), terminals: HashMap::new() };
+        let mut editor = Editor { child, stdin, lines, next_id: 0, seen: Vec::new(), form_replies: VecDeque::new(), buffers: HashMap::new(), terminals: HashMap::new(), worktrees: Vec::new() };
         editor.request("initialize", json!({"protocolVersion": 1, "clientCapabilities": capabilities})).unwrap();
         editor
     }
@@ -203,12 +205,17 @@ impl Editor {
             if message["method"] == "session/request_permission" {
                 self.send(&json!({"jsonrpc": "2.0", "id": message["id"], "result": {"outcome": {"outcome": "selected", "optionId": "allow_once"}}}));
             }
-            if message["method"] == "fs/read_text_file" {
+            let method = message["method"].as_str().unwrap_or_default();
+            let outside = method.starts_with("fs/") && !self.worktrees.iter().any(|worktree| Path::new(message["params"]["path"].as_str().unwrap()).starts_with(worktree));
+            if outside {
+                self.send(&json!({"jsonrpc": "2.0", "id": message["id"], "error": {"code": -32002, "message": "Resource not found"}}));
+            }
+            if method == "fs/read_text_file" && !outside {
                 let path = message["params"]["path"].as_str().unwrap();
                 let content = self.buffers.get(path).cloned().unwrap_or_else(|| std::fs::read_to_string(path).unwrap());
                 self.send(&json!({"jsonrpc": "2.0", "id": message["id"], "result": {"content": content}}));
             }
-            if message["method"] == "fs/write_text_file" {
+            if method == "fs/write_text_file" && !outside {
                 let params = &message["params"];
                 self.buffers.insert(params["path"].as_str().unwrap().to_string(), params["content"].as_str().unwrap().to_string());
                 self.send(&json!({"jsonrpc": "2.0", "id": message["id"], "result": null}));
@@ -244,6 +251,7 @@ impl Editor {
     }
 
     fn new_session(&mut self, cwd: &Path) -> String {
+        self.worktrees.push(cwd.to_path_buf());
         let session = self.request("session/new", json!({"cwd": cwd, "mcpServers": []})).unwrap();
         session["sessionId"].as_str().unwrap().to_string()
     }
@@ -610,6 +618,26 @@ fn an_editor_with_fs_serves_reads_and_takes_edits_of_its_buffers() {
     assert_eq!(std::fs::read_to_string(&file).unwrap(), "on disk\n");
     let edited = editor.updates("tool_call_update").into_iter().find(|update| update["toolCallId"] == "toolu_edit" && update.get("content").is_some()).unwrap();
     assert_eq!((&edited["content"][0]["oldText"], &edited["content"][0]["newText"]), (&json!("unsaved buffer\n"), &json!("edited buffer\n")));
+}
+
+#[test]
+fn a_file_outside_the_editors_project_is_read_and_edited_on_disk() {
+    let home = Home::new("fs-outside");
+    let file = home.dir.join("notes.txt");
+    std::fs::write(&file, "outside\n").unwrap();
+    let api = fake_api(vec![
+        reply(&[tool_use("toolu_read", "Read", json!({"file_path": file}))], "tool_use"),
+        reply(&[tool_use("toolu_edit", "Edit", json!({"file_path": file, "old_string": "outside", "new_string": "edited"}))], "tool_use"),
+        reply(&[text("Done.")], "end_turn"),
+    ]);
+    let mut editor = Editor::start_with(&home, &api, json!({"fs": {"readTextFile": true, "writeTextFile": true}}), "sk-fake");
+    let session_id = editor.new_session(&home.project());
+
+    editor.prompt(&session_id, "Fix notes.txt.").unwrap();
+
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "edited\n");
+    let asked_the_editor = editor.seen.iter().any(|message| message["method"].as_str().is_some_and(|method| method.starts_with("fs/")));
+    assert!(!asked_the_editor, "{:#?}", editor.seen);
 }
 
 #[test]

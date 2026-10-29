@@ -20,9 +20,10 @@ use crate::agent::{Agent, Event, workflow};
 use crate::api::models::{Model, PROVIDERS};
 use crate::settings::THINKING_LEVELS;
 use crate::tools::ask::{self, Answer, Question};
+use crate::tools::hashline::EditorFiles;
 use crate::tools::plan::Plan;
 use crate::tools::todo::{Status, Todos};
-use crate::tools::{EditorTerminal, Killed, hashline};
+use crate::tools::{EditorTerminal, Killed};
 
 const PROTOCOL_VERSION: u64 = 1;
 const METHOD_NOT_FOUND: i64 = -32601;
@@ -151,8 +152,11 @@ fn handle(agent: &mut Agent, connection: &mut Connection, message: &Value) -> Re
             *commands = Commands::load(agent).map_err(|error| (INTERNAL_ERROR, error))?;
             let files = client["fs"]["readTextFile"] == true && client["fs"]["writeTextFile"] == true;
             let terminal = client["terminal"] == true;
-            let editor = Arc::new(EditorClient { session_id: session_id.clone(), replies: replies.clone(), next_id: AtomicU64::new(0), files, terminals: Mutex::default() });
-            agent.anchors.editor = files.then(|| editor.clone() as Arc<dyn hashline::EditorFiles>);
+            // Zed's fs methods reach only its project's worktrees, the session's directories.
+            let dirs = params["additionalDirectories"].as_array().into_iter().flatten().filter_map(|dir| std::fs::canonicalize(dir.as_str()?).ok());
+            let roots = if files { std::iter::once(agent.cwd.clone()).chain(dirs).collect() } else { Vec::new() };
+            let editor = Arc::new(EditorClient { session_id: session_id.clone(), replies: replies.clone(), next_id: AtomicU64::new(0), roots, terminals: Mutex::default() });
+            agent.anchors.editor = files.then(|| editor.clone() as Arc<dyn EditorFiles>);
             agent.editor_terminal = terminal.then(|| editor.clone() as Arc<dyn EditorTerminal>);
             *editor_client = Some(editor);
             let mut answer = json!({"modes": modes(agent), "configOptions": config_options(agent)});
@@ -350,7 +354,8 @@ struct EditorClient {
     session_id: String,
     replies: Arc<Mutex<Receiver<Value>>>,
     next_id: AtomicU64,
-    files: bool,
+    /// The directories whose files the editor reads and writes; empty when it offers no fs methods.
+    roots: Vec<PathBuf>,
     /// The Bash calls that ran in a terminal, whose card keeps showing it.
     terminals: Mutex<HashSet<String>>,
 }
@@ -377,7 +382,11 @@ fn result_of(method: &str, reply: &Value) -> Result<Value, String> {
     }
 }
 
-impl hashline::EditorFiles for EditorClient {
+impl EditorFiles for EditorClient {
+    fn serves(&self, path: &Path) -> bool {
+        self.roots.iter().any(|root| path.starts_with(root))
+    }
+
     fn read(&self, path: &Path) -> Result<String, String> {
         let result = self.request("fs/read_text_file", json!({"sessionId": self.session_id, "path": path}))?;
         result["content"].as_str().map(String::from).ok_or_else(|| format!("The editor sent no text for {}.", path.display()))
@@ -670,8 +679,9 @@ impl Turn {
 
     fn read_text(&self, path: &Path) -> Option<String> {
         match &self.editor {
-            Some(editor) if editor.files => hashline::EditorFiles::read(editor.as_ref(), path).ok(),
-            _ => std::fs::read_to_string(path).ok(),
+            Some(editor) if editor.serves(path) => editor.read(path).ok(),
+            // Before the tool's own checks: /dev/zero or a FIFO never ends.
+            _ => std::fs::metadata(path).is_ok_and(|meta| meta.is_file()).then(|| std::fs::read_to_string(path).ok()).flatten(),
         }
     }
 
@@ -775,6 +785,19 @@ mod tests {
         assert_eq!(edit[1]["content"]["text"], "ok");
         assert_eq!(write[0], json!({"type": "diff", "path": dir.join("b.rs"), "oldText": null, "newText": "new"}));
         assert_eq!(read.as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn an_edit_of_a_fifo_gets_no_diff_and_does_not_block() {
+        let fifo = std::env::temp_dir().join(format!("agent-acp-fifo-{}", std::process::id()));
+        let _ = std::fs::remove_file(&fifo);
+        assert!(crate::process::command("mkfifo").arg(&fifo).status().unwrap().success());
+        let (sent, read) = mpsc::channel();
+        let path = fifo.clone();
+        std::thread::spawn(move || sent.send(Turn::default().read_text(&path)).unwrap());
+        let text = read.recv_timeout(Duration::from_secs(5));
+        std::fs::remove_file(&fifo).unwrap();
+        assert_eq!(text, Ok(None));
     }
 
     #[test]

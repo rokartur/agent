@@ -22,6 +22,8 @@ const PROBE_STRIDE: u32 = 836_286;
 
 /// An editor's buffers, read and written in place of the disk, so a read sees unsaved changes (ACP's fs methods).
 pub trait EditorFiles: Send + Sync {
+    /// Whether the editor holds `path`; the disk serves the rest.
+    fn serves(&self, path: &Path) -> bool;
     fn read(&self, path: &Path) -> Result<String, String>;
     fn write(&self, path: &Path, text: &str) -> Result<(), String>;
 }
@@ -350,10 +352,17 @@ impl Anchors {
     }
 
     fn load(&self, path: &Path) -> Result<Text, String> {
-        match &self.editor {
-            Some(editor) => Ok(Text::parse(&editor.read(path)?)),
-            None => Text::load(path),
+        let Some(editor) = self.editor_for(path) else { return Text::load(path) };
+        check_size(path)?;
+        let text = editor.read(path)?;
+        if text.contains('\0') {
+            return Err(binary_file(path));
         }
+        Ok(Text::parse(&text))
+    }
+
+    fn editor_for(&self, path: &Path) -> Option<&dyn EditorFiles> {
+        self.editor.as_deref().filter(|editor| editor.serves(path))
     }
 
     /// Loads `path` whole for an edit by content: no read first, so anchors are minted here.
@@ -370,7 +379,7 @@ impl Anchors {
             file.lines.push(String::new());
             file.final_newline = false;
         }
-        let before = match &self.editor {
+        let before = match self.editor_for(path) {
             Some(editor) => editor.read(path)?.into_bytes(),
             None => std::fs::read(path).map_err(|e| format!("Cannot read {}: {e}", path.display()))?,
         };
@@ -384,7 +393,7 @@ impl Anchors {
         let (prefix, suffix) = unchanged_ends(old, &written.lines);
         // Checked before writing, so the edit is not left on disk without anchors.
         self.anchors_left(path, written.lines.len() - prefix - suffix)?;
-        match &self.editor {
+        match self.editor_for(path) {
             Some(editor) => editor.write(path, &after)?,
             None => replace_file(path, after.as_bytes())?,
         }
@@ -436,13 +445,10 @@ const BINARY_SNIFF_BYTES: usize = 8192;
 
 impl Text {
     fn load(path: &Path) -> Result<Text, String> {
-        let size = std::fs::metadata(path).map_err(|e| format!("Cannot read {}: {e}", path.display()))?.len();
-        if size > MAX_FILE_BYTES {
-            return Err(format!("{} is {}, over the {} limit for anchored files. Use bash with sed -n and head.", path.display(), format_size(size as usize), format_size(MAX_FILE_BYTES as usize)));
-        }
+        check_size(path)?;
         let bytes = std::fs::read(path).map_err(|e| format!("Cannot read {}: {e}", path.display()))?;
         if bytes[..bytes.len().min(BINARY_SNIFF_BYTES)].contains(&0) {
-            return Err(format!("{} is a binary file. Use bash with file, xxd or strings to inspect it.", path.display()));
+            return Err(binary_file(path));
         }
         let raw = String::from_utf8(bytes).map_err(|_| format!("{} is not UTF-8 text. Use bash with iconv to convert it, or edit it with bash.", path.display()))?;
         Ok(Text::parse(&raw))
@@ -621,6 +627,19 @@ fn existing_file(cwd: &Path, path: &str) -> Result<PathBuf, String> {
     Ok(full)
 }
 
+/// The size on disk, so an editor's buffer of a huge file is refused before it crosses the pipe.
+fn check_size(path: &Path) -> Result<(), String> {
+    let size = std::fs::metadata(path).map_err(|e| format!("Cannot read {}: {e}", path.display()))?.len();
+    if size > MAX_FILE_BYTES {
+        return Err(format!("{} is {}, over the {} limit for anchored files. Use bash with sed -n and head.", path.display(), format_size(size as usize), format_size(MAX_FILE_BYTES as usize)));
+    }
+    Ok(())
+}
+
+fn binary_file(path: &Path) -> String {
+    format!("{} is a binary file. Use bash with file, xxd or strings to inspect it.", path.display())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -680,6 +699,29 @@ mod tests {
         let path = temp_file("default", &"x\n".repeat(READ_DEFAULT_LINES + 1));
         let page = Anchors::new("s").read(Path::new("/"), &json!({"file_path": path})).unwrap();
         assert!(page.contains(&format!("[Showing lines 1-{READ_DEFAULT_LINES} of {}.", READ_DEFAULT_LINES + 1)), "{}", &page[page.len() - 80..]);
+    }
+
+    struct Buffer(&'static str);
+
+    impl EditorFiles for Buffer {
+        fn serves(&self, _: &Path) -> bool {
+            true
+        }
+        fn read(&self, _: &Path) -> Result<String, String> {
+            Ok(self.0.to_string())
+        }
+        fn write(&self, _: &Path, _: &str) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn an_editor_buffer_of_a_binary_file_is_refused_like_the_file_on_disk() {
+        let path = temp_file("editor-binary", "text on disk\n");
+        let mut anchors = Anchors::new("s");
+        anchors.editor = Some(Arc::new(Buffer("PNG\0\0")));
+        let error = anchors.read(Path::new("/"), &json!({"file_path": path})).unwrap_err();
+        assert!(error.contains("is a binary file"), "{error}");
     }
 
     #[test]

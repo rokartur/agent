@@ -294,7 +294,7 @@ fn write(input: &Value, cwd: &Path, editor: Option<&dyn hashline::EditorFiles>) 
     {
         return Err(format!("Cannot read {}: {e}", path.display()));
     }
-    match editor {
+    match editor.filter(|editor| editor.serves(&path)) {
         Some(editor) => editor.write(&path, content)?,
         None => hashline::replace_file(&path, content.as_bytes())?,
     }
