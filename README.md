@@ -88,26 +88,26 @@ Their models show in `/model` as `<name>/<model id>`. For an unknown server, set
 
 </details>
 
-## Compared with jcode and pi
+## Compared with Claude Code, jcode and pi
 
-| | agent | jcode | pi |
-|---|---|---|---|
-| Version | 0.1.36 | 0.99.1 | 1.4.0 |
-| C: finished in time, cases passed per run | **3 of 3**, 388 · 387 · 388 | 0 of 3, 21 · 21 · 21 | 0 of 3, 387 · 388 · 387 |
-| C: time, cost | **1208 s, $4.08** | 2400 s, $4.92 | 2400 s, $5.12 |
-| D: time, tool calls, tokens, cost | **69.6 s**, 9.7, **260k, $0.35** | 197.3 s, 17.7, 954k, $0.89 | 70.7 s, **9.3**, 289k, $0.38 |
-| E: time | **161.3 s** | 224.0 s | 229.4 s |
-| E: tool calls, tokens, cost | **7.0, 144k, $0.43** | 12.0, 575k, $0.79 | 10.3, 202k, $0.49 |
-| Reply to "OK", median of 15 | **1.10 s** | 5.24 s | 1.44 s |
-| Base context | 3.2k | 23.4k | **2.6k** |
-| CPU, memory when idle | **0.04 s, 25 MB** | 0.31 s, 45 MB | 0.49 s, 135 MB |
+| | agent | Claude Code | jcode | pi |
+|---|---|---|---|---|
+| Version | 0.1.36 | 2.1.309 | 0.99.1 | 1.4.0 |
+| C: finished in time, cases passed per run | **3 of 3**, 388 · 387 · 388 | 2 of 3, 388 · 388 · 388 | 0 of 3, 21 · 21 · 21 | 0 of 3, 387 · 388 · 387 |
+| C: time, cost | **1208 s, $4.08** | 1955 s, $7.39 | 2400 s, $4.92 | 2400 s, $5.12 |
+| D: time, tool calls, tokens, cost | **69.6 s**, 9.7, **260k, $0.35** | 94.9 s, 13.3, 645k, $0.58 | 197.3 s, 17.7, 954k, $0.89 | 70.7 s, **9.3**, 289k, $0.38 |
+| E: time | 161.3 s | **128.6 s** | 224.0 s | 229.4 s |
+| E: tool calls, tokens, cost | **7.0, 144k, $0.43** | 8.7, 348k, $0.56 | 12.0, 575k, $0.79 | 10.3, 202k, $0.49 |
+| Reply to "OK", median of 15 | **1.10 s** | 3.08 s | 5.24 s | 1.44 s |
+| Base context | 3.2k | 20.2k | 23.4k | **2.6k** |
+| CPU, memory when idle | **0.04 s, 25 MB** | 0.82 s, 299 MB | 0.31 s, 45 MB | 0.49 s, 135 MB |
 
 <details>
 <summary>How it was measured</summary>
 
-Same model (Claude Opus 5.5, medium thinking), same prompt, three large tasks, 3 runs each. On every run the three harnesses start together, each with only its login. C: write a jq interpreter in TypeScript, checked on 388 programs against jq 1.7.1, 40 minute limit. D: fix 11 reported bugs in marked, a 4,000 line Markdown renderer, where 1687 inputs must render byte for byte as the original. E: port Python's difflib to TypeScript, checked on 2916 cases from CPython.
+Same model (Claude Opus 5.5, medium thinking), same prompt, three large tasks, 3 runs each. On every run agent, jcode and pi start together, each with only its login. Claude Code ran the same tasks a day later on its own, on a MacBook with the same chip (M1 Max), also with only its login. C: write a jq interpreter in TypeScript, checked on 388 programs against jq 1.7.1, 40 minute limit. D: fix 11 reported bugs in marked, a 4,000 line Markdown renderer, where 1687 inputs must render byte for byte as the original. E: port Python's difflib to TypeScript, checked on 2916 cases from CPython.
 
-In C, jcode spent all 40 minutes trying jq and wrote no code. pi had a working interpreter in all three runs, but two were still checking it when time ran out, and one waited 16 minutes on a command that never ended; agent stops a command after 2 minutes. In D one pi run and one jcode run missed one case. Run to run, times vary more than the gaps between agent and pi in D and E. The reply to "OK" varies from series to series too: in the previous one, on another Mac, agent took 2.78 s and pi 1.67 s.
+In C, jcode spent all 40 minutes trying jq and wrote no code. pi had a working interpreter in all three runs, but two were still checking it when time ran out, and one waited 16 minutes on a command that never ended; agent stops a command after 2 minutes. Claude Code passed every case in every run; in C one of its runs was still checking its interpreter against jq when time ran out. In D one pi run and one jcode run missed one case. Run to run, times vary more than the gaps between agent and pi in D and E. The reply to "OK" varies from series to series too: in the previous one, on another Mac, agent took 2.78 s and pi 1.67 s.
 
 </details>
 
