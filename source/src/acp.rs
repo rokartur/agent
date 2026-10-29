@@ -21,11 +21,10 @@ const INTERNAL_ERROR: i64 = -32603;
 
 pub fn serve(agent: &mut Agent) -> Result<(), String> {
     let cancelled = Arc::new(AtomicBool::new(false));
-    // The id the editor knows. A `cd` moves the agent to a new saved session, and the editor keeps this one.
-    let mut session_id = String::new();
     let (requests, replies) = read_stdin(agent.abort.clone(), cancelled.clone());
+    let mut connection = Connection { replies, cancelled, session_id: String::new(), client: Value::Null };
     for message in requests {
-        let result = handle(agent, &message, &replies, &cancelled, &mut session_id);
+        let result = handle(agent, &mut connection, &message);
         let id = &message["id"];
         if id.is_null() {
             continue;
@@ -73,19 +72,34 @@ fn read_stdin(abort: Arc<AtomicBool>, cancelled: Arc<AtomicBool>) -> (Receiver<V
     (request_rx, reply_rx)
 }
 
-fn handle(agent: &mut Agent, message: &Value, replies: &Receiver<Value>, cancelled: &AtomicBool, session_id: &mut String) -> Result<Value, (i64, String)> {
+/// What the connection remembers between messages.
+struct Connection {
+    /// The editor's replies to our requests.
+    replies: Receiver<Value>,
+    cancelled: Arc<AtomicBool>,
+    /// The id the editor knows. A `cd` moves the agent to a new saved session, and the editor keeps this one.
+    session_id: String,
+    /// `clientCapabilities` from initialize.
+    client: Value,
+}
+
+fn handle(agent: &mut Agent, connection: &mut Connection, message: &Value) -> Result<Value, (i64, String)> {
+    let Connection { replies, cancelled, session_id, client } = connection;
     let params = &message["params"];
     match message["method"].as_str().unwrap_or_default() {
-        "initialize" => Ok(json!({
-            "protocolVersion": PROTOCOL_VERSION,
-            "agentCapabilities": {
-                "loadSession": false,
-                "promptCapabilities": {"image": false, "audio": false, "embeddedContext": true},
-                "mcpCapabilities": {"http": true, "sse": false},
-            },
-            "agentInfo": {"name": "agent", "title": "agent", "version": env!("CARGO_PKG_VERSION")},
-            "authMethods": [],
-        })),
+        "initialize" => {
+            *client = params["clientCapabilities"].clone();
+            Ok(json!({
+                "protocolVersion": PROTOCOL_VERSION,
+                "agentCapabilities": {
+                    "loadSession": false,
+                    "promptCapabilities": {"image": false, "audio": false, "embeddedContext": true},
+                    "mcpCapabilities": {"http": true, "sse": false},
+                },
+                "agentInfo": {"name": "agent", "title": "agent", "version": env!("CARGO_PKG_VERSION")},
+                "authMethods": [],
+            }))
+        }
         "session/new" => {
             let cwd = params["cwd"].as_str().unwrap_or_default();
             // macOS: /tmp is a link to /private/tmp, and agent.cwd is resolved.
@@ -108,7 +122,7 @@ fn handle(agent: &mut Agent, message: &Value, replies: &Receiver<Value>, cancell
             }
             let text = prompt_text(&params["prompt"]);
             let first_new_message = agent.messages.len();
-            let mut turn = Turn { cwd: agent.cwd.clone(), todos: agent.todos.clone(), ..Turn::default() };
+            let mut turn = Turn { cwd: agent.cwd.clone(), todos: agent.todos.clone(), context_window: agent.context_window, notices: !client["session"]["notices"].is_null(), ..Turn::default() };
             cancelled.store(false, Ordering::Relaxed);
             let result = agent.prompt(&text, &mut |event| match event {
                 Event::Permission { call, request, reply } => {
@@ -199,6 +213,9 @@ struct Turn {
     /// The last model reply's, in Anthropic's names.
     stop_reason: String,
     todos: Arc<Mutex<Todos>>,
+    context_window: u64,
+    /// The client shows `notice` updates.
+    notices: bool,
 }
 
 impl Turn {
@@ -250,10 +267,12 @@ impl Turn {
                 self.cwd = cwd.clone();
                 return Vec::new();
             }
-            Event::TurnEnd { stop_reason, .. } => {
+            Event::TurnEnd { stop_reason, context_tokens, .. } => {
                 self.stop_reason = stop_reason.clone();
-                return Vec::new();
+                json!({"sessionUpdate": "usage_update", "used": context_tokens, "size": self.context_window})
             }
+            Event::Titled(title) => json!({"sessionUpdate": "session_info_update", "title": title}),
+            Event::Notice(notice) if self.notices && !notice.is_empty() => json!({"sessionUpdate": "notice", "severity": "info", "title": notice}),
             _ => return Vec::new(),
         }]
     }
@@ -364,7 +383,7 @@ mod tests {
     fn only_session_cancel_ends_a_turn_as_cancelled() {
         let mut turn = Turn::default();
         let reply_stopped = |reason: &str| Event::TurnEnd { usage: Default::default(), context_tokens: 0, stop_reason: reason.into() };
-        assert!(turn.session_updates(&reply_stopped("aborted")).is_empty());
+        turn.session_updates(&reply_stopped("aborted"));
         assert_eq!((turn.stop_reason(false), turn.stop_reason(true)), ("end_turn", "cancelled"));
         turn.session_updates(&reply_stopped("max_tokens"));
         assert_eq!(turn.stop_reason(false), "max_tokens");
@@ -409,6 +428,18 @@ mod tests {
                 {"content": "Write", "status": "in_progress", "priority": "medium"},
             ]})
         );
+    }
+
+    #[test]
+    fn context_use_title_and_notices_reach_the_editor() {
+        let mut turn = Turn { context_window: 200_000, ..Turn::default() };
+        let ended = Event::TurnEnd { usage: Default::default(), context_tokens: 1234, stop_reason: "end_turn".into() };
+        assert_eq!(turn.session_updates(&ended), [json!({"sessionUpdate": "usage_update", "used": 1234, "size": 200_000})]);
+        assert_eq!(turn.session_updates(&Event::Titled("agent | acp".into())), [json!({"sessionUpdate": "session_info_update", "title": "agent | acp"})]);
+        // Only a client that advertised session.notices gets them.
+        assert!(turn.session_updates(&Event::Notice("Compacted.".into())).is_empty());
+        turn.notices = true;
+        assert_eq!(turn.session_updates(&Event::Notice("Compacted.".into())), [json!({"sessionUpdate": "notice", "severity": "info", "title": "Compacted."})]);
     }
 
     #[test]
