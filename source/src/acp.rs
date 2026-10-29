@@ -17,6 +17,7 @@ use serde_json::{Value, json};
 use crate::agent::permissions::{Decision, MODES, Mode, Request};
 use crate::agent::prompt::{self, Skill};
 use crate::agent::{Agent, Event, workflow};
+use crate::api::models::{Model, PROVIDERS};
 use crate::settings::THINKING_LEVELS;
 use crate::tools::ask::{self, Answer, Question};
 use crate::tools::plan::Plan;
@@ -26,6 +27,8 @@ const PROTOCOL_VERSION: u64 = 1;
 const METHOD_NOT_FOUND: i64 = -32601;
 const INVALID_PARAMS: i64 = -32602;
 const INTERNAL_ERROR: i64 = -32603;
+const AUTH_REQUIRED: i64 = -32000;
+const REQUEST_CANCELLED: i64 = -32800;
 
 pub fn serve(agent: &mut Agent) -> Result<(), String> {
     let cancelled = Arc::new(AtomicBool::new(false));
@@ -110,7 +113,7 @@ fn handle(agent: &mut Agent, connection: &mut Connection, message: &Value) -> Re
     match message["method"].as_str().unwrap_or_default() {
         "initialize" => {
             *client = params["clientCapabilities"].clone();
-            Ok(initialize_result())
+            Ok(initialize_result(client))
         }
         method @ ("session/new" | "session/load" | "session/resume") => {
             let cwd = params["cwd"].as_str().unwrap_or_default();
@@ -119,6 +122,9 @@ fn handle(agent: &mut Agent, connection: &mut Connection, message: &Value) -> Re
                 return Err((INVALID_PARAMS, format!("agent acp serves the directory it started in, {}, not {cwd}.", agent.cwd.display())));
             }
             let settings = crate::settings::load(&agent.home).map_err(|error| (INTERNAL_ERROR, error))?;
+            if !agent.client.catalog().iter().any(usable) {
+                return Err((AUTH_REQUIRED, "No account can run a model. Log in with /login in agent.".into()));
+            }
             agent.mcp.set_client_servers(&params["mcpServers"], &settings.disabled_mcp, &settings.approved_mcp).map_err(|error| (INVALID_PARAMS, error))?;
             agent.mcp.settled();
             agent.asks = !client["elicitation"]["form"].is_null();
@@ -253,7 +259,10 @@ fn handle(agent: &mut Agent, connection: &mut Connection, message: &Value) -> Re
 }
 
 /// What this agent supports; the router answers initialize with it and passes the client's capabilities on.
-fn initialize_result() -> Value {
+/// Login is the TUI's /login in the editor's terminal, for a client that can run one.
+fn initialize_result(client: &Value) -> Value {
+    let login = json!({"id": "login", "name": "Log in", "description": "Opens /login in a terminal.", "type": "terminal", "args": ["--login"]});
+    let auth_methods = if client["auth"]["terminal"] == true { vec![login] } else { Vec::new() };
     json!({
         "protocolVersion": PROTOCOL_VERSION,
         "agentCapabilities": {
@@ -263,7 +272,7 @@ fn initialize_result() -> Value {
             "sessionCapabilities": {"additionalDirectories": {}, "list": {}, "resume": {}, "close": {}},
         },
         "agentInfo": {"name": "agent", "title": "agent", "version": env!("CARGO_PKG_VERSION")},
-        "authMethods": [],
+        "authMethods": auth_methods,
     })
 }
 
@@ -290,12 +299,17 @@ fn mode_id(mode: Mode) -> String {
 fn config_options(agent: &Agent) -> Vec<Value> {
     let catalog = agent.client.catalog();
     let models: Vec<Value> =
-        catalog.iter().filter(|model| !model.accounts.is_empty() || model.id == agent.model).map(|model| json!({"value": model.id, "name": model.name, "description": model.provider})).collect();
+        catalog.iter().filter(|model| usable(model) || model.id == agent.model).map(|model| json!({"value": model.id, "name": model.name, "description": model.provider})).collect();
     let efforts: Vec<Value> = THINKING_LEVELS.iter().map(|level| json!({"value": level, "name": level})).collect();
     vec![
         json!({"id": "model", "name": "Model", "category": "model", "type": "select", "currentValue": agent.model, "options": models}),
         json!({"id": "effort", "name": "Effort", "category": "thought_level", "type": "select", "currentValue": agent.effort, "options": efforts}),
     ]
+}
+
+/// A model an account lists, or one of a custom provider, which needs no account.
+fn usable(model: &Model) -> bool {
+    !model.accounts.is_empty() || !PROVIDERS.contains(&model.provider.as_str())
 }
 
 /// The editor's `/` commands: skills as `skill:<name>`, like the TUI, and saved workflows by name.

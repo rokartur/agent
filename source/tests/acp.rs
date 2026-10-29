@@ -126,15 +126,21 @@ struct Editor {
 
 impl Editor {
     fn start(home: &Home, api: &FakeApi) -> Editor {
-        Editor::start_with(home, api, json!({}))
+        Editor::start_with(home, api, json!({}), "sk-fake")
     }
 
-    fn start_with(home: &Home, api: &FakeApi, capabilities: Value) -> Editor {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_agent"))
+    /// An empty `api_key` starts it with no account.
+    fn start_with(home: &Home, api: &FakeApi, capabilities: Value, api_key: &str) -> Editor {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_agent"));
+        if api_key.is_empty() {
+            command.env_remove("ANTHROPIC_API_KEY");
+        } else {
+            command.env("ANTHROPIC_API_KEY", api_key);
+        }
+        let mut child = command
             .arg("acp")
             .current_dir(home.project())
             .env("HOME", &home.dir)
-            .env("ANTHROPIC_API_KEY", "sk-fake")
             .env("ANTHROPIC_BASE_URL", &api.base)
             .env("OPENROUTER_BASE_URL", &api.base)
             .env("CHATGPT_BASE_URL", &api.base)
@@ -165,9 +171,22 @@ impl Editor {
 
     /// The result of `method`, or its error message.
     fn request(&mut self, method: &str, params: Value) -> Result<Value, String> {
+        let id = self.start_request(method, params);
+        let answer = self.answer(id, method);
+        match answer.get("error") {
+            Some(error) => Err(error["message"].as_str().unwrap().to_string()),
+            None => Ok(answer["result"].clone()),
+        }
+    }
+
+    fn start_request(&mut self, method: &str, params: Value) -> u64 {
         self.next_id += 1;
-        let id = self.next_id;
-        self.send(&json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}));
+        self.send(&json!({"jsonrpc": "2.0", "id": self.next_id, "method": method, "params": params}));
+        self.next_id
+    }
+
+    /// The answer to request `id`, answering the agent's own requests while it waits.
+    fn answer(&mut self, id: u64, method: &str) -> Value {
         loop {
             let message = match self.lines.recv_timeout(WAIT) {
                 Ok(message) => message,
@@ -175,10 +194,7 @@ impl Editor {
                 Err(RecvTimeoutError::Disconnected) => panic!("agent acp exited during {method}; seen {:#?}", self.seen),
             };
             if message["id"] == id && message["method"].is_null() {
-                return match message.get("error") {
-                    Some(error) => Err(error["message"].as_str().unwrap().to_string()),
-                    None => Ok(message["result"].clone()),
-                };
+                return message;
             }
             if message["method"] == "session/request_permission" {
                 self.send(&json!({"jsonrpc": "2.0", "id": message["id"], "result": {"outcome": {"outcome": "selected", "optionId": "allow_once"}}}));
@@ -412,7 +428,7 @@ fn an_editor_with_forms_answers_ask_user_question() {
         reply(&[text("Blue it is.")], "end_turn"),
         reply(&[text("No forms.")], "end_turn"),
     ]);
-    let mut editor = Editor::start_with(&home, &api, json!({"elicitation": {"form": {}}}));
+    let mut editor = Editor::start_with(&home, &api, json!({"elicitation": {"form": {}}}), "sk-fake");
     editor.form_replies.push_back(json!({"action": "accept", "content": {"q0": "Blue"}}));
     let session_id = editor.new_session(&home.project());
     editor.prompt(&session_id, "Pick a color.").unwrap();
@@ -441,7 +457,7 @@ fn an_approved_plan_is_implemented_in_the_same_prompt() {
         reply(&[tool_use("toolu_touch", "Bash", json!({"command": "touch made"}))], "tool_use"),
         reply(&[text("Implemented.")], "end_turn"),
     ]);
-    let mut editor = Editor::start_with(&home, &api, json!({"elicitation": {"form": {}}}));
+    let mut editor = Editor::start_with(&home, &api, json!({"elicitation": {"form": {}}}), "sk-fake");
     editor.form_replies.push_back(json!({"action": "accept", "content": {"q0": "Yes, enter plan mode"}}));
     editor.form_replies.push_back(json!({"action": "accept", "content": {"next": "implement"}}));
     let session_id = editor.new_session(&home.project());
@@ -454,4 +470,37 @@ fn an_approved_plan_is_implemented_in_the_same_prompt() {
     let implementing = api.requests.try_iter().nth(3).unwrap();
     assert!(implementing["messages"].to_string().contains("Implement this plan:"), "{implementing}");
     assert!(home.project().join("made").exists());
+}
+
+#[test]
+fn with_no_account_a_session_needs_the_terminal_login() {
+    let home = Home::new("login");
+    let api = fake_api(Vec::new());
+    let mut editor = Editor::start_with(&home, &api, json!({}), "");
+
+    let plain = editor.request("initialize", json!({"protocolVersion": 1, "clientCapabilities": {}})).unwrap();
+    let terminal = editor.request("initialize", json!({"protocolVersion": 1, "clientCapabilities": {"auth": {"terminal": true}}})).unwrap();
+    let id = editor.start_request("session/new", json!({"cwd": home.project(), "mcpServers": []}));
+    let refused = editor.answer(id, "session/new");
+
+    assert_eq!(plain["authMethods"], json!([]));
+    assert_eq!((&terminal["authMethods"][0]["type"], &terminal["authMethods"][0]["args"]), (&json!("terminal"), &json!(["--login"])));
+    assert_eq!(refused["error"]["code"], -32000, "{refused}");
+}
+
+#[test]
+fn a_cancelled_session_new_stops_waiting_for_a_hung_mcp_server() {
+    let home = Home::new("cancel");
+    let api = fake_api(Vec::new());
+    let mut editor = Editor::start(&home, &api);
+    let hung = json!([{"name": "hung", "command": "sleep", "args": ["100"], "env": []}]);
+    let started = std::time::Instant::now();
+
+    let id = editor.start_request("session/new", json!({"cwd": home.project(), "mcpServers": hung}));
+    std::thread::sleep(Duration::from_millis(300));
+    editor.send(&json!({"jsonrpc": "2.0", "method": "$/cancel_request", "params": {"requestId": id}}));
+    let answer = editor.answer(id, "session/new");
+
+    assert_eq!(answer["error"]["code"], -32800, "{answer}");
+    assert!(started.elapsed() < Duration::from_secs(10));
 }

@@ -50,6 +50,7 @@ Commands:
   update                      Check for a newer release now and install it
   doctor [--provider <p>]     Ping every saved account and show its limits; exits 1 if one fails
   acp                         Serve the Agent Client Protocol on stdin and stdout, for editors like Zed
+  acp --login                 Open /login, for an editor's terminal login
 
 Flags:
   --model <id>                Model id, e.g. claude-opus-5-5
@@ -112,6 +113,8 @@ struct Options {
     account: Option<(String, String)>,
     /// `agent acp`: serve the Agent Client Protocol instead of one run.
     acp: bool,
+    /// `agent acp --login`: an editor's terminal login, the TUI on its /login panel.
+    login: bool,
     /// `agent serve`: run the interactive session for the terminals that attach to it; `agent` starts it.
     serve: bool,
     /// --on: the environment the interactive session runs in, over `default_environment`.
@@ -232,6 +235,9 @@ fn main() {
     };
     let result = if options.serve {
         home().and_then(|home| serve::redirect_output(&home)).and_then(|()| run(options))
+    } else if options.login {
+        let login = vec!["/login".to_string()];
+        parse_args(login.clone()).and_then(|options| open_session(&options, &login))
     } else if options.acp && std::env::var_os(acp::SESSION_ENV).is_none() {
         acp::route(&args)
     } else if !(options.acp || options.headless || options.print || options.json) && std::io::stdout().is_terminal() {
@@ -258,6 +264,7 @@ fn parse_args(args: Vec<String>) -> Result<Options, String> {
             return Err("Pass one of -c and --resume.".into());
         }
         match arg.as_str() {
+            "--login" if acp => options.login = true,
             "--model" => options.model = Some(value("--model")?),
             "--tools" => options.tools = Some(value("--tools")?.split(',').map(|name| name.trim().to_string()).filter(|name| !name.is_empty()).collect()),
             "--thinking" => {
@@ -583,8 +590,12 @@ fn run(options: Options) -> Result<(), String> {
                 eprintln!("{notice}");
             }
         }
-        if let Some(notice) = agent.settle_model(&mut settings)? {
-            eprintln!("{notice}");
+        match agent.settle_model(&mut settings) {
+            Ok(Some(notice)) => eprintln!("{notice}"),
+            Ok(None) => {}
+            // An editor asks for a login when session/new finds no model to run, which it cannot show if this exits.
+            Err(error) if options.acp => eprintln!("{error}"),
+            Err(error) => return Err(error),
         }
         agent.announce_session();
         // After settle_model, which resets the tools. Only the root spawns, runs terminals and searches the web, and a child has no UI to ask in.
@@ -804,6 +815,8 @@ mod tests {
         assert!(super::parse_args(args(&["acp", "hi"])).is_err());
         assert!(super::parse_args(args(&["acp", "-p"])).is_err());
         assert!(!super::parse_args(args(&["-p", "acp"])).unwrap().acp);
+        assert!(super::parse_args(args(&["acp", "--login"])).unwrap().login);
+        assert!(super::parse_args(args(&["--login"])).is_err());
     }
 
     #[test]

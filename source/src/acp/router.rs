@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
 
-use super::{INTERNAL_ERROR, INVALID_PARAMS, METHOD_NOT_FOUND, send};
+use super::{INTERNAL_ERROR, INVALID_PARAMS, METHOD_NOT_FOUND, REQUEST_CANCELLED, send};
 use crate::agent::Session;
 use crate::tools::web::providers::iso_from_ms;
 
@@ -24,6 +24,8 @@ struct Routes {
     sessions: HashMap<String, Writer>,
     /// Requests a session's process sent the editor, by id, so the reply goes back to that process.
     asked: HashMap<String, Writer>,
+    /// The process of each session/new, load or resume not answered yet, by request id, so the editor can cancel it.
+    starting: HashMap<String, u32>,
 }
 
 /// `args` start each session's process the way this one started, `acp` and its flags included.
@@ -51,12 +53,16 @@ pub fn route(args: &[String]) -> Result<(), String> {
         let answer = match method {
             "initialize" => {
                 initialize = message["params"].clone();
-                Ok(Some(super::initialize_result()))
+                Ok(Some(super::initialize_result(&initialize["clientCapabilities"])))
             }
             "session/new" => start(&message, None, &initialize, args, &routes).map(|()| None),
             "session/load" | "session/resume" => {
                 let session_id = message["params"]["sessionId"].as_str().map(String::from);
                 start(&message, session_id, &initialize, args, &routes).map(|()| None)
+            }
+            "$/cancel_request" => {
+                cancel_start(&message["params"]["requestId"], &routes);
+                Ok(None)
             }
             "session/list" => list(&message["params"]).map(Some),
             // Routed no more right away, so a prompt sent while the process exits gets an error, not silence.
@@ -100,6 +106,7 @@ fn start(message: &Value, session_id: Option<String>, initialize: &Value, args: 
     write(&writer, &json!({"jsonrpc": "2.0", "method": "initialize", "params": initialize}))?;
     write(&writer, message)?;
     let (starting, routes) = (message["id"].clone(), routes.clone());
+    routes.lock().unwrap().starting.insert(starting.to_string(), child.id());
     std::thread::spawn(move || relay(child, stdout, writer, starting, session_id, routes));
     Ok(())
 }
@@ -114,6 +121,10 @@ fn relay(mut child: Child, stdout: ChildStdout, writer: Writer, starting: Value,
             routes.lock().unwrap().asked.insert(message["id"].to_string(), writer.clone());
         } else if !answered && message["id"] == starting {
             answered = true;
+            // A start the editor cancelled was answered already.
+            if routes.lock().unwrap().starting.remove(&starting.to_string()).is_none() {
+                break;
+            }
             let started = session_id.clone().or_else(|| message["result"]["sessionId"].as_str().map(String::from));
             let Some(started) = started.filter(|_| message.get("error").is_none()) else {
                 send(&message);
@@ -126,12 +137,21 @@ fn relay(mut child: Child, stdout: ChildStdout, writer: Writer, starting: Value,
     let mut routes = routes.lock().unwrap();
     routes.sessions.retain(|_, routed| !Arc::ptr_eq(routed, &writer));
     routes.asked.retain(|_, routed| !Arc::ptr_eq(routed, &writer));
+    let unanswered = routes.starting.remove(&starting.to_string()).is_some();
     drop(routes);
-    if !answered && !starting.is_null() {
+    if unanswered && !starting.is_null() {
         send(&json!({"jsonrpc": "2.0", "id": starting, "error": {"code": INTERNAL_ERROR, "message": "The session's process exited before it started the session."}}));
     }
     drop(writer);
     let _ = child.wait();
+}
+
+/// `$/cancel_request` for a session still starting, which can wait up to two minutes for the editor's MCP servers:
+/// its process stops, and the request ends as cancelled. Other requests run on, which the protocol allows.
+fn cancel_start(request_id: &Value, routes: &Arc<Mutex<Routes>>) {
+    let Some(pid) = routes.lock().unwrap().starting.remove(&request_id.to_string()) else { return };
+    crate::process::signal_group(pid, crate::process::SIGTERM);
+    send(&json!({"jsonrpc": "2.0", "id": request_id, "error": {"code": REQUEST_CANCELLED, "message": "The request was cancelled."}}));
 }
 
 /// The saved sessions, newest first, of `cwd` when the editor names one.
