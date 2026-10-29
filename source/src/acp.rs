@@ -445,9 +445,10 @@ impl EditorTerminal for EditorClient {
         let terminal = json!({"sessionId": self.session_id, "terminalId": terminal_id});
         let waiting = self.send_request("terminal/wait_for_exit", terminal.clone());
         let mut killed = None;
+        let mut kill_sent = None;
         let exited = loop {
             match self.replies.lock().unwrap().recv_timeout(Duration::from_millis(10)) {
-                Ok(reply) if reply["id"] == waiting.as_str() => break reply,
+                Ok(reply) if reply["id"] == waiting.as_str() => break result_of("terminal/wait_for_exit", &reply),
                 // The answer to our terminal/kill, which nothing waits for.
                 Ok(_) | Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => return Err("The editor closed the connection.".into()),
@@ -455,17 +456,32 @@ impl EditorTerminal for EditorClient {
             let kill = if abort.load(Ordering::Relaxed) { Some(Killed::Aborted) } else { deadline.filter(|deadline| Instant::now() >= *deadline).map(|_| Killed::Timeout) };
             if killed.is_none() && kill.is_some() {
                 killed = kill;
+                kill_sent = Some(Instant::now());
                 self.send_request("terminal/kill", terminal.clone());
             }
+            if kill_sent.is_some_and(|sent| sent.elapsed() > KILL_GRACE) {
+                break Err("The editor did not stop the command after terminal/kill.".into());
+            }
         };
-        let status = result_of("terminal/wait_for_exit", &exited)?;
-        let output = self.request("terminal/output", terminal.clone())?;
-        self.request("terminal/release", terminal)?;
+        let finished = exited.and_then(|status| Ok((status, self.request("terminal/output", terminal.clone())?)));
+        // On every path, as release also kills a command still running.
+        let released = self.request("terminal/release", terminal);
+        let (status, output) = finished.inspect_err(|_| {
+            // No terminal to name, so the call's end shows the error instead.
+            self.terminals.lock().unwrap().remove(call);
+        })?;
+        // The command ran, so a refused release must not turn its result into an error.
+        if let Err(error) = released {
+            eprintln!("agent acp: {error}");
+        }
         // A signal ended it: 128 like a shell, as the editor sends the signal's name and not its number.
         let code = status["exitCode"].as_i64().map_or(128, |code| code as i32);
         Ok((output["output"].as_str().unwrap_or_default().to_string(), code, killed))
     }
 }
+
+/// How long a command may run on after terminal/kill before the call gives up on it.
+const KILL_GRACE: Duration = Duration::from_secs(3);
 
 /// The editor's `/` commands: skills as `skill:<name>`, like the TUI, and saved workflows by name.
 #[derive(Default)]

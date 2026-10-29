@@ -128,6 +128,9 @@ struct Editor {
     terminals: HashMap<String, (String, i32)>,
     /// The directories of the sessions opened, the only ones whose files the fs methods reach, as in Zed.
     worktrees: Vec<PathBuf>,
+    /// Terminal methods the fake terminal answers with an error, and those it never answers.
+    terminal_errors: Vec<&'static str>,
+    terminal_silent: Vec<&'static str>,
 }
 
 impl Editor {
@@ -166,7 +169,19 @@ impl Editor {
                 }
             }
         });
-        let mut editor = Editor { child, stdin, lines, next_id: 0, seen: Vec::new(), form_replies: VecDeque::new(), buffers: HashMap::new(), terminals: HashMap::new(), worktrees: Vec::new() };
+        let mut editor = Editor {
+            child,
+            stdin,
+            lines,
+            next_id: 0,
+            seen: Vec::new(),
+            form_replies: VecDeque::new(),
+            buffers: HashMap::new(),
+            terminals: HashMap::new(),
+            worktrees: Vec::new(),
+            terminal_errors: Vec::new(),
+            terminal_silent: Vec::new(),
+        };
         editor.request("initialize", json!({"protocolVersion": 1, "clientCapabilities": capabilities})).unwrap();
         editor
     }
@@ -225,7 +240,11 @@ impl Editor {
                 self.buffers.insert(params["path"].as_str().unwrap().to_string(), params["content"].as_str().unwrap().to_string());
                 self.send(&json!({"jsonrpc": "2.0", "id": message["id"], "result": null}));
             }
-            if let Some(answer) = self.answer_terminal(&message) {
+            if self.terminal_errors.contains(&method) {
+                self.send(&json!({"jsonrpc": "2.0", "id": message["id"], "error": {"code": -32603, "message": "The terminal is gone."}}));
+            } else if !self.terminal_silent.contains(&method)
+                && let Some(answer) = self.answer_terminal(&message)
+            {
                 self.send(&json!({"jsonrpc": "2.0", "id": message["id"], "result": answer}));
             }
             if message["method"] == "elicitation/create" {
@@ -773,4 +792,34 @@ fn bash_runs_in_the_editor_terminal_and_the_model_gets_the_same_result() {
     assert!(editor.seen[released + 1..].iter().all(|message| !message.to_string().contains("term-0")), "{:?}", &editor.seen[released + 1..]);
     let ended = editor.updates("tool_call_update").into_iter().rfind(|update| update["toolCallId"] == "toolu_sh").unwrap();
     assert_eq!((&ended["status"], ended.get("content")), (&json!("failed"), None));
+}
+
+#[test]
+fn a_refused_terminal_release_keeps_the_commands_result() {
+    let home = Home::new("release-refused");
+    let api = fake_api(vec![reply(&[tool_use("toolu_sh", "Bash", json!({"command": "echo ran"}))], "tool_use"), reply(&[text("Done.")], "end_turn")]);
+    let mut editor = Editor::start_with(&home, &api, json!({"terminal": true}), "sk-fake");
+    editor.terminal_errors = vec!["terminal/release"];
+    let session_id = editor.new_session(&home.project());
+
+    editor.prompt(&session_id, "Run it.").unwrap();
+
+    let result = api.requests.try_iter().nth(1).unwrap()["messages"].as_array().unwrap().last().unwrap()["content"][0].clone();
+    assert_eq!(result["is_error"], false, "{result}");
+    assert!(result["content"].to_string().contains("ran"), "{result}");
+}
+
+#[test]
+fn a_terminal_is_released_when_the_editor_fails_its_wait_or_ignores_the_kill() {
+    for (errors, silent) in [(vec!["terminal/wait_for_exit"], vec![]), (vec![], vec!["terminal/wait_for_exit"])] {
+        let home = Home::new("release-always");
+        let api = fake_api(vec![reply(&[tool_use("toolu_sh", "Bash", json!({"command": "sleep 1", "timeout": 500}))], "tool_use"), reply(&[text("Done.")], "end_turn")]);
+        let mut editor = Editor::start_with(&home, &api, json!({"terminal": true}), "sk-fake");
+        (editor.terminal_errors, editor.terminal_silent) = (errors, silent);
+        let session_id = editor.new_session(&home.project());
+
+        editor.prompt(&session_id, "Run it.").unwrap();
+
+        assert!(editor.seen.iter().any(|message| message["method"] == "terminal/release"), "{:#?}", editor.seen);
+    }
 }
