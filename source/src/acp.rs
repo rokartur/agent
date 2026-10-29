@@ -61,8 +61,8 @@ pub fn serve(agent: &mut Agent) -> Result<(), String> {
     Ok(())
 }
 
-/// Requests go to the first receiver, replies to our permission requests to the second.
-/// session/cancel sets the abort flag here, since the main thread is busy in the turn it cancels.
+/// Requests go to the first receiver, the replies to every request we sent the editor to the second.
+/// A cancel, a close and a mode change act here, since the main thread is busy in the turn they concern.
 /// A denied tool call aborts the turn too, so `cancelled` tells the two apart.
 fn read_stdin(abort: Arc<AtomicBool>, cancelled: Arc<AtomicBool>, permission_mode: Arc<Mutex<Mode>>) -> (Receiver<Value>, Receiver<Value>) {
     let (requests, request_rx) = mpsc::channel();
@@ -348,7 +348,7 @@ fn known_session(params: &Value, session_id: &str) -> Result<(), (i64, String)> 
     Ok(())
 }
 
-/// Permission modes as ACP session modes. Plan mode stays out until plan approval can reach the editor.
+/// Permission modes as ACP session modes.
 fn modes(agent: &Agent) -> Value {
     let available: Vec<Value> = MODES.iter().map(|mode| json!({"id": mode_id(*mode), "name": mode.label(), "description": mode.description()})).collect();
     json!({"currentModeId": mode_id(*agent.permission_mode.lock().unwrap()), "availableModes": available})
@@ -907,7 +907,6 @@ mod tests {
         let ended = Event::TurnEnd { usage: Default::default(), context_tokens: 1234, stop_reason: "end_turn".into() };
         assert_eq!(turn.session_updates(&ended), [json!({"sessionUpdate": "usage_update", "used": 1234, "size": 200_000})]);
         assert_eq!(turn.session_updates(&Event::Titled("agent | acp".into())), [json!({"sessionUpdate": "session_info_update", "title": "agent | acp"})]);
-        // Only a client that advertised session.notices gets them.
         assert!(turn.session_updates(&Event::Notice("Compacted.".into())).is_empty());
         turn.notices = true;
         assert_eq!(turn.session_updates(&Event::Notice("Compacted.".into())), [json!({"sessionUpdate": "notice", "severity": "info", "title": "Compacted."})]);

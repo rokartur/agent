@@ -146,7 +146,7 @@ pub struct Launch {
     pub trusted: bool,
     /// Keeps WebSearch, WebFetch and GetSearchContent, which Workflow agents get.
     pub web: bool,
-    /// The editor's MCP servers of an `agent acp` parent, null for none.
+    /// The editor's MCP servers of an `agent acp` parent; null when it passed no list.
     pub client_mcp: Value,
 }
 

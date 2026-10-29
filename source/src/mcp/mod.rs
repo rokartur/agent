@@ -139,7 +139,7 @@ impl Mcp {
         Ok(())
     }
 
-    /// The ACP client's servers in its own shape, null when there are none.
+    /// The ACP client's servers in its own shape, as its session/new sent them; null when no client passed a list.
     pub fn client_list(&self) -> Value {
         self.state.lock().unwrap().client_list.clone()
     }
