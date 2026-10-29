@@ -277,6 +277,8 @@ pub struct Agent {
     pub interactive: bool,
     /// Someone answers `Event::Ask`: the TUI, or an editor with form elicitation. AskUserQuestion and EnterPlanMode need it.
     pub asks: bool,
+    /// An ACP editor's terminal, where foreground Bash runs; background runs stay in `terminals`.
+    pub editor_terminal: Option<Arc<dyn tools::EditorTerminal>>,
     /// pi's agent dir, for rebuilding the system prompt after /worktree.
     pub agent_dir: PathBuf,
     pub home: PathBuf,
@@ -445,6 +447,7 @@ impl Agent {
             spent: Spent::default(),
             interactive: false,
             asks: false,
+            editor_terminal: None,
             plugins: crate::plugins::Plugins::new(&home),
             mcp: crate::mcp::Mcp::new(&home, &cwd),
             snapshots: None,
@@ -786,7 +789,7 @@ impl Agent {
             "PushNotification" => self.push_notification(input, emit),
             "WebSearch" | "WebFetch" | "GetSearchContent" => self.web.run(name, input),
             "AskUserQuestion" => self.ask_user(input, emit),
-            _ => return self.plugins.tool(name, input, &self.plugin_context(), &self.abort).or_else(|| self.mcp.tool(name, input, &self.abort)).unwrap_or_else(|| self.run_file_tool(name, input)),
+            _ => return self.plugins.tool(name, input, &self.plugin_context(), &self.abort).or_else(|| self.mcp.tool(name, input, &self.abort)).unwrap_or_else(|| self.run_file_tool(id, name, input)),
         };
         match result {
             Ok(text) => (text, false),
@@ -794,8 +797,11 @@ impl Agent {
         }
     }
 
-    fn run_file_tool(&mut self, name: &str, input: &Value) -> (String, bool) {
-        let (mut output, is_error) = tools::run(name, input, &self.cwd, &mut self.anchors, &self.rtk, &self.abort);
+    fn run_file_tool(&mut self, id: &str, name: &str, input: &Value) -> (String, bool) {
+        let (mut output, is_error) = match &self.editor_terminal {
+            Some(terminal) if name == "Bash" => tools::bash_in_terminal(terminal.as_ref(), id, input, &self.cwd, &self.rtk, &self.abort),
+            _ => tools::run(name, input, &self.cwd, &mut self.anchors, &self.rtk, &self.abort),
+        };
         if name == "Bash"
             && let Some(hint) = conflicts::hint(input["command"].as_str().unwrap_or_default(), &self.cwd)
         {

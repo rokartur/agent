@@ -1,6 +1,5 @@
 //! `agent acp`: the Agent Client Protocol for editors like Zed, JSON-RPC 2.0 with one message per line on stdin and stdout.
 //! `router` starts a process per session; `serve` is that process, and serves one session.
-//! shortcut: Bash runs here, not in the editor's terminal; add it when an editor needs it.
 
 mod router;
 pub use router::{SESSION_ENV, route};
@@ -9,8 +8,9 @@ use std::collections::HashMap;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
@@ -20,9 +20,9 @@ use crate::agent::{Agent, Event, workflow};
 use crate::api::models::{Model, PROVIDERS};
 use crate::settings::THINKING_LEVELS;
 use crate::tools::ask::{self, Answer, Question};
-use crate::tools::hashline;
 use crate::tools::plan::Plan;
 use crate::tools::todo::{Status, Todos};
+use crate::tools::{EditorTerminal, Killed, hashline};
 
 const PROTOCOL_VERSION: u64 = 1;
 const METHOD_NOT_FOUND: i64 = -32601;
@@ -35,7 +35,7 @@ pub fn serve(agent: &mut Agent) -> Result<(), String> {
     let cancelled = Arc::new(AtomicBool::new(false));
     let (requests, replies) = read_stdin(agent.abort.clone(), cancelled.clone());
     let replies = Arc::new(Mutex::new(replies));
-    let mut connection = Connection { replies, cancelled, session_id: String::new(), client: Value::Null, commands: Commands::default() };
+    let mut connection = Connection { replies, cancelled, session_id: String::new(), client: Value::Null, commands: Commands::default(), editor_client: None };
     for message in requests {
         let result = handle(agent, &mut connection, &message);
         let id = &message["id"];
@@ -107,10 +107,11 @@ struct Connection {
     /// `clientCapabilities` from initialize.
     client: Value,
     commands: Commands,
+    editor_client: Option<Arc<EditorClient>>,
 }
 
 fn handle(agent: &mut Agent, connection: &mut Connection, message: &Value) -> Result<Value, (i64, String)> {
-    let Connection { replies, cancelled, session_id, client, commands } = connection;
+    let Connection { replies, cancelled, session_id, client, commands, editor_client } = connection;
     let params = &message["params"];
     match message["method"].as_str().unwrap_or_default() {
         "initialize" => {
@@ -148,9 +149,12 @@ fn handle(agent: &mut Agent, connection: &mut Connection, message: &Value) -> Re
                 }
             }
             *commands = Commands::load(agent).map_err(|error| (INTERNAL_ERROR, error))?;
-            if client["fs"]["readTextFile"] == true && client["fs"]["writeTextFile"] == true {
-                agent.anchors.editor = Some(Arc::new(EditorFiles { session_id: session_id.clone(), replies: replies.clone(), next_id: AtomicU64::new(0) }));
-            }
+            let files = client["fs"]["readTextFile"] == true && client["fs"]["writeTextFile"] == true;
+            let terminal = client["terminal"] == true;
+            let editor = Arc::new(EditorClient { session_id: session_id.clone(), replies: replies.clone(), next_id: AtomicU64::new(0), files, terminals: Mutex::default() });
+            agent.anchors.editor = files.then(|| editor.clone() as Arc<dyn hashline::EditorFiles>);
+            agent.editor_terminal = terminal.then(|| editor.clone() as Arc<dyn EditorTerminal>);
+            *editor_client = Some(editor);
             let mut answer = json!({"modes": modes(agent), "configOptions": config_options(agent)});
             if method == "session/new" {
                 answer["sessionId"] = json!(session_id);
@@ -203,7 +207,7 @@ fn handle(agent: &mut Agent, connection: &mut Connection, message: &Value) -> Re
                 todos: agent.todos.clone(),
                 context_window: agent.context_window,
                 notices: !client["session"]["notices"].is_null(),
-                editor: agent.anchors.editor.clone(),
+                editor: editor_client.clone(),
                 ..Turn::default()
             };
             cancelled.store(false, Ordering::Relaxed);
@@ -324,27 +328,40 @@ fn usable(model: &Model) -> bool {
     !model.accounts.is_empty() || !PROVIDERS.contains(&model.provider.as_str())
 }
 
-/// ACP's fs methods, for a client that offers both: Read, Write and the edit tools see its buffers, unsaved edits included.
-struct EditorFiles {
+/// The client's fs and terminal methods: Read, Write and the edit tools see its buffers, unsaved edits included, when
+/// it offers both fs methods, and foreground Bash runs in its terminal when it offers one.
+struct EditorClient {
     session_id: String,
     replies: Arc<Mutex<Receiver<Value>>>,
     next_id: AtomicU64,
+    files: bool,
+    /// The terminal each Bash call ran in, so the call's card keeps showing it.
+    terminals: Mutex<HashMap<String, String>>,
 }
 
-impl EditorFiles {
-    fn request(&self, method: &str, params: Value) -> Result<Value, String> {
+impl EditorClient {
+    fn send_request(&self, method: &str, params: Value) -> String {
         // The pid too: the router keys the editor's replies by id across every session's process.
-        let id = format!("fs-{}-{}", std::process::id(), self.next_id.fetch_add(1, Ordering::Relaxed));
+        let id = format!("editor-{}-{}", std::process::id(), self.next_id.fetch_add(1, Ordering::Relaxed));
         send(&json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}));
+        id
+    }
+
+    fn request(&self, method: &str, params: Value) -> Result<Value, String> {
+        let id = self.send_request(method, params);
         let reply = wait_for_reply(&self.replies.lock().unwrap(), &id).ok_or("The editor closed the connection.")?;
-        match reply.get("error") {
-            Some(error) => Err(format!("The editor answered {method} with: {}", error["message"].as_str().unwrap_or_default())),
-            None => Ok(reply["result"].clone()),
-        }
+        result_of(method, &reply)
     }
 }
 
-impl hashline::EditorFiles for EditorFiles {
+fn result_of(method: &str, reply: &Value) -> Result<Value, String> {
+    match reply.get("error") {
+        Some(error) => Err(format!("The editor answered {method} with: {}", error["message"].as_str().unwrap_or_default())),
+        None => Ok(reply["result"].clone()),
+    }
+}
+
+impl hashline::EditorFiles for EditorClient {
     fn read(&self, path: &Path) -> Result<String, String> {
         let result = self.request("fs/read_text_file", json!({"sessionId": self.session_id, "path": path}))?;
         result["content"].as_str().map(String::from).ok_or_else(|| format!("The editor sent no text for {}.", path.display()))
@@ -352,6 +369,42 @@ impl hashline::EditorFiles for EditorFiles {
 
     fn write(&self, path: &Path, text: &str) -> Result<(), String> {
         self.request("fs/write_text_file", json!({"sessionId": self.session_id, "path": path, "content": text})).map(|_| ())
+    }
+}
+
+/// What the editor's terminal keeps of a command's output; bash's own capture spills past its limit the same way.
+const TERMINAL_OUTPUT_BYTES: u64 = 4 << 20;
+
+impl EditorTerminal for EditorClient {
+    fn run(&self, call: &str, script: &str, cwd: &Path, abort: &AtomicBool, deadline: Option<Instant>) -> Result<(String, i32, Option<Killed>), String> {
+        let create = json!({"sessionId": self.session_id, "command": "bash", "args": ["-c", script], "cwd": cwd, "outputByteLimit": TERMINAL_OUTPUT_BYTES});
+        let created = self.request("terminal/create", create)?;
+        let terminal_id = created["terminalId"].as_str().ok_or("The editor sent no terminal id.")?.to_string();
+        self.terminals.lock().unwrap().insert(call.to_string(), terminal_id.clone());
+        let shown = json!({"sessionUpdate": "tool_call_update", "toolCallId": call, "content": [{"type": "terminal", "terminalId": terminal_id}]});
+        send(&json!({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": self.session_id, "update": shown}}));
+        let terminal = json!({"sessionId": self.session_id, "terminalId": terminal_id});
+        let waiting = self.send_request("terminal/wait_for_exit", terminal.clone());
+        let mut killed = None;
+        let exited = loop {
+            match self.replies.lock().unwrap().recv_timeout(Duration::from_millis(10)) {
+                Ok(reply) if reply["id"] == waiting.as_str() => break reply,
+                // The answer to our terminal/kill, which nothing waits for.
+                Ok(_) | Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => return Err("The editor closed the connection.".into()),
+            }
+            let kill = if abort.load(Ordering::Relaxed) { Some(Killed::Aborted) } else { deadline.filter(|deadline| Instant::now() >= *deadline).map(|_| Killed::Timeout) };
+            if killed.is_none() && kill.is_some() {
+                killed = kill;
+                self.send_request("terminal/kill", terminal.clone());
+            }
+        };
+        let status = result_of("terminal/wait_for_exit", &exited)?;
+        let output = self.request("terminal/output", terminal.clone())?;
+        self.request("terminal/release", terminal)?;
+        // A signal ended it: 128 like a shell, as the editor sends the signal's name and not its number.
+        let code = status["exitCode"].as_i64().map_or(128, |code| code as i32);
+        Ok((output["output"].as_str().unwrap_or_default().to_string(), code, killed))
     }
 }
 
@@ -532,8 +585,8 @@ struct Turn {
     context_window: u64,
     /// The client shows `notice` updates.
     notices: bool,
-    /// The editor's buffers, which edits go to when the client offers fs; the disk otherwise.
-    editor: Option<Arc<dyn hashline::EditorFiles>>,
+    /// The editor's buffers, which edits go to when the client offers fs, and the terminals Bash ran in.
+    editor: Option<Arc<EditorClient>>,
 }
 
 impl Turn {
@@ -563,7 +616,12 @@ impl Turn {
                 update
             }
             Event::ToolEnd { id, output, is_error } => {
-                let mut content = vec![json!({"type": "content", "content": {"type": "text", "text": output}})];
+                // A Bash call that ran in the editor's terminal keeps showing it, not its output as text.
+                let terminal = self.editor.as_ref().and_then(|editor| editor.terminals.lock().unwrap().remove(id));
+                let mut content = match terminal {
+                    Some(terminal_id) => vec![json!({"type": "terminal", "terminalId": terminal_id})],
+                    None => vec![json!({"type": "content", "content": {"type": "text", "text": output}})],
+                };
                 if let Some((path, old_text)) = self.before_edit.remove(id)
                     && !is_error
                     && let Some(new_text) = self.read_text(&path)
@@ -597,8 +655,8 @@ impl Turn {
 
     fn read_text(&self, path: &Path) -> Option<String> {
         match &self.editor {
-            Some(editor) => editor.read(path).ok(),
-            None => std::fs::read_to_string(path).ok(),
+            Some(editor) if editor.files => hashline::EditorFiles::read(editor.as_ref(), path).ok(),
+            _ => std::fs::read_to_string(path).ok(),
         }
     }
 

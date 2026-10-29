@@ -124,6 +124,8 @@ struct Editor {
     form_replies: VecDeque<Value>,
     /// Unsaved buffers by path, for a client that offers fs: reads come from here before the disk, writes land here.
     buffers: HashMap<String, String>,
+    /// The output and exit code of each command a terminal/create ran, by terminal id.
+    terminals: HashMap<String, (String, i32)>,
 }
 
 impl Editor {
@@ -162,7 +164,7 @@ impl Editor {
                 }
             }
         });
-        let mut editor = Editor { child, stdin, lines, next_id: 0, seen: Vec::new(), form_replies: VecDeque::new(), buffers: HashMap::new() };
+        let mut editor = Editor { child, stdin, lines, next_id: 0, seen: Vec::new(), form_replies: VecDeque::new(), buffers: HashMap::new(), terminals: HashMap::new() };
         editor.request("initialize", json!({"protocolVersion": 1, "clientCapabilities": capabilities})).unwrap();
         editor
     }
@@ -211,12 +213,34 @@ impl Editor {
                 self.buffers.insert(params["path"].as_str().unwrap().to_string(), params["content"].as_str().unwrap().to_string());
                 self.send(&json!({"jsonrpc": "2.0", "id": message["id"], "result": null}));
             }
+            if let Some(answer) = self.answer_terminal(&message) {
+                self.send(&json!({"jsonrpc": "2.0", "id": message["id"], "result": answer}));
+            }
             if message["method"] == "elicitation/create" {
                 let result = self.form_replies.pop_front().unwrap_or(json!({"action": "decline"}));
                 self.send(&json!({"jsonrpc": "2.0", "id": message["id"], "result": result}));
             }
             self.seen.push(message);
         }
+    }
+
+    /// A terminal that runs its command to the end at terminal/create.
+    fn answer_terminal(&mut self, message: &Value) -> Option<Value> {
+        let params = &message["params"];
+        let terminal_id = params["terminalId"].as_str().unwrap_or_default().to_string();
+        Some(match message["method"].as_str()? {
+            "terminal/create" => {
+                let args: Vec<&str> = params["args"].as_array().unwrap().iter().map(|arg| arg.as_str().unwrap()).collect();
+                let ran = Command::new(params["command"].as_str().unwrap()).args(args).current_dir(params["cwd"].as_str().unwrap()).output().unwrap();
+                let id = format!("term-{}", self.terminals.len());
+                self.terminals.insert(id.clone(), (String::from_utf8_lossy(&ran.stdout).into_owned(), ran.status.code().unwrap()));
+                json!({"terminalId": id})
+            }
+            "terminal/wait_for_exit" => json!({"exitCode": self.terminals[&terminal_id].1}),
+            "terminal/output" => json!({"output": self.terminals[&terminal_id].0, "truncated": false}),
+            "terminal/release" | "terminal/kill" => json!({}),
+            _ => return None,
+        })
     }
 
     fn new_session(&mut self, cwd: &Path) -> String {
@@ -577,4 +601,22 @@ fn an_editor_with_fs_serves_reads_and_takes_edits_of_its_buffers() {
     assert_eq!(std::fs::read_to_string(&file).unwrap(), "on disk\n");
     let edited = editor.updates("tool_call_update").into_iter().find(|update| update["toolCallId"] == "toolu_edit").unwrap();
     assert_eq!((&edited["content"][0]["oldText"], &edited["content"][0]["newText"]), (&json!("unsaved buffer\n"), &json!("edited buffer\n")));
+}
+
+#[test]
+fn bash_runs_in_the_editor_terminal_and_the_model_gets_the_same_result() {
+    let home = Home::new("terminal");
+    let api = fake_api(vec![reply(&[tool_use("toolu_sh", "Bash", json!({"command": "echo from-terminal; exit 3"}))], "tool_use"), reply(&[text("It failed.")], "end_turn")]);
+    let mut editor = Editor::start_with(&home, &api, json!({"terminal": true}), "sk-fake");
+    let session_id = editor.new_session(&home.project());
+
+    editor.prompt(&session_id, "Run it.").unwrap();
+
+    let created = editor.seen.iter().find(|message| message["method"] == "terminal/create").expect("a terminal");
+    assert_eq!(created["params"]["cwd"], json!(home.project()));
+    let result = api.requests.try_iter().nth(1).unwrap()["messages"].as_array().unwrap().last().unwrap()["content"][0].clone();
+    assert_eq!(result["is_error"], true);
+    assert!(result["content"].to_string().contains("from-terminal") && result["content"].to_string().contains("Command exited with code 3"), "{result}");
+    let ended = editor.updates("tool_call_update").into_iter().rfind(|update| update["toolCallId"] == "toolu_sh").unwrap();
+    assert_eq!(ended["content"], json!([{"type": "terminal", "terminalId": "term-0"}]));
 }
