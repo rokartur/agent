@@ -4,14 +4,15 @@
 use std::collections::HashMap;
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
+use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
 
 use crate::agent::permissions::{Decision, Request};
 use crate::agent::{Agent, Event};
+use crate::tools::todo::{Status, Todos};
 
 const PROTOCOL_VERSION: u64 = 1;
 const METHOD_NOT_FOUND: i64 = -32601;
@@ -107,7 +108,7 @@ fn handle(agent: &mut Agent, message: &Value, replies: &Receiver<Value>, cancell
             }
             let text = prompt_text(&params["prompt"]);
             let first_new_message = agent.messages.len();
-            let mut turn = Turn { cwd: agent.cwd.clone(), ..Turn::default() };
+            let mut turn = Turn { cwd: agent.cwd.clone(), todos: agent.todos.clone(), ..Turn::default() };
             cancelled.store(false, Ordering::Relaxed);
             let result = agent.prompt(&text, &mut |event| match event {
                 Event::Permission { call, request, reply } => {
@@ -133,7 +134,7 @@ fn handle(agent: &mut Agent, message: &Value, replies: &Receiver<Value>, cancell
                     let _ = reply.send(decision);
                 }
                 event => {
-                    if let Some(update) = turn.session_update(&event) {
+                    for update in turn.session_updates(&event) {
                         send(&json!({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": session_id, "update": update}}));
                     }
                 }
@@ -197,13 +198,14 @@ struct Turn {
     before_edit: HashMap<String, (PathBuf, Option<String>)>,
     /// The last model reply's, in Anthropic's names.
     stop_reason: String,
+    todos: Arc<Mutex<Todos>>,
 }
 
 impl Turn {
-    /// The session/update the editor shows for `event`, if any.
-    fn session_update(&mut self, event: &Event) -> Option<Value> {
+    /// The session/updates the editor shows for `event`.
+    fn session_updates(&mut self, event: &Event) -> Vec<Value> {
         let text = |kind: &str, text: &str| json!({"sessionUpdate": kind, "content": {"type": "text", "text": text}});
-        Some(match event {
+        vec![match event {
             Event::Text(chunk) => text("agent_message_chunk", chunk),
             Event::Thinking(chunk) => text("agent_thought_chunk", chunk),
             Event::ToolStart { id, name, input } => {
@@ -233,23 +235,27 @@ impl Turn {
                 {
                     content.insert(0, json!({"type": "diff", "path": path, "oldText": old_text, "newText": new_text}));
                 }
-                json!({
+                let update = json!({
                     "sessionUpdate": "tool_call_update",
                     "toolCallId": id,
                     "status": if *is_error { "failed" } else { "completed" },
                     "content": content,
-                })
+                });
+                if !is_error && self.started.get(id).is_some_and(|call| call["name"] == "Todo") {
+                    return vec![update, plan(&self.todos.lock().unwrap())];
+                }
+                update
             }
             Event::Moved { cwd, .. } => {
                 self.cwd = cwd.clone();
-                return None;
+                return Vec::new();
             }
             Event::TurnEnd { stop_reason, .. } => {
                 self.stop_reason = stop_reason.clone();
-                return None;
+                return Vec::new();
             }
-            _ => return None,
-        })
+            _ => return Vec::new(),
+        }]
     }
 
     /// The tool call a permission request is about, titled with the question: the started call, or a new card for an
@@ -278,6 +284,13 @@ impl Turn {
             _ => "end_turn",
         }
     }
+}
+
+/// ACP's plan replaces the whole list each time; deleted tasks are left out.
+fn plan(todos: &Todos) -> Value {
+    let entries: Vec<Value> =
+        todos.tasks.iter().filter(|task| task.status != Status::Deleted).map(|task| json!({"content": task.subject, "status": task.status.as_str(), "priority": "medium"})).collect();
+    json!({"sessionUpdate": "plan", "entries": entries})
 }
 
 fn tool_kind(name: &str) -> &'static str {
@@ -315,12 +328,12 @@ mod tests {
     #[test]
     fn tool_events_become_tool_call_updates() {
         let mut turn = Turn::default();
-        let start = turn.session_update(&Event::ToolStart { id: "t1".into(), name: "Bash".into(), input: json!({"command": "ls"}) }).unwrap();
+        let start = turn.session_updates(&Event::ToolStart { id: "t1".into(), name: "Bash".into(), input: json!({"command": "ls"}) }).remove(0);
         assert_eq!((start["sessionUpdate"].as_str(), start["kind"].as_str(), start["status"].as_str()), (Some("tool_call"), Some("execute"), Some("in_progress")));
         assert_eq!(start["locations"], json!([]));
-        let end = turn.session_update(&Event::ToolEnd { id: "t1".into(), output: "x".into(), is_error: true }).unwrap();
+        let end = turn.session_updates(&Event::ToolEnd { id: "t1".into(), output: "x".into(), is_error: true }).remove(0);
         assert_eq!(end, json!({"sessionUpdate": "tool_call_update", "toolCallId": "t1", "status": "failed", "content": [{"type": "content", "content": {"type": "text", "text": "x"}}]}));
-        assert!(turn.session_update(&Event::Notice("n".into())).is_none());
+        assert!(turn.session_updates(&Event::Notice("n".into())).is_empty());
     }
 
     #[test]
@@ -330,9 +343,9 @@ mod tests {
         std::fs::write(dir.join("a.rs"), "old").unwrap();
         let mut turn = Turn { cwd: dir.clone(), ..Turn::default() };
         let mut run = |id: &str, name: &str, file: &str| {
-            let start = turn.session_update(&Event::ToolStart { id: id.into(), name: name.into(), input: json!({"file_path": file}) }).unwrap();
+            let start = turn.session_updates(&Event::ToolStart { id: id.into(), name: name.into(), input: json!({"file_path": file}) }).remove(0);
             std::fs::write(dir.join(file), "new").unwrap();
-            let end = turn.session_update(&Event::ToolEnd { id: id.into(), output: "ok".into(), is_error: false }).unwrap();
+            let end = turn.session_updates(&Event::ToolEnd { id: id.into(), output: "ok".into(), is_error: false }).remove(0);
             (start["locations"].clone(), end["content"].clone())
         };
         let (edited_at, edit) = run("t1", "Edit", "a.rs");
@@ -351,18 +364,18 @@ mod tests {
     fn only_session_cancel_ends_a_turn_as_cancelled() {
         let mut turn = Turn::default();
         let reply_stopped = |reason: &str| Event::TurnEnd { usage: Default::default(), context_tokens: 0, stop_reason: reason.into() };
-        assert!(turn.session_update(&reply_stopped("aborted")).is_none());
+        assert!(turn.session_updates(&reply_stopped("aborted")).is_empty());
         assert_eq!((turn.stop_reason(false), turn.stop_reason(true)), ("end_turn", "cancelled"));
-        turn.session_update(&reply_stopped("max_tokens"));
+        turn.session_updates(&reply_stopped("max_tokens"));
         assert_eq!(turn.stop_reason(false), "max_tokens");
-        turn.session_update(&reply_stopped("refusal"));
+        turn.session_updates(&reply_stopped("refusal"));
         assert_eq!(turn.stop_reason(false), "refusal");
     }
 
     #[test]
     fn a_permission_request_shows_the_card_of_the_call_that_asks() {
         let mut turn = Turn::default();
-        turn.session_update(&Event::ToolStart { id: "t1".into(), name: "Bash".into(), input: json!({"command": "rm x"}) });
+        turn.session_updates(&Event::ToolStart { id: "t1".into(), name: "Bash".into(), input: json!({"command": "rm x"}) });
         let request = Request { kind: crate::agent::permissions::Kind::Command, question: "Run this command?", detail: "rm x".into(), grant: "rm x".into() };
 
         let asked = turn.permission_tool_call(Some("t1"), &request);
@@ -371,6 +384,31 @@ mod tests {
         assert_eq!((&asked["toolCallId"], &asked["kind"], &asked["rawInput"]), (&json!("t1"), &json!("execute"), &json!({"command": "rm x"})));
         assert_eq!((asked["title"].as_str(), asked.get("sessionUpdate")), (Some("Run this command? rm x"), None));
         assert!(hook["toolCallId"].as_str().unwrap().starts_with("edit-hook-"), "{hook}");
+    }
+
+    #[test]
+    fn todo_calls_send_the_whole_task_list_as_a_plan() {
+        let mut turn = Turn::default();
+        let mut run = |id: &str, input: Value| {
+            turn.session_updates(&Event::ToolStart { id: id.into(), name: "Todo".into(), input: input.clone() });
+            turn.todos.lock().unwrap().apply(&input).unwrap();
+            turn.session_updates(&Event::ToolEnd { id: id.into(), output: "ok".into(), is_error: false })
+        };
+        run("t1", json!({"action": "create", "subject": "Read"}));
+        run("t2", json!({"action": "create", "subject": "Write"}));
+        run("t3", json!({"action": "create", "subject": "Drop"}));
+        run("t4", json!({"action": "update", "taskId": 1, "status": "completed"}));
+        run("t5", json!({"action": "update", "taskId": 2, "status": "in_progress"}));
+        let updates = run("t6", json!({"action": "delete", "taskId": 3}));
+
+        assert_eq!(updates[0]["sessionUpdate"], "tool_call_update");
+        assert_eq!(
+            updates[1],
+            json!({"sessionUpdate": "plan", "entries": [
+                {"content": "Read", "status": "completed", "priority": "medium"},
+                {"content": "Write", "status": "in_progress", "priority": "medium"},
+            ]})
+        );
     }
 
     #[test]
