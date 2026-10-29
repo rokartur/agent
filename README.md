@@ -24,6 +24,15 @@ Type `/login` and pick Claude, ChatGPT or GitHub Copilot. You already pay for on
 
 macOS and Linux. Updates itself. `agent --help` for the rest.
 
+## Switch computers with /env
+
+Run a session on another of your computers over Tailscale: its files, its shell, its accounts. No cloud relay, no pairing.
+
+1. `agent service install` on the other computer, or `agent service install --on studio` from this one.
+2. `/env studio` here. A new session starts there, in this terminal, and the session you leave keeps running.
+
+`/env` alone lists your environments. `agent --on studio` starts a session there from the shell, and `agent --on auto` picks the least loaded computer. [Setup](docs/remote-sessions.md).
+
 ## Features
 
 - **Plugins in any language**: a plugin is a folder with `plugin.json` and a program that speaks JSON-RPC over stdin. It can add tools for the model, `/` commands and its own settings. `agent plugin install ./my-plugin` ([docs](plugins/README.md)).
@@ -38,7 +47,6 @@ macOS and Linux. Updates itself. `agent --help` for the rest.
 - **Web built in**: search through Exa, Brave, Tavily or Perplexity. Fetch pages as Markdown. Give it a GitHub URL and it clones the repo to read.
 - **You choose how much it does alone**: ask before every change, let a reviewer model approve, or `--yolo`.
 - **Sessions outlive the terminal**: close it mid-turn and the turn finishes anyway. `agent attach` picks the session up again in any terminal, and two terminals on one session see the same screen.
-- **Sessions on your other computers**: over Tailscale, `agent --on studio` runs the session on another of your computers: its files, shell and accounts. No cloud relay, no pairing ([setup](docs/remote-sessions.md)).
 
 ## Commands worth knowing
 
