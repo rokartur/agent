@@ -85,6 +85,12 @@ fn read_stdin(abort: Arc<AtomicBool>, cancelled: Arc<AtomicBool>) -> (Receiver<V
                     abort.store(true, Ordering::Relaxed);
                     Ok(())
                 }
+                // ACP: a session/close cancels the running turn first, which would hold the close until it ends.
+                Some("session/close") => {
+                    cancelled.store(true, Ordering::Relaxed);
+                    abort.store(true, Ordering::Relaxed);
+                    requests.send(message).map_err(|_| ())
+                }
                 Some(_) => requests.send(message).map_err(|_| ()),
                 None => replies.send(message).map_err(|_| ()),
             };
@@ -132,9 +138,6 @@ fn handle(agent: &mut Agent, connection: &mut Connection, message: &Value) -> Re
             agent.mcp.set_client_servers(&params["mcpServers"], &settings.disabled_mcp, &settings.approved_mcp).map_err(|error| (INVALID_PARAMS, error))?;
             agent.mcp.settled();
             agent.asks = !client["elicitation"]["form"].is_null();
-            for dir in params["additionalDirectories"].as_array().into_iter().flatten() {
-                agent.add_dir(dir.as_str().unwrap_or_default()).map_err(|error| (INVALID_PARAMS, error))?;
-            }
             if method == "session/new" {
                 if !agent.messages.is_empty() {
                     agent.new_session().map_err(|error| (INTERNAL_ERROR, error))?;
@@ -143,11 +146,25 @@ fn handle(agent: &mut Agent, connection: &mut Connection, message: &Value) -> Re
             } else {
                 // shortcut: a session the model moved with `cd` opens as it was before the move; follow its copy when that bites.
                 let asked = params["sessionId"].as_str().unwrap_or_default();
-                let (messages, _) = agent.open_session(asked).map_err(|error| (INVALID_PARAMS, error))?;
+                // The router sends a load of the open session here; opening it again would fork it.
+                if *session_id != asked {
+                    agent.open_session(asked).map_err(|error| (INVALID_PARAMS, error))?;
+                }
+                if agent.session.fork_notice().is_some() {
+                    // The editor cannot learn a copy's id, so its turns would land where it never looks.
+                    if let Some(copy) = &agent.session.path {
+                        std::fs::remove_file(copy).map_err(|error| (INTERNAL_ERROR, format!("Cannot remove {}: {error}", copy.display())))?;
+                    }
+                    return Err((INVALID_PARAMS, format!("Session {asked} is open in another process. Close it there first.")));
+                }
                 *session_id = asked.to_string();
                 if method == "session/load" {
-                    replay(&messages, agent, session_id);
+                    replay(&agent.messages, agent, session_id);
                 }
+            }
+            // After the open: loading a session replaces its directories with the saved ones.
+            for dir in params["additionalDirectories"].as_array().into_iter().flatten() {
+                agent.add_dir(dir.as_str().unwrap_or_default()).map_err(|error| (INVALID_PARAMS, error))?;
             }
             *commands = Commands::load(agent).map_err(|error| (INTERNAL_ERROR, error))?;
             let files = client["fs"]["readTextFile"] == true && client["fs"]["writeTextFile"] == true;

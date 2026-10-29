@@ -26,6 +26,8 @@ struct Routes {
     asked: HashMap<String, Writer>,
     /// The process of each session/new, load or resume not answered yet, by request id, so the editor can cancel it.
     starting: HashMap<String, u32>,
+    /// Requests passed to a session's process and not answered yet, by id, so they get an error if it exits.
+    pending: HashMap<String, (Value, Writer)>,
 }
 
 /// `args` start each session's process the way this one started, `acp` and its flags included.
@@ -58,7 +60,9 @@ pub fn route(args: &[String]) -> Result<(), String> {
             "session/new" => start(&message, None, &initialize, args, &routes).map(|()| None),
             "session/load" | "session/resume" => {
                 let session_id = message["params"]["sessionId"].as_str().map(String::from);
-                start(&message, session_id, &initialize, args, &routes).map(|()| None)
+                let open = session_id.as_ref().is_some_and(|session_id| routes.lock().unwrap().sessions.contains_key(session_id));
+                // Its process answers: a second one would open a copy, as the file is locked.
+                if open { forward(&message, &routes).map(|()| None) } else { start(&message, session_id, &initialize, args, &routes).map(|()| None) }
             }
             "$/cancel_request" => {
                 cancel_start(&message["params"]["requestId"], &routes);
@@ -131,6 +135,8 @@ fn relay(mut child: Child, stdout: ChildStdout, writer: Writer, starting: Value,
                 break;
             };
             routes.lock().unwrap().sessions.insert(started, writer.clone());
+        } else if message["method"].is_null() && !message["id"].is_null() {
+            routes.lock().unwrap().pending.remove(&message["id"].to_string());
         }
         send(&message);
     }
@@ -138,9 +144,13 @@ fn relay(mut child: Child, stdout: ChildStdout, writer: Writer, starting: Value,
     routes.sessions.retain(|_, routed| !Arc::ptr_eq(routed, &writer));
     routes.asked.retain(|_, routed| !Arc::ptr_eq(routed, &writer));
     let unanswered = routes.starting.remove(&starting.to_string()).is_some();
+    let orphans: Vec<Value> = routes.pending.extract_if(|_, (_, routed)| Arc::ptr_eq(routed, &writer)).map(|(_, (id, _))| id).collect();
     drop(routes);
     if unanswered && !starting.is_null() {
         send(&json!({"jsonrpc": "2.0", "id": starting, "error": {"code": INTERNAL_ERROR, "message": "The session's process exited before it started the session."}}));
+    }
+    for id in orphans {
+        send(&json!({"jsonrpc": "2.0", "id": id, "error": {"code": INTERNAL_ERROR, "message": "The session's process exited."}}));
     }
     drop(writer);
     let _ = child.wait();
@@ -176,7 +186,11 @@ fn forward(message: &Value, routes: &Arc<Mutex<Routes>>) -> Result<(), (i64, Str
         return Err((METHOD_NOT_FOUND, format!("Method not found: {}", message["method"])));
     };
     let writer = routes.lock().unwrap().sessions.get(session_id).cloned();
-    write(&writer.ok_or((INVALID_PARAMS, format!("Unknown session {session_id}.")))?, message)
+    let writer = writer.ok_or((INVALID_PARAMS, format!("Unknown session {session_id}.")))?;
+    if !message["id"].is_null() {
+        routes.lock().unwrap().pending.insert(message["id"].to_string(), (message["id"].clone(), writer.clone()));
+    }
+    write(&writer, message)
 }
 
 fn write(writer: &Writer, message: &Value) -> Result<(), (i64, String)> {

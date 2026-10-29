@@ -193,13 +193,18 @@ impl Editor {
 
     /// The answer to request `id`, answering the agent's own requests while it waits.
     fn answer(&mut self, id: u64, method: &str) -> Value {
+        self.until(&format!("answer to {method}"), |message| message["id"] == id && message["method"].is_null())
+    }
+
+    /// The first message `wanted` takes, answering the agent's own requests while it waits.
+    fn until(&mut self, what: &str, wanted: impl Fn(&Value) -> bool) -> Value {
         loop {
             let message = match self.lines.recv_timeout(WAIT) {
                 Ok(message) => message,
-                Err(RecvTimeoutError::Timeout) => panic!("no answer to {method} in {WAIT:?}; seen {:#?}", self.seen),
-                Err(RecvTimeoutError::Disconnected) => panic!("agent acp exited during {method}; seen {:#?}", self.seen),
+                Err(RecvTimeoutError::Timeout) => panic!("no {what} in {WAIT:?}; seen {:#?}", self.seen),
+                Err(RecvTimeoutError::Disconnected) => panic!("agent acp exited before {what}; seen {:#?}", self.seen),
             };
-            if message["id"] == id && message["method"].is_null() {
+            if wanted(&message) {
                 return message;
             }
             if message["method"] == "session/request_permission" {
@@ -457,6 +462,75 @@ fn a_closed_session_is_listed_and_loads_with_its_history_replayed() {
     assert!(editor.seen.iter().all(|message| message["params"]["sessionId"] == json!(session_id)));
 }
 
+#[test]
+fn a_session_loaded_closed_or_open_keeps_the_editors_directories_and_makes_no_copy() {
+    let home = Home::new("reload");
+    let other = home.dir.join("other");
+    std::fs::create_dir(&other).unwrap();
+    let api = fake_api(vec![reply(&[text("One.")], "end_turn"), reply(&[text("Two.")], "end_turn"), reply(&[text("Three.")], "end_turn")]);
+    let mut editor = Editor::start(&home, &api);
+    let session_id = editor.new_session(&home.project());
+    editor.prompt(&session_id, "Hi.").unwrap();
+    let load = json!({"sessionId": session_id, "cwd": home.project(), "mcpServers": [], "additionalDirectories": [other]});
+
+    for close_first in [true, false] {
+        if close_first {
+            editor.request("session/close", json!({"sessionId": session_id})).unwrap();
+        }
+        editor.request("session/load", load.clone()).unwrap();
+        editor.prompt(&session_id, "Again.").unwrap();
+        let system = api.requests.try_iter().last().unwrap()["system"].to_string();
+        assert!(system.contains(&other.display().to_string()), "closed first: {close_first}; {system}");
+    }
+    let listed = editor.request("session/list", json!({"cwd": home.project()})).unwrap();
+    assert_eq!(listed["sessions"].as_array().unwrap().len(), 1, "{listed}");
+}
+
+#[test]
+fn a_session_open_in_another_process_does_not_load_into_a_copy() {
+    let home = Home::new("held");
+    let api = fake_api(vec![reply(&[text("One.")], "end_turn")]);
+    let mut editor = Editor::start(&home, &api);
+    let session_id = editor.new_session(&home.project());
+    editor.prompt(&session_id, "Hi.").unwrap();
+    editor.request("session/close", json!({"sessionId": session_id})).unwrap();
+    // As the TUI holds a session it has open.
+    let held = std::fs::File::open(home.dir.join(format!(".agents/sessions/{session_id}.jsonl"))).unwrap();
+    held.lock().unwrap();
+
+    let error = editor.request("session/load", json!({"sessionId": session_id, "cwd": home.project(), "mcpServers": []})).unwrap_err();
+
+    assert!(error.contains("open in another process"), "{error}");
+    let listed = editor.request("session/list", json!({"cwd": home.project()})).unwrap();
+    assert_eq!(listed["sessions"].as_array().unwrap().len(), 1, "{listed}");
+}
+
+#[test]
+fn closing_a_session_cancels_its_running_turn() {
+    let home = Home::new("close-running");
+    let api = fake_api(vec![reply(&[tool_use("toolu_sleep", "Bash", json!({"command": "sleep 120"}))], "tool_use")]);
+    let mut editor = Editor::start(&home, &api);
+    let session_id = editor.new_session(&home.project());
+    let prompt = editor.start_request("session/prompt", json!({"sessionId": session_id, "prompt": [{"type": "text", "text": "Wait."}]}));
+    editor.until("the sleep's tool call", |message| message["params"]["update"]["sessionUpdate"] == "tool_call");
+
+    let close = editor.start_request("session/close", json!({"sessionId": session_id}));
+
+    assert_eq!(editor.answer(prompt, "session/prompt")["result"], json!({"stopReason": "cancelled"}));
+    assert_eq!(editor.answer(close, "session/close")["result"], json!({}));
+}
+
+#[test]
+fn a_prompt_gets_an_error_when_its_session_process_dies() {
+    let home = Home::new("dies");
+    let api = fake_api(vec![reply(&[tool_use("toolu_kill", "Bash", json!({"command": "kill -9 $PPID"}))], "tool_use")]);
+    let mut editor = Editor::start(&home, &api);
+    let session_id = editor.new_session(&home.project());
+
+    let error = editor.prompt(&session_id, "Stop.").unwrap_err();
+
+    assert_eq!(error, "The session's process exited.");
+}
 #[test]
 fn a_session_gets_a_title_from_its_first_prompt() {
     let home = Home::new("title");
