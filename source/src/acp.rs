@@ -93,7 +93,7 @@ fn handle(agent: &mut Agent, connection: &mut Connection, message: &Value) -> Re
                 "protocolVersion": PROTOCOL_VERSION,
                 "agentCapabilities": {
                     "loadSession": false,
-                    "promptCapabilities": {"image": false, "audio": false, "embeddedContext": true},
+                    "promptCapabilities": {"image": true, "audio": false, "embeddedContext": true},
                     "mcpCapabilities": {"http": true, "sse": false},
                 },
                 "agentInfo": {"name": "agent", "title": "agent", "version": env!("CARGO_PKG_VERSION")},
@@ -121,6 +121,8 @@ fn handle(agent: &mut Agent, connection: &mut Connection, message: &Value) -> Re
                 return Err((INVALID_PARAMS, format!("Unknown session {asked}.")));
             }
             let text = prompt_text(&params["prompt"]);
+            let images: Vec<Value> = image_blocks(&params["prompt"]).map(crate::image::from_base64).collect::<Result<_, _>>().map_err(|error| (INVALID_PARAMS, error))?;
+            agent.images.extend(images);
             let first_new_message = agent.messages.len();
             let mut turn = Turn { cwd: agent.cwd.clone(), todos: agent.todos.clone(), context_window: agent.context_window, notices: !client["session"]["notices"].is_null(), ..Turn::default() };
             cancelled.store(false, Ordering::Relaxed);
@@ -184,6 +186,11 @@ fn prompt_text(blocks: &Value) -> String {
         }
     }
     parts.join("\n\n")
+}
+
+/// The base64 data of each image block; `prompt_text` leaves them out.
+fn image_blocks(blocks: &Value) -> impl Iterator<Item = &str> {
+    blocks.as_array().into_iter().flatten().filter(|block| block["type"] == "image").map(|block| block["data"].as_str().unwrap_or_default())
 }
 
 /// The client's answer to our request `id`; a cancelled request or a closed stdin denies.

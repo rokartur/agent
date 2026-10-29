@@ -250,3 +250,23 @@ fn a_permission_request_names_the_call_and_shows_its_input() {
     assert_eq!(tool_call["rawInput"], json!({"command": "touch made"}));
     assert!(home.project().join("made").exists());
 }
+
+#[test]
+fn an_image_in_the_prompt_reaches_the_model_next_to_the_text() {
+    const PIXEL_PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+    let home = Home::new("image");
+    let api = fake_api(vec![reply(&[text("A pixel.")], "end_turn")]);
+    let mut editor = Editor::start(&home, &api);
+    let session_id = editor.new_session(&home.project());
+
+    let prompt = json!([{"type": "image", "data": PIXEL_PNG, "mimeType": "image/png"}, {"type": "text", "text": "What is this?"}]);
+    editor.request("session/prompt", json!({"sessionId": session_id, "prompt": prompt})).unwrap();
+    let broken = editor.request("session/prompt", json!({"sessionId": session_id, "prompt": [{"type": "image", "data": "bm90IGFuIGltYWdl", "mimeType": "image/png"}]}));
+
+    let request = api.requests.recv_timeout(WAIT).unwrap();
+    let content = &request["messages"].as_array().unwrap().last().unwrap()["content"];
+    let kinds: Vec<&str> = content.as_array().unwrap().iter().map(|block| block["type"].as_str().unwrap()).collect();
+    assert_eq!(kinds, ["image", "text"], "{content}");
+    assert_eq!(content[1]["text"], "What is this?");
+    assert!(broken.is_err(), "{broken:?}");
+}
