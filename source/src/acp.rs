@@ -20,9 +20,11 @@ const INTERNAL_ERROR: i64 = -32603;
 
 pub fn serve(agent: &mut Agent) -> Result<(), String> {
     let cancelled = Arc::new(AtomicBool::new(false));
+    // The id the editor knows. A `cd` moves the agent to a new saved session, and the editor keeps this one.
+    let mut session_id = String::new();
     let (requests, replies) = read_stdin(agent.abort.clone(), cancelled.clone());
     for message in requests {
-        let result = handle(agent, &message, &replies, &cancelled);
+        let result = handle(agent, &message, &replies, &cancelled, &mut session_id);
         let id = &message["id"];
         if id.is_null() {
             continue;
@@ -70,7 +72,7 @@ fn read_stdin(abort: Arc<AtomicBool>, cancelled: Arc<AtomicBool>) -> (Receiver<V
     (request_rx, reply_rx)
 }
 
-fn handle(agent: &mut Agent, message: &Value, replies: &Receiver<Value>, cancelled: &AtomicBool) -> Result<Value, (i64, String)> {
+fn handle(agent: &mut Agent, message: &Value, replies: &Receiver<Value>, cancelled: &AtomicBool, session_id: &mut String) -> Result<Value, (i64, String)> {
     let params = &message["params"];
     match message["method"].as_str().unwrap_or_default() {
         "initialize" => Ok(json!({
@@ -95,12 +97,13 @@ fn handle(agent: &mut Agent, message: &Value, replies: &Receiver<Value>, cancell
             if !agent.messages.is_empty() {
                 agent.new_session().map_err(|error| (INTERNAL_ERROR, error))?;
             }
-            Ok(json!({"sessionId": agent.session.id}))
+            *session_id = agent.session.id.clone();
+            Ok(json!({"sessionId": session_id}))
         }
         "session/prompt" => {
-            let session_id = params["sessionId"].as_str().unwrap_or_default().to_string();
-            if session_id != agent.session.id {
-                return Err((INVALID_PARAMS, format!("Unknown session {session_id}.")));
+            let asked = params["sessionId"].as_str().unwrap_or_default();
+            if session_id.is_empty() || asked != session_id {
+                return Err((INVALID_PARAMS, format!("Unknown session {asked}.")));
             }
             let text = prompt_text(&params["prompt"]);
             let first_new_message = agent.messages.len();

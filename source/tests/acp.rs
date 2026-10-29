@@ -218,3 +218,19 @@ fn a_prompt_streams_the_reply_and_ends_the_turn() {
     let chunks: Vec<&str> = editor.updates("agent_message_chunk").iter().map(|update| update["content"]["text"].as_str().unwrap()).collect();
     assert_eq!(chunks.concat(), "Hello from the model.");
 }
+
+#[test]
+fn the_session_id_still_works_after_the_model_moves_the_session_with_cd() {
+    let home = Home::new("cd");
+    std::fs::create_dir(home.project().join("sub")).unwrap();
+    let api = fake_api(vec![reply(&[tool_use("toolu_cd", "Bash", json!({"command": "cd sub"}))], "tool_use"), reply(&[text("Moved.")], "end_turn"), reply(&[text("Still here.")], "end_turn")]);
+    let mut editor = Editor::start(&home, &api);
+    let session_id = editor.new_session(&home.project());
+
+    editor.prompt(&session_id, "Go to sub.").unwrap();
+    let again = editor.prompt(&session_id, "And now?");
+
+    assert_eq!(again, Ok(json!({"stopReason": "end_turn"})));
+    let ended = editor.updates("tool_call_update");
+    assert!(ended[0]["content"][0]["content"]["text"].as_str().unwrap().contains("Session moved to"), "{ended:?}");
+}
