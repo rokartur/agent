@@ -1,5 +1,9 @@
 //! `agent acp`: the Agent Client Protocol for editors like Zed, JSON-RPC 2.0 with one message per line on stdin and stdout.
-//! shortcut: one session per process and no session/load or client fs; add them when an editor needs them.
+//! `router` starts a process per session; `serve` is that process, and serves one session.
+//! shortcut: no session/load or client fs; add them when an editor needs them.
+
+mod router;
+pub use router::{SESSION_ENV, route};
 
 use std::collections::HashMap;
 use std::io::{BufRead, Write};
@@ -75,6 +79,8 @@ fn read_stdin(abort: Arc<AtomicBool>, cancelled: Arc<AtomicBool>) -> (Receiver<V
                 break;
             }
         }
+        // The editor or the router is gone, so no one sees the rest of a running turn.
+        abort.store(true, Ordering::Relaxed);
     });
     (request_rx, reply_rx)
 }
@@ -97,16 +103,7 @@ fn handle(agent: &mut Agent, connection: &mut Connection, message: &Value) -> Re
     match message["method"].as_str().unwrap_or_default() {
         "initialize" => {
             *client = params["clientCapabilities"].clone();
-            Ok(json!({
-                "protocolVersion": PROTOCOL_VERSION,
-                "agentCapabilities": {
-                    "loadSession": false,
-                    "promptCapabilities": {"image": true, "audio": false, "embeddedContext": true},
-                    "mcpCapabilities": {"http": true, "sse": false},
-                },
-                "agentInfo": {"name": "agent", "title": "agent", "version": env!("CARGO_PKG_VERSION")},
-                "authMethods": [],
-            }))
+            Ok(initialize_result())
         }
         "session/new" => {
             let cwd = params["cwd"].as_str().unwrap_or_default();
@@ -117,6 +114,9 @@ fn handle(agent: &mut Agent, connection: &mut Connection, message: &Value) -> Re
             let settings = crate::settings::load(&agent.home).map_err(|error| (INTERNAL_ERROR, error))?;
             agent.mcp.set_client_servers(&params["mcpServers"], &settings.disabled_mcp, &settings.approved_mcp).map_err(|error| (INVALID_PARAMS, error))?;
             agent.mcp.settled();
+            for dir in params["additionalDirectories"].as_array().into_iter().flatten() {
+                agent.add_dir(dir.as_str().unwrap_or_default()).map_err(|error| (INVALID_PARAMS, error))?;
+            }
             if !agent.messages.is_empty() {
                 agent.new_session().map_err(|error| (INTERNAL_ERROR, error))?;
             }
@@ -201,6 +201,21 @@ fn handle(agent: &mut Agent, connection: &mut Connection, message: &Value) -> Re
         }
         method => Err((METHOD_NOT_FOUND, format!("Method not found: {method}"))),
     }
+}
+
+/// What this agent supports; the router answers initialize with it and passes the client's capabilities on.
+fn initialize_result() -> Value {
+    json!({
+        "protocolVersion": PROTOCOL_VERSION,
+        "agentCapabilities": {
+            "loadSession": false,
+            "promptCapabilities": {"image": true, "audio": false, "embeddedContext": true},
+            "mcpCapabilities": {"http": true, "sse": false},
+            "sessionCapabilities": {"additionalDirectories": {}},
+        },
+        "agentInfo": {"name": "agent", "title": "agent", "version": env!("CARGO_PKG_VERSION")},
+        "authMethods": [],
+    })
 }
 
 /// Errs unless `params` names the session this connection started.

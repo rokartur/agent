@@ -232,6 +232,8 @@ fn main() {
     };
     let result = if options.serve {
         home().and_then(|home| serve::redirect_output(&home)).and_then(|()| run(options))
+    } else if options.acp && std::env::var_os(acp::SESSION_ENV).is_none() {
+        acp::route(&args)
     } else if !(options.acp || options.headless || options.print || options.json) && std::io::stdout().is_terminal() {
         open_session(&options, &args)
     } else {

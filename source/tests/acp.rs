@@ -317,3 +317,30 @@ fn the_editor_sets_the_permission_mode_model_and_effort_of_the_next_prompt() {
     assert!(!editor.seen.iter().any(|message| message["method"] == "session/request_permission"), "full access asks nothing");
     assert!(home.project().join("made").exists());
 }
+
+#[test]
+fn two_sessions_run_side_by_side_each_in_its_own_directory() {
+    let home = Home::new("sessions");
+    let other = home.dir.join("other");
+    std::fs::create_dir(&other).unwrap();
+    let api = fake_api(vec![
+        reply(&[tool_use("toolu_b", "Bash", json!({"command": "touch b"}))], "tool_use"),
+        reply(&[text("Made b.")], "end_turn"),
+        reply(&[tool_use("toolu_a", "Bash", json!({"command": "touch a"}))], "tool_use"),
+        reply(&[text("Made a.")], "end_turn"),
+    ]);
+    let mut editor = Editor::start(&home, &api);
+    let first = editor.new_session(&home.project());
+    let second = editor.new_session(&other);
+
+    editor.prompt(&second, "Make b.").unwrap();
+    editor.prompt(&first, "Make a.").unwrap();
+
+    assert_ne!(first, second);
+    assert!(other.join("b").exists() && home.project().join("a").exists());
+    assert!(!home.project().join("b").exists() && !other.join("a").exists());
+    assert!(editor.prompt("no-such-session", "Hi.").unwrap_err().contains("Unknown session"));
+    assert!(editor.request("session/new", json!({"cwd": "relative/dir", "mcpServers": []})).is_err());
+    assert!(editor.request("session/new", json!({"cwd": home.project(), "mcpServers": [], "additionalDirectories": [other]})).is_ok());
+    assert!(editor.request("session/new", json!({"cwd": home.project(), "mcpServers": [], "additionalDirectories": [home.dir.join("missing")]})).is_err());
+}
