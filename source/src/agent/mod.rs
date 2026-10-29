@@ -148,8 +148,9 @@ pub enum Event {
     },
     /// The session's `project｜topic` name, saved to `session_info`.
     Titled(String),
-    /// Ask mode: the agent waits for one Decision on `reply`.
+    /// Ask mode: the agent waits for one Decision on `reply`. `call` is the tool call asking, None for an edit hook's command.
     Permission {
+        call: Option<String>,
         request: Request,
         reply: Sender<Decision>,
     },
@@ -656,7 +657,7 @@ impl Agent {
                         Err(error) => (error, true, None),
                     }
                 } else {
-                    let (output, is_error) = self.run_tool_with_checkpoint(&name, &input, &targets, text, emit)?;
+                    let (output, is_error) = self.run_tool_with_checkpoint(&id, &name, &input, &targets, text, emit)?;
                     (output, is_error, None)
                 };
                 if !is_error {
@@ -708,7 +709,7 @@ impl Agent {
             let input = json!({"command": hook.command, "timeout": 120_000});
             // The directory is part of what gets approved, so a grant does not also cover the command in cwd.
             let approved = json!({"command": format!("cd {} && {}", edit_hooks::shell_quote(&hook.dir.display().to_string()), hook.command), "timeout": 120_000});
-            if let Some(refusal) = self.check_permission("Bash", &approved, &[], user_request, emit) {
+            if let Some(refusal) = self.check_permission(None, "Bash", &approved, &[], user_request, emit) {
                 emit(Event::Notice(format!("[edit-hooks] {} skipped: {refusal}", hook.command)));
                 continue;
             }
@@ -722,7 +723,7 @@ impl Agent {
     }
 
     /// Runs one tool call after the permission check; agent-level tools are handled here, file and shell tools in `tools`.
-    fn run_tool(&mut self, name: &str, input: &Value, targets: &[PathBuf], user_request: &str, emit: &mut dyn FnMut(Event)) -> (String, bool) {
+    fn run_tool(&mut self, id: &str, name: &str, input: &Value, targets: &[PathBuf], user_request: &str, emit: &mut dyn FnMut(Event)) -> (String, bool) {
         if self.abort.load(Ordering::Relaxed) {
             return (ABORTED.into(), true);
         }
@@ -734,7 +735,7 @@ impl Agent {
         if name == "Bash"
             && let Some(read) = guard::file_read(input["command"].as_str().unwrap_or_default())
         {
-            let (output, is_error) = self.run_tool("Read", &read, &[], user_request, emit);
+            let (output, is_error) = self.run_tool(id, "Read", &read, &[], user_request, emit);
             return (format!("Ran as read, so these anchors are what edits use.\n{output}"), is_error);
         }
         if name == "Bash"
@@ -747,7 +748,7 @@ impl Agent {
         {
             return (reason, true);
         }
-        if let Some(reason) = self.check_permission(name, input, targets, user_request, emit) {
+        if let Some(reason) = self.check_permission(Some(id), name, input, targets, user_request, emit) {
             return (reason, true);
         }
         // After the permission check: starting a language server runs the repo's build scripts.
@@ -1414,7 +1415,7 @@ impl Agent {
 
     /// None when the call may run; otherwise the tool result that explains the refusal.
     /// A user's "No" also stops the turn, like Esc.
-    fn check_permission(&mut self, tool: &str, input: &Value, edited_files: &[PathBuf], user_request: &str, emit: &mut dyn FnMut(Event)) -> Option<String> {
+    fn check_permission(&mut self, call: Option<&str>, tool: &str, input: &Value, edited_files: &[PathBuf], user_request: &str, emit: &mut dyn FnMut(Event)) -> Option<String> {
         // A saved workflow is granted by its file, so a project workflow that later shadows the same name asks again.
         let saved_file: Vec<PathBuf> = match (tool, input["name"].as_str()) {
             ("Workflow", Some(name)) => self.saved_workflow(name.trim_start_matches('/')).and_then(|saved| saved.path).into_iter().collect(),
@@ -1430,7 +1431,7 @@ impl Agent {
             return self.review(user_request, &request, input, emit);
         }
         let (reply, answer) = mpsc::channel();
-        emit(Event::Permission { request: request.clone(), reply });
+        emit(Event::Permission { call: call.map(String::from), request: request.clone(), reply });
         match answer.recv().unwrap_or(Decision::Deny) {
             Decision::Allow => None,
             Decision::AllowAlways => {
@@ -1501,14 +1502,14 @@ impl Agent {
 
     /// Snapshots around a tool that can change files, so a rewind touches only what this session changed.
     /// A file another session edits while this call runs still counts as this session's.
-    fn run_tool_with_checkpoint(&mut self, name: &str, input: &Value, targets: &[PathBuf], user_request: &str, emit: &mut dyn FnMut(Event)) -> Result<(String, bool), String> {
+    fn run_tool_with_checkpoint(&mut self, id: &str, name: &str, input: &Value, targets: &[PathBuf], user_request: &str, emit: &mut dyn FnMut(Event)) -> Result<(String, bool), String> {
         const CHANGES_FILES: [&str; 6] = ["Write", "ReplaceLines", "Edit", "InsertLines", "Bash", "Agent"];
         // Before the snapshot: the move swaps the snapshot repo, so before and after would come from different checkouts.
         if name == "Bash"
             && let Some(dir) = tools::cd_target(input["command"].as_str().unwrap_or_default())
         {
             // The auto reviewer trusts calls inside the working directory, so moving it is a call to review.
-            if let Some(reason) = self.check_permission(name, input, targets, user_request, emit) {
+            if let Some(reason) = self.check_permission(Some(id), name, input, targets, user_request, emit) {
                 return Ok((reason, true));
             }
             return Ok(match self.cd(dir, emit) {
@@ -1517,7 +1518,7 @@ impl Agent {
             });
         }
         let Some(snapshots) = self.snapshots.as_ref().filter(|_| CHANGES_FILES.contains(&name)) else {
-            return Ok(self.run_tool(name, input, targets, user_request, emit));
+            return Ok(self.run_tool(id, name, input, targets, user_request, emit));
         };
         let files_before = match save_files_left_out(snapshots, targets) {
             Ok(files) => files,
@@ -1530,10 +1531,10 @@ impl Agent {
             Ok(before) => before,
             Err(error) => {
                 emit(Event::Notice(format!("{SNAPSHOT_FAILED}: {error}")));
-                return Ok(self.run_tool(name, input, targets, user_request, emit));
+                return Ok(self.run_tool(id, name, input, targets, user_request, emit));
             }
         };
-        let result = self.run_tool(name, input, targets, user_request, emit);
+        let result = self.run_tool(id, name, input, targets, user_request, emit);
         let snapshots = self.snapshots.as_ref().expect("checked at the top of run_tool_with_checkpoint");
         let at = self.messages.len();
         for (path, before) in files_before {

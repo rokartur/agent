@@ -234,3 +234,19 @@ fn the_session_id_still_works_after_the_model_moves_the_session_with_cd() {
     let ended = editor.updates("tool_call_update");
     assert!(ended[0]["content"][0]["content"]["text"].as_str().unwrap().contains("Session moved to"), "{ended:?}");
 }
+
+#[test]
+fn a_permission_request_names_the_call_and_shows_its_input() {
+    let home = Home::new("permission");
+    let api = fake_api(vec![reply(&[tool_use("toolu_touch", "Bash", json!({"command": "touch made"}))], "tool_use"), reply(&[text("Done.")], "end_turn")]);
+    let mut editor = Editor::start(&home, &api);
+    let session_id = editor.new_session(&home.project());
+
+    editor.prompt(&session_id, "Make a file.").unwrap();
+
+    let asked = editor.seen.iter().find(|message| message["method"] == "session/request_permission").expect("a permission request");
+    let tool_call = &asked["params"]["toolCall"];
+    assert_eq!((&asked["id"], &tool_call["toolCallId"], &tool_call["kind"]), (&json!("permission-toolu_touch"), &json!("toolu_touch"), &json!("execute")));
+    assert_eq!(tool_call["rawInput"], json!({"command": "touch made"}));
+    assert!(home.project().join("made").exists());
+}

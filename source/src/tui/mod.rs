@@ -4546,7 +4546,7 @@ impl App {
                 self.session_id = id;
                 self.session_path = path;
             }
-            Event::Permission { request, reply } => {
+            Event::Permission { request, reply, .. } => {
                 self.notify("Permission", &format!("{} {}", request.question, request.detail));
                 self.open_agent_panel(Panel::Permission { request, reply, index: 0, opened: Instant::now() });
             }

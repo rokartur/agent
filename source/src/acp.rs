@@ -10,7 +10,7 @@ use std::sync::mpsc::{self, Receiver};
 
 use serde_json::{Value, json};
 
-use crate::agent::permissions::Decision;
+use crate::agent::permissions::{Decision, Request};
 use crate::agent::{Agent, Event};
 
 const PROTOCOL_VERSION: u64 = 1;
@@ -110,20 +110,27 @@ fn handle(agent: &mut Agent, message: &Value, replies: &Receiver<Value>, cancell
             let mut turn = Turn { cwd: agent.cwd.clone(), ..Turn::default() };
             cancelled.store(false, Ordering::Relaxed);
             let result = agent.prompt(&text, &mut |event| match event {
-                Event::Permission { request, reply } => {
+                Event::Permission { call, request, reply } => {
+                    let tool_call = turn.permission_tool_call(call.as_deref(), &request);
                     // Tool call ids are unique, so a late reply from an earlier turn cannot answer this request.
-                    let id = format!("permission-{}", turn.last_tool_call);
-                    let question = format!("{} {}", request.question, request.detail);
+                    let id = format!("permission-{}", tool_call["toolCallId"].as_str().unwrap_or_default());
                     send(&json!({"jsonrpc": "2.0", "id": id, "method": "session/request_permission", "params": {
                         "sessionId": session_id,
-                        "toolCall": {"toolCallId": turn.last_tool_call, "title": question},
+                        "toolCall": tool_call,
                         "options": [
                             {"optionId": "allow_once", "name": "Allow once", "kind": "allow_once"},
                             {"optionId": "allow_always", "name": "Allow for this session", "kind": "allow_always"},
                             {"optionId": "reject_once", "name": "Reject", "kind": "reject_once"},
                         ],
                     }}));
-                    let _ = reply.send(wait_for_decision(replies, &id));
+                    let decision = wait_for_decision(replies, &id);
+                    // An edit hook's check has no tool call whose end would close its card.
+                    if call.is_none() {
+                        let status = if matches!(decision, Decision::Deny) { "failed" } else { "completed" };
+                        let update = json!({"sessionUpdate": "tool_call_update", "toolCallId": tool_call["toolCallId"], "status": status});
+                        send(&json!({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": session_id, "update": update}}));
+                    }
+                    let _ = reply.send(decision);
                 }
                 event => {
                     if let Some(update) = turn.session_update(&event) {
@@ -184,7 +191,8 @@ fn wait_for_decision(replies: &Receiver<Value>, id: &str) -> Decision {
 struct Turn {
     /// Where relative tool paths resolve; a `cd` moves it mid-turn.
     cwd: PathBuf,
-    last_tool_call: String,
+    /// The `tool_call` update of each call that started, so its permission request shows the same card.
+    started: HashMap<String, Value>,
     /// Each running edit's file and its text before the edit, None for a new file, so its end can show a diff.
     before_edit: HashMap<String, (PathBuf, Option<String>)>,
     /// The last model reply's, in Anthropic's names.
@@ -199,13 +207,12 @@ impl Turn {
             Event::Text(chunk) => text("agent_message_chunk", chunk),
             Event::Thinking(chunk) => text("agent_thought_chunk", chunk),
             Event::ToolStart { id, name, input } => {
-                self.last_tool_call = id.clone();
                 let path = input["file_path"].as_str().map(|path| self.cwd.join(path));
                 if let Some(path) = path.as_ref().filter(|_| tool_kind(name) == "edit") {
                     self.before_edit.insert(id.clone(), (path.clone(), std::fs::read_to_string(path).ok()));
                 }
                 let locations: Vec<Value> = path.iter().map(|path| json!({"path": path, "line": input["offset"].as_u64()})).collect();
-                json!({
+                let update = json!({
                     "sessionUpdate": "tool_call",
                     "toolCallId": id,
                     "name": name,
@@ -214,7 +221,9 @@ impl Turn {
                     "status": "in_progress",
                     "rawInput": input,
                     "locations": locations,
-                })
+                });
+                self.started.insert(id.clone(), update.clone());
+                update
             }
             Event::ToolEnd { id, output, is_error } => {
                 let mut content = vec![json!({"type": "content", "content": {"type": "text", "text": output}})];
@@ -241,6 +250,21 @@ impl Turn {
             }
             _ => return None,
         })
+    }
+
+    /// The tool call a permission request is about, titled with the question: the started call, or a new card for an
+    /// edit hook's command, which no tool call runs.
+    fn permission_tool_call(&self, call: Option<&str>, request: &Request) -> Value {
+        let title = format!("{} {}", request.question, request.detail);
+        let Some(mut tool_call) = call.and_then(|id| self.started.get(id)).cloned() else {
+            let id = format!("edit-hook-{}", crate::process::now_ms());
+            return json!({"toolCallId": id, "title": title, "kind": "execute", "status": "pending"});
+        };
+        if let Some(fields) = tool_call.as_object_mut() {
+            fields.remove("sessionUpdate");
+        }
+        tool_call["title"] = title.into();
+        tool_call
     }
 
     /// ACP's name for how the turn ended. A denied tool call aborts it too, but only session/cancel makes it `cancelled`.
@@ -333,6 +357,20 @@ mod tests {
         assert_eq!(turn.stop_reason(false), "max_tokens");
         turn.session_update(&reply_stopped("refusal"));
         assert_eq!(turn.stop_reason(false), "refusal");
+    }
+
+    #[test]
+    fn a_permission_request_shows_the_card_of_the_call_that_asks() {
+        let mut turn = Turn::default();
+        turn.session_update(&Event::ToolStart { id: "t1".into(), name: "Bash".into(), input: json!({"command": "rm x"}) });
+        let request = Request { kind: crate::agent::permissions::Kind::Command, question: "Run this command?", detail: "rm x".into(), grant: "rm x".into() };
+
+        let asked = turn.permission_tool_call(Some("t1"), &request);
+        let hook = turn.permission_tool_call(None, &request);
+
+        assert_eq!((&asked["toolCallId"], &asked["kind"], &asked["rawInput"]), (&json!("t1"), &json!("execute"), &json!({"command": "rm x"})));
+        assert_eq!((asked["title"].as_str(), asked.get("sessionUpdate")), (Some("Run this command? rm x"), None));
+        assert!(hook["toolCallId"].as_str().unwrap().starts_with("edit-hook-"), "{hook}");
     }
 
     #[test]
