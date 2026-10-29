@@ -2503,7 +2503,7 @@ impl App {
             },
             name if self.saved_workflows.iter().any(|saved| saved.meta.name == name) => {
                 self.push(Item::User(text.clone()));
-                self.start(Command::Prompt(workflow_command_prompt(name, args), Vec::new()));
+                self.start(Command::Prompt(workflow::command_prompt(name, args), Vec::new()));
             }
             _ => {
                 self.push(Item::User(text.clone()));
@@ -4519,7 +4519,7 @@ impl App {
             Event::Push(text) => self.notify("", &text),
             // The output tail went to the model; /tasks shows it in full.
             Event::FollowUp { source, text } => self.system(&source, text.split_once('\n').map_or(text.as_str(), |(head, _)| head)),
-            Event::TurnEnd { usage, context_tokens } => {
+            Event::TurnEnd { usage, context_tokens, .. } => {
                 self.context_tokens = context_tokens;
                 self.last_usage = usage;
                 self.prompt_usage.add(usage);
@@ -4546,7 +4546,7 @@ impl App {
                 self.session_id = id;
                 self.session_path = path;
             }
-            Event::Permission { request, reply } => {
+            Event::Permission { request, reply, .. } => {
                 self.notify("Permission", &format!("{} {}", request.question, request.detail));
                 self.open_agent_panel(Panel::Permission { request, reply, index: 0, opened: Instant::now() });
             }
@@ -5476,15 +5476,6 @@ const ULTRACODE_NOTE: &str = "The user typed the keyword `ultracode`, a direct r
 /// Only a prompt the user typed counts; the keyword in a file or tool output starts nothing.
 fn mentions_ultracode(text: &str) -> bool {
     text.split(|c: char| !c.is_alphanumeric()).any(|word| word.eq_ignore_ascii_case("ultracode"))
-}
-
-/// `/<workflow> [input]`: the model runs the saved workflow and shapes the input into the script's `args`.
-fn workflow_command_prompt(name: &str, input: &str) -> String {
-    let call = format!("Run the saved workflow `{name}` now: call the Workflow tool with name \"{name}\".");
-    if input.trim().is_empty() {
-        return call;
-    }
-    format!("{call} Pass this input as `args`, as structured data where it is a list or has fields:\n\n{}", input.trim())
 }
 
 /// What the slash menu completes: the `/word` up to the cursor when the cursor sits in the text's first word, else the whole text.
@@ -6556,12 +6547,6 @@ mod tests {
         assert!(super::mentions_ultracode("ultracode: audit src/routes"));
         assert!(super::mentions_ultracode("please UltraCode this"));
         assert!(!super::mentions_ultracode("ultracoder notes"));
-    }
-
-    #[test]
-    fn a_workflow_command_passes_its_input_as_args() {
-        assert!(!super::workflow_command_prompt("deep-research", " ").contains("args"));
-        assert!(super::workflow_command_prompt("deep-research", "rust async").ends_with("\n\nrust async"));
     }
 
     #[test]

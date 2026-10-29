@@ -189,6 +189,15 @@ pub fn saved(project_agents_dirs: &[PathBuf], agent_dir: &Path) -> Vec<Saved> {
     found
 }
 
+/// `/<workflow> [input]`: the model runs the saved workflow and shapes the input into the script's `args`.
+pub fn command_prompt(name: &str, input: &str) -> String {
+    let call = format!("Run the saved workflow `{name}` now: call the Workflow tool with name \"{name}\".");
+    if input.trim().is_empty() {
+        return call;
+    }
+    format!("{call} Pass this input as `args`, as structured data where it is a list or has fields:\n\n{}", input.trim())
+}
+
 /// Reads `meta` without running the script: the object literal after `export const meta =`, evaluated alone.
 pub fn parse_meta(script: &str) -> Result<Meta, String> {
     let missing = "The script must begin with `export const meta = { name, description }` as a literal.";
@@ -798,6 +807,12 @@ fn contradiction(schema: &Value) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_workflow_command_passes_its_input_as_args() {
+        assert!(!command_prompt("deep-research", " ").contains("args"));
+        assert!(command_prompt("deep-research", "rust async").ends_with("\n\nrust async"));
+    }
 
     fn host() -> (Host, Arc<Mutex<Vec<FollowUp>>>) {
         let follow_ups = Arc::new(Mutex::new(Vec::new()));

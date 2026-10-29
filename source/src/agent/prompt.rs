@@ -240,7 +240,8 @@ pub fn parse_skill(path: &Path) -> Option<Skill> {
 /// pi's `/skill:name args` expansion: the skill body wrapped in a `<skill>` block, then the args.
 pub fn expand_skill(text: &str, skills: &[Skill]) -> Result<String, String> {
     let Some(rest) = text.strip_prefix("/skill:") else { return Ok(text.to_string()) };
-    let (name, args) = rest.split_once(' ').map_or((rest, ""), |(name, args)| (name, args.trim()));
+    // Whitespace, not just a space: an editor's prompt puts attached files after a blank line.
+    let (name, args) = rest.split_once(char::is_whitespace).map_or((rest, ""), |(name, args)| (name, args.trim()));
     let Some(skill) = skills.iter().find(|s| s.name == name) else { return Ok(text.to_string()) };
     let content = read_text(&skill.path).ok_or(format!("Cannot read {}", skill.path.display()))?;
     let body = without_frontmatter(&content);

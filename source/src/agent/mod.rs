@@ -130,6 +130,8 @@ pub enum Event {
     TurnEnd {
         usage: Usage,
         context_tokens: u64,
+        /// Anthropic's names whatever the provider: `end_turn`, `tool_use`, `max_tokens`, `refusal`, `aborted`.
+        stop_reason: String,
     },
     Compacted {
         summary: String,
@@ -146,8 +148,9 @@ pub enum Event {
     },
     /// The session's `project｜topic` name, saved to `session_info`.
     Titled(String),
-    /// Ask mode: the agent waits for one Decision on `reply`.
+    /// Ask mode: the agent waits for one Decision on `reply`. `call` is the tool call asking, None for an edit hook's command.
     Permission {
+        call: Option<String>,
         request: Request,
         reply: Sender<Decision>,
     },
@@ -272,6 +275,10 @@ pub struct Agent {
     pub spent: Spent,
     /// False in print mode: tools that need the user fail instead of waiting.
     pub interactive: bool,
+    /// Someone answers `Event::Ask`: the TUI, or an editor with form elicitation. AskUserQuestion and EnterPlanMode need it.
+    pub asks: bool,
+    /// An ACP editor's terminal, where foreground Bash runs; background runs stay in `terminals`.
+    pub editor_terminal: Option<Arc<dyn tools::EditorTerminal>>,
     /// pi's agent dir, for rebuilding the system prompt after /worktree.
     pub agent_dir: PathBuf,
     pub home: PathBuf,
@@ -439,6 +446,8 @@ impl Agent {
             only_tools: None,
             spent: Spent::default(),
             interactive: false,
+            asks: false,
+            editor_terminal: None,
             plugins: crate::plugins::Plugins::new(&home),
             mcp: crate::mcp::Mcp::new(&home, &cwd),
             snapshots: None,
@@ -583,7 +592,7 @@ impl Agent {
                 goal.tokens_used += reply.usage.input + reply.usage.cache_write + reply.usage.output;
             }
             self.last_context_tokens = reply.context_tokens;
-            emit(Event::TurnEnd { usage: reply.usage, context_tokens: reply.context_tokens });
+            emit(Event::TurnEnd { usage: reply.usage, context_tokens: reply.context_tokens, stop_reason: reply.stop_reason.clone() });
             let aborted = reply.stop_reason == "aborted";
             if aborted {
                 keep_finished_text(&mut reply.message);
@@ -654,7 +663,7 @@ impl Agent {
                         Err(error) => (error, true, None),
                     }
                 } else {
-                    let (output, is_error) = self.run_tool_with_checkpoint(&name, &input, &targets, text, emit)?;
+                    let (output, is_error) = self.run_tool_with_checkpoint(&id, &name, &input, &targets, text, emit)?;
                     (output, is_error, None)
                 };
                 if !is_error {
@@ -706,7 +715,7 @@ impl Agent {
             let input = json!({"command": hook.command, "timeout": 120_000});
             // The directory is part of what gets approved, so a grant does not also cover the command in cwd.
             let approved = json!({"command": format!("cd {} && {}", edit_hooks::shell_quote(&hook.dir.display().to_string()), hook.command), "timeout": 120_000});
-            if let Some(refusal) = self.check_permission("Bash", &approved, &[], user_request, emit) {
+            if let Some(refusal) = self.check_permission(None, "Bash", &approved, &[], user_request, emit) {
                 emit(Event::Notice(format!("[edit-hooks] {} skipped: {refusal}", hook.command)));
                 continue;
             }
@@ -720,7 +729,7 @@ impl Agent {
     }
 
     /// Runs one tool call after the permission check; agent-level tools are handled here, file and shell tools in `tools`.
-    fn run_tool(&mut self, name: &str, input: &Value, targets: &[PathBuf], user_request: &str, emit: &mut dyn FnMut(Event)) -> (String, bool) {
+    fn run_tool(&mut self, id: &str, name: &str, input: &Value, targets: &[PathBuf], user_request: &str, emit: &mut dyn FnMut(Event)) -> (String, bool) {
         if self.abort.load(Ordering::Relaxed) {
             return (ABORTED.into(), true);
         }
@@ -732,7 +741,7 @@ impl Agent {
         if name == "Bash"
             && let Some(read) = guard::file_read(input["command"].as_str().unwrap_or_default())
         {
-            let (output, is_error) = self.run_tool("Read", &read, &[], user_request, emit);
+            let (output, is_error) = self.run_tool(id, "Read", &read, &[], user_request, emit);
             return (format!("Ran as read, so these anchors are what edits use.\n{output}"), is_error);
         }
         if name == "Bash"
@@ -745,7 +754,7 @@ impl Agent {
         {
             return (reason, true);
         }
-        if let Some(reason) = self.check_permission(name, input, targets, user_request, emit) {
+        if let Some(reason) = self.check_permission(Some(id), name, input, targets, user_request, emit) {
             return (reason, true);
         }
         // After the permission check: starting a language server runs the repo's build scripts.
@@ -780,7 +789,7 @@ impl Agent {
             "PushNotification" => self.push_notification(input, emit),
             "WebSearch" | "WebFetch" | "GetSearchContent" => self.web.run(name, input),
             "AskUserQuestion" => self.ask_user(input, emit),
-            _ => return self.plugins.tool(name, input, &self.plugin_context(), &self.abort).or_else(|| self.mcp.tool(name, input, &self.abort)).unwrap_or_else(|| self.run_file_tool(name, input)),
+            _ => return self.plugins.tool(name, input, &self.plugin_context(), &self.abort).or_else(|| self.mcp.tool(name, input, &self.abort)).unwrap_or_else(|| self.run_file_tool(id, name, input)),
         };
         match result {
             Ok(text) => (text, false),
@@ -788,8 +797,11 @@ impl Agent {
         }
     }
 
-    fn run_file_tool(&mut self, name: &str, input: &Value) -> (String, bool) {
-        let (mut output, is_error) = tools::run(name, input, &self.cwd, &mut self.anchors, &self.rtk, &self.abort);
+    fn run_file_tool(&mut self, id: &str, name: &str, input: &Value) -> (String, bool) {
+        let (mut output, is_error) = match &self.editor_terminal {
+            Some(terminal) if name == "Bash" => tools::bash_in_terminal(terminal.as_ref(), id, input, &self.cwd, &self.rtk, &self.abort),
+            _ => tools::run(name, input, &self.cwd, &mut self.anchors, &self.rtk, &self.abort),
+        };
         if name == "Bash"
             && let Some(hint) = conflicts::hint(input["command"].as_str().unwrap_or_default(), &self.cwd)
         {
@@ -1039,6 +1051,7 @@ impl Agent {
                     extra_dirs: self.extra_dirs.clone(),
                     trusted: prompt::is_trusted(&self.trusted_projects, &cwd),
                     web: false,
+                    client_mcp: self.mcp.client_list(),
                 };
                 // The tool reports failure, so this chunk's runs must not keep going; earlier chunks have finished.
                 match subagent::spawn(&self.subagents, launch, background, None, &self.follow_ups) {
@@ -1105,6 +1118,7 @@ impl Agent {
             extra_dirs: self.extra_dirs.clone(),
             trusted: prompt::is_trusted(&self.trusted_projects, &self.cwd),
             web: true,
+            client_mcp: self.mcp.client_list(),
         };
         let host = workflow::Host { runs: self.subagents.clone(), follow_ups: self.follow_ups.clone(), base, models };
         let runs_dir = self.workflow_runs_dir();
@@ -1156,7 +1170,7 @@ impl Agent {
         if *self.plan.lock().unwrap() != Plan::Off {
             return Err("Already in plan mode.".into());
         }
-        if !self.interactive {
+        if !self.asks {
             return Err(ask::NO_UI.into());
         }
         let questions = ask::parse(&json!({"questions": [{
@@ -1340,7 +1354,7 @@ impl Agent {
     }
 
     fn ask_user(&mut self, input: &Value, emit: &mut dyn FnMut(Event)) -> Result<String, String> {
-        if !self.interactive {
+        if !self.asks {
             return Err(ask::NO_UI.into());
         }
         let questions = ask::parse(input)?;
@@ -1350,7 +1364,7 @@ impl Agent {
     }
 
     /// Names a fresh session from its first prompt on a background thread; `prompt` emits the title once it is ready.
-    fn start_naming(&mut self, text: &str) {
+    pub fn start_naming(&mut self, text: &str) {
         let request = self.naming_request(text);
         let (client, session, cwd) = (self.client.clone(), self.session.clone(), self.cwd.clone());
         self.pending_title = Some(std::thread::spawn(move || name_session(&client, &session, &cwd, &request)));
@@ -1412,7 +1426,7 @@ impl Agent {
 
     /// None when the call may run; otherwise the tool result that explains the refusal.
     /// A user's "No" also stops the turn, like Esc.
-    fn check_permission(&mut self, tool: &str, input: &Value, edited_files: &[PathBuf], user_request: &str, emit: &mut dyn FnMut(Event)) -> Option<String> {
+    fn check_permission(&mut self, call: Option<&str>, tool: &str, input: &Value, edited_files: &[PathBuf], user_request: &str, emit: &mut dyn FnMut(Event)) -> Option<String> {
         // A saved workflow is granted by its file, so a project workflow that later shadows the same name asks again.
         let saved_file: Vec<PathBuf> = match (tool, input["name"].as_str()) {
             ("Workflow", Some(name)) => self.saved_workflow(name.trim_start_matches('/')).and_then(|saved| saved.path).into_iter().collect(),
@@ -1428,7 +1442,7 @@ impl Agent {
             return self.review(user_request, &request, input, emit);
         }
         let (reply, answer) = mpsc::channel();
-        emit(Event::Permission { request: request.clone(), reply });
+        emit(Event::Permission { call: call.map(String::from), request: request.clone(), reply });
         match answer.recv().unwrap_or(Decision::Deny) {
             Decision::Allow => None,
             Decision::AllowAlways => {
@@ -1482,25 +1496,31 @@ impl Agent {
     /// None: the work tree is not snapshotted, so files stay as they are.
     pub fn rewind(&mut self, index: usize) -> Result<Option<RestoredFiles>, String> {
         let files = self.snapshots.as_ref().map(|snapshots| restore_files(snapshots, &self.checkpoints, &self.file_checkpoints, index)).transpose()?;
+        self.forget_from(index)?;
+        Ok(files)
+    }
+
+    /// Drops message `index` and every later one from the context, and leaves the files as they are.
+    pub fn forget_from(&mut self, index: usize) -> Result<(), String> {
         self.checkpoints.retain(|checkpoint| checkpoint.at < index);
         self.file_checkpoints.retain(|checkpoint| checkpoint.at < index);
         self.compactions.retain(|compaction| compaction.cut <= index);
         self.messages.truncate(index);
         self.session.append(&json!({"type": "rewind", "index": index}))?;
         self.estimate_context_tokens();
-        Ok(files)
+        Ok(())
     }
 
     /// Snapshots around a tool that can change files, so a rewind touches only what this session changed.
     /// A file another session edits while this call runs still counts as this session's.
-    fn run_tool_with_checkpoint(&mut self, name: &str, input: &Value, targets: &[PathBuf], user_request: &str, emit: &mut dyn FnMut(Event)) -> Result<(String, bool), String> {
+    fn run_tool_with_checkpoint(&mut self, id: &str, name: &str, input: &Value, targets: &[PathBuf], user_request: &str, emit: &mut dyn FnMut(Event)) -> Result<(String, bool), String> {
         const CHANGES_FILES: [&str; 6] = ["Write", "ReplaceLines", "Edit", "InsertLines", "Bash", "Agent"];
         // Before the snapshot: the move swaps the snapshot repo, so before and after would come from different checkouts.
         if name == "Bash"
             && let Some(dir) = tools::cd_target(input["command"].as_str().unwrap_or_default())
         {
             // The auto reviewer trusts calls inside the working directory, so moving it is a call to review.
-            if let Some(reason) = self.check_permission(name, input, targets, user_request, emit) {
+            if let Some(reason) = self.check_permission(Some(id), name, input, targets, user_request, emit) {
                 return Ok((reason, true));
             }
             return Ok(match self.cd(dir, emit) {
@@ -1509,7 +1529,7 @@ impl Agent {
             });
         }
         let Some(snapshots) = self.snapshots.as_ref().filter(|_| CHANGES_FILES.contains(&name)) else {
-            return Ok(self.run_tool(name, input, targets, user_request, emit));
+            return Ok(self.run_tool(id, name, input, targets, user_request, emit));
         };
         let files_before = match save_files_left_out(snapshots, targets) {
             Ok(files) => files,
@@ -1522,10 +1542,10 @@ impl Agent {
             Ok(before) => before,
             Err(error) => {
                 emit(Event::Notice(format!("{SNAPSHOT_FAILED}: {error}")));
-                return Ok(self.run_tool(name, input, targets, user_request, emit));
+                return Ok(self.run_tool(id, name, input, targets, user_request, emit));
             }
         };
-        let result = self.run_tool(name, input, targets, user_request, emit);
+        let result = self.run_tool(id, name, input, targets, user_request, emit);
         let snapshots = self.snapshots.as_ref().expect("checked at the top of run_tool_with_checkpoint");
         let at = self.messages.len();
         for (path, before) in files_before {
@@ -1715,7 +1735,9 @@ impl Agent {
         self.shell_context.push(format!("Session moved from {} to {}. Paths and git state from earlier messages refer to the old checkout.", self.cwd.display(), cwd.display()));
         self.trusted_projects = settings.trusted_projects.clone();
         self.system = prompt::system_prompt(&self.agent_dir, &cwd, settings.trusts(&cwd), |skill| settings.skill_enabled(skill), settings.prefer_global());
+        let editor = self.anchors.editor.take();
         self.anchors = Anchors::new(&session.id);
+        self.anchors.editor = editor;
         self.nested_instructions.clear();
         self.checkpoints.clear();
         self.file_checkpoints.clear();
@@ -1791,10 +1813,13 @@ impl Agent {
             system = format!("{system}\n\n{}", plan::PROMPT);
             list.push(plan::tool());
         }
-        // A one-shot run (-p, --headless, acp, a child) has no UI to ask, plan, notify or schedule in: these tools only fail there.
+        // A one-shot run (-p, --headless, acp, a child) has no UI to notify or schedule in, and asks only through an editor: these tools only fail there.
         if !self.interactive {
-            const NEEDS_UI: [&str; 7] = ["AskUserQuestion", "EnterPlanMode", "PushNotification", "CronCreate", "CronDelete", "CronList", "ScheduleWakeup"];
+            const NEEDS_UI: [&str; 5] = ["PushNotification", "CronCreate", "CronDelete", "CronList", "ScheduleWakeup"];
             list.retain(|tool| !NEEDS_UI.contains(&tool["name"].as_str().unwrap_or_default()));
+        }
+        if !self.asks {
+            list.retain(|tool| tool["name"] != "AskUserQuestion" && tool["name"] != "EnterPlanMode");
         }
         // prompt::system_prompt lists the skills under this tag; with none, Skill has nothing to load.
         if !self.system.contains("<skills>\n") {

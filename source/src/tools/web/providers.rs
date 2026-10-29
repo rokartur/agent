@@ -696,7 +696,7 @@ fn iso_days_ago(days: u64) -> String {
     iso_from_ms(crate::process::now_ms() - days * MS_PER_DAY)
 }
 
-fn iso_from_ms(ms: u64) -> String {
+pub(crate) fn iso_from_ms(ms: u64) -> String {
     let (day_count, ms_of_day) = (ms / MS_PER_DAY, ms % MS_PER_DAY);
     // Hinnant's civil_from_days.
     let z = day_count as i64 + 719_468;

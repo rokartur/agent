@@ -4,7 +4,7 @@ mod fetch;
 mod find;
 mod github;
 mod html;
-mod providers;
+pub(crate) mod providers;
 
 pub use providers::PROVIDERS as SEARCH_PROVIDERS;
 

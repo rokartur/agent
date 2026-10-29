@@ -50,6 +50,7 @@ Commands:
   update                      Check for a newer release now and install it
   doctor [--provider <p>]     Ping every saved account and show its limits; exits 1 if one fails
   acp                         Serve the Agent Client Protocol on stdin and stdout, for editors like Zed
+  acp --login                 Open /login, for an editor's terminal login
 
 Flags:
   --model <id>                Model id, e.g. claude-opus-5-5
@@ -112,6 +113,8 @@ struct Options {
     account: Option<(String, String)>,
     /// `agent acp`: serve the Agent Client Protocol instead of one run.
     acp: bool,
+    /// `agent acp --login`: an editor's terminal login, the TUI on its /login panel.
+    login: bool,
     /// `agent serve`: run the interactive session for the terminals that attach to it; `agent` starts it.
     serve: bool,
     /// --on: the environment the interactive session runs in, over `default_environment`.
@@ -232,6 +235,11 @@ fn main() {
     };
     let result = if options.serve {
         home().and_then(|home| serve::redirect_output(&home)).and_then(|()| run(options))
+    } else if options.login {
+        let login = vec!["/login".to_string()];
+        parse_args(login.clone()).and_then(|options| open_session(&options, &login))
+    } else if options.acp && std::env::var_os(acp::SESSION_ENV).is_none() {
+        acp::route(&args)
     } else if !(options.acp || options.headless || options.print || options.json) && std::io::stdout().is_terminal() {
         open_session(&options, &args)
     } else {
@@ -256,6 +264,7 @@ fn parse_args(args: Vec<String>) -> Result<Options, String> {
             return Err("Pass one of -c and --resume.".into());
         }
         match arg.as_str() {
+            "--login" if acp => options.login = true,
             "--model" => options.model = Some(value("--model")?),
             "--tools" => options.tools = Some(value("--tools")?.split(',').map(|name| name.trim().to_string()).filter(|name| !name.is_empty()).collect()),
             "--thinking" => {
@@ -332,8 +341,8 @@ fn parse_args(args: Vec<String>) -> Result<Options, String> {
         return Err("--on starts an interactive session, so it takes no acp, -p, --json, --headless or --parent.".into());
     }
     let picks_session = matches!(options.resume, Some(Resume::Pick));
-    if options.acp && (options.print || options.json || options.headless || options.prompt.is_some() || picks_session) {
-        return Err("acp reads its messages from the editor, so it takes no message, -p, --json, --headless or -r without an id.".into());
+    if options.acp && (options.print || options.json || options.headless || options.prompt.is_some() || options.resume.is_some()) {
+        return Err("acp opens the editor's sessions, so it takes no message, -p, --json, --headless, -c or -r.".into());
     }
     if picks_session && (options.print || options.json || options.headless || options.parent.is_some()) {
         return Err("--resume without an id opens the session list, so it needs the interactive mode.".into());
@@ -534,6 +543,10 @@ fn run(options: Options) -> Result<(), String> {
     let mut agent = Agent::new(client, &settings, home.clone(), cwd, session, sessions_dir, options.parent.clone());
     agent.plugins.sync(&settings.disabled_plugins, &settings.plugin_settings);
     agent.mcp.sync(&settings.disabled_mcp, &settings.approved_mcp);
+    if let Ok(list) = std::env::var(mcp::CLIENT_SERVERS_ENV) {
+        let list = serde_json::from_str(&list).map_err(|e| format!("{}: {e}", mcp::CLIENT_SERVERS_ENV))?;
+        agent.mcp.set_client_servers(&list, &settings.disabled_mcp, &settings.approved_mcp)?;
+    }
     agent.load(history);
     for dir in &options.add_dirs {
         agent.add_dir(dir)?;
@@ -581,8 +594,12 @@ fn run(options: Options) -> Result<(), String> {
                 eprintln!("{notice}");
             }
         }
-        if let Some(notice) = agent.settle_model(&mut settings)? {
-            eprintln!("{notice}");
+        match agent.settle_model(&mut settings) {
+            Ok(Some(notice)) => eprintln!("{notice}"),
+            Ok(None) => {}
+            // An editor asks for a login when session/new finds no model to run, which it cannot show if this exits.
+            Err(error) if options.acp => eprintln!("{error}"),
+            Err(error) => return Err(error),
         }
         agent.announce_session();
         // After settle_model, which resets the tools. Only the root spawns, runs terminals and searches the web, and a child has no UI to ask in.
@@ -638,6 +655,7 @@ fn run(options: Options) -> Result<(), String> {
         return result;
     }
     agent.interactive = true;
+    agent.asks = true;
     // Its card is how `agent attach` finds this session, so a session server without one would be unreachable.
     agent.inbox = Some(agent::peers::open(&home, &agent.follow_ups).map_err(|error| format!("Cannot list this session for agent attach: {error}"))?);
     agent.describe_to_peers(false);
@@ -688,7 +706,7 @@ fn print_mode(agent: &mut Agent, prompt: &str, json: bool) -> Result<(), String>
         Event::ToolStart { name, input, .. } if !json => eprintln!("· {} {}", terminal_safe(&name), terminal_safe(&preview(&input))),
         Event::Notice(text) => eprintln!("{}", terminal_safe(&text)),
         Event::SubagentDone(run) => eprintln!("{}", terminal_safe(&run.summary())),
-        Event::Permission { request, reply } => {
+        Event::Permission { request, reply, .. } => {
             eprintln!("Denied {}: {} (print mode cannot ask; use --auto or --full-access)", request.kind.label(), terminal_safe(&request.detail));
             let _ = reply.send(Decision::Deny);
         }
@@ -800,7 +818,12 @@ mod tests {
         assert!(options.acp && options.prompt.is_none());
         assert!(super::parse_args(args(&["acp", "hi"])).is_err());
         assert!(super::parse_args(args(&["acp", "-p"])).is_err());
+        // The editor opens sessions itself, and every session's process gets these flags.
+        assert!(super::parse_args(args(&["acp", "-c"])).is_err());
+        assert!(super::parse_args(args(&["acp", "-r", "abc123"])).is_err());
         assert!(!super::parse_args(args(&["-p", "acp"])).unwrap().acp);
+        assert!(super::parse_args(args(&["acp", "--login"])).unwrap().login);
+        assert!(super::parse_args(args(&["--login"])).is_err());
     }
 
     #[test]

@@ -84,8 +84,8 @@ fn collect_undeclared(value: &Value, schema: &Value, at: &str, undeclared: &mut 
 pub fn run(name: &str, input: &Value, cwd: &Path, anchors: &mut Anchors, rtk: &Rtk, abort: &AtomicBool) -> (String, bool) {
     let result = match name {
         "Read" => anchors.read(cwd, input),
-        "Bash" => bash(input, cwd, rtk, abort),
-        "Write" => write(input, cwd),
+        "Bash" => bash(input, cwd, rtk, abort, None),
+        "Write" => write(input, cwd, anchors.editor.as_deref()),
         "ReplaceLines" => anchors.replace(input),
         "Edit" => anchors.replace_match(cwd, input),
         "InsertLines" => anchors.insert(input),
@@ -115,26 +115,51 @@ pub fn cd_target(command: &str) -> Option<&str> {
 /// Claude Code's default: a command stuck in a loop costs two minutes, not the rest of the turn.
 const DEFAULT_BASH_TIMEOUT_MS: f64 = 120_000.0;
 
-enum Killed {
+pub enum Killed {
     Timeout,
     Aborted,
 }
 
-fn bash(input: &Value, cwd: &Path, rtk: &Rtk, abort: &AtomicBool) -> Result<String, String> {
+/// An editor's terminal, where a foreground Bash command runs so the user watches it (ACP's terminal methods).
+pub trait EditorTerminal: Send + Sync {
+    /// Runs `script` with `bash -c` in `cwd` for tool call `call`, killing it once `abort` is set or `deadline` passes:
+    /// its output, exit code, and why it was killed.
+    fn run(&self, call: &str, script: &str, cwd: &Path, abort: &AtomicBool, deadline: Option<Instant>) -> Result<(String, i32, Option<Killed>), String>;
+}
+
+/// Bash call `call` in the editor's terminal; the model gets the same text as from `run`.
+pub fn bash_in_terminal(terminal: &dyn EditorTerminal, call: &str, input: &Value, cwd: &Path, rtk: &Rtk, abort: &AtomicBool) -> (String, bool) {
+    match bash(input, cwd, rtk, abort, Some((terminal, call))) {
+        Ok(text) => (text, false),
+        Err(text) => (text, true),
+    }
+}
+
+fn bash(input: &Value, cwd: &Path, rtk: &Rtk, abort: &AtomicBool, terminal: Option<(&dyn EditorTerminal, &str)>) -> Result<String, String> {
     let command = rtk.rewrite(str_arg(input, "command")?);
     let timeout = input["timeout"].as_f64().filter(|ms| *ms > 0.0).unwrap_or(DEFAULT_BASH_TIMEOUT_MS);
     // A timeout too large for an Instant is no timeout.
     let deadline = Instant::now().checked_add(Duration::try_from_secs_f64(timeout / 1000.0).unwrap_or(Duration::MAX));
-    let child = process::command("bash").arg("-c").arg(format!("exec 2>&1; {command}")).current_dir(cwd).stdout(Stdio::piped()).spawn().map_err(|e| format!("Cannot start bash: {e}"))?;
+    let script = format!("exec 2>&1; {command}");
     let mut capture = Capture::default();
-    let (status, killed) = wait_streaming(child, abort, deadline, |chunk| capture.push(chunk))?;
+    let (code, killed) = match terminal {
+        Some((terminal, call)) => {
+            let (output, code, killed) = terminal.run(call, &script, cwd, abort, deadline)?;
+            capture.push(output.as_bytes());
+            (code, killed)
+        }
+        None => {
+            let child = process::command("bash").arg("-c").arg(script).current_dir(cwd).stdout(Stdio::piped()).spawn().map_err(|e| format!("Cannot start bash: {e}"))?;
+            let (status, killed) = wait_streaming(child, abort, deadline, |chunk| capture.push(chunk))?;
+            (exit_code(status), killed)
+        }
+    };
     let output = truncate_tail(rtk.strip(String::from_utf8_lossy(&capture.text).into_owned()), rtk.max_bytes, capture.spilled());
     match killed {
         Some(Killed::Timeout) => return Err(append_status(&output, &format!("Command timed out after {timeout} ms. Pass a larger `timeout` for a long build or test, or `run_in_background: true`."))),
         Some(Killed::Aborted) => return Err(append_status(&output, "Command aborted")),
         None => {}
     }
-    let code = exit_code(status);
     if code != 0 {
         return Err(append_status(&output, &format!("Command exited with code {code}")));
     }
@@ -253,7 +278,7 @@ fn append_status(output: &str, status: &str) -> String {
     if output.is_empty() { status.to_string() } else { format!("{output}\n\n{status}") }
 }
 
-fn write(input: &Value, cwd: &Path) -> Result<String, String> {
+fn write(input: &Value, cwd: &Path, editor: Option<&dyn hashline::EditorFiles>) -> Result<String, String> {
     let path = resolve(cwd, str_arg(input, "file_path")?);
     let content = str_arg(input, "content")?;
     if let Some(parent) = path.parent() {
@@ -269,8 +294,12 @@ fn write(input: &Value, cwd: &Path) -> Result<String, String> {
     {
         return Err(format!("Cannot read {}: {e}", path.display()));
     }
-    hashline::replace_file(&path, content.as_bytes())?;
-    let path = path.canonicalize().map_err(|e| e.to_string())?;
+    match editor.filter(|editor| editor.serves(&path)) {
+        Some(editor) => editor.write(&path, content)?,
+        None => hashline::replace_file(&path, content.as_bytes())?,
+    }
+    // An editor may keep a new file as an unsaved buffer, which canonicalize cannot find on disk.
+    let path = path.canonicalize().unwrap_or(path);
     // No echo of the content: it is already in the call, and every later turn would pay for it twice.
     Ok(format!("Wrote {} lines to {}.", content.lines().count(), path.display()))
 }
