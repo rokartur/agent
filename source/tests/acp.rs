@@ -506,6 +506,42 @@ fn a_session_open_in_another_process_does_not_load_into_a_copy() {
 }
 
 #[test]
+fn a_cancel_right_behind_the_prompt_still_cancels_it() {
+    let home = Home::new("cancel-early");
+    let api = fake_api(vec![reply(&[tool_use("toolu_touch", "Bash", json!({"command": "touch made"}))], "tool_use"), reply(&[text("Done.")], "end_turn")]);
+    let mut editor = Editor::start(&home, &api);
+    let session_id = editor.new_session(&home.project());
+
+    let prompt = editor.start_request("session/prompt", json!({"sessionId": session_id, "prompt": [{"type": "text", "text": "Make a file."}]}));
+    editor.send(&json!({"jsonrpc": "2.0", "method": "session/cancel", "params": {"sessionId": session_id}}));
+
+    assert_eq!(editor.answer(prompt, "session/prompt")["result"], json!({"stopReason": "cancelled"}));
+    assert!(!home.project().join("made").exists());
+}
+
+#[test]
+fn a_mode_change_during_a_turn_applies_to_its_next_tool_call() {
+    let home = Home::new("mode-mid-turn");
+    let api = fake_api(vec![
+        reply(&[tool_use("toolu_sleep", "Bash", json!({"command": "sleep 2"}))], "tool_use"),
+        reply(&[tool_use("toolu_touch", "Bash", json!({"command": "touch made"}))], "tool_use"),
+        reply(&[text("Done.")], "end_turn"),
+    ]);
+    let mut editor = Editor::start(&home, &api);
+    let session_id = editor.new_session(&home.project());
+    editor.request("session/set_mode", json!({"sessionId": session_id, "modeId": "full-access"})).unwrap();
+    let prompt = editor.start_request("session/prompt", json!({"sessionId": session_id, "prompt": [{"type": "text", "text": "Wait, then make a file."}]}));
+    editor.until("the sleep's tool call", |message| message["params"]["update"]["sessionUpdate"] == "tool_call");
+
+    let ask = editor.start_request("session/set_mode", json!({"sessionId": session_id, "modeId": "ask"}));
+
+    editor.answer(prompt, "session/prompt");
+    editor.answer(ask, "session/set_mode");
+    let asked: Vec<&Value> = editor.seen.iter().filter(|message| message["method"] == "session/request_permission").map(|message| &message["params"]["toolCall"]["toolCallId"]).collect();
+    assert_eq!(asked, [&json!("toolu_touch")]);
+}
+
+#[test]
 fn closing_a_session_cancels_its_running_turn() {
     let home = Home::new("close-running");
     let api = fake_api(vec![reply(&[tool_use("toolu_sleep", "Bash", json!({"command": "sleep 120"}))], "tool_use")]);

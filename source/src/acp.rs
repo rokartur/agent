@@ -34,7 +34,7 @@ const REQUEST_CANCELLED: i64 = -32800;
 
 pub fn serve(agent: &mut Agent) -> Result<(), String> {
     let cancelled = Arc::new(AtomicBool::new(false));
-    let (requests, replies) = read_stdin(agent.abort.clone(), cancelled.clone());
+    let (requests, replies) = read_stdin(agent.abort.clone(), cancelled.clone(), agent.permission_mode.clone());
     let replies = Arc::new(Mutex::new(replies));
     let mut connection = Connection { replies, cancelled, session_id: String::new(), client: Value::Null, commands: Commands::default(), editor_client: None };
     for message in requests {
@@ -64,7 +64,7 @@ pub fn serve(agent: &mut Agent) -> Result<(), String> {
 /// Requests go to the first receiver, replies to our permission requests to the second.
 /// session/cancel sets the abort flag here, since the main thread is busy in the turn it cancels.
 /// A denied tool call aborts the turn too, so `cancelled` tells the two apart.
-fn read_stdin(abort: Arc<AtomicBool>, cancelled: Arc<AtomicBool>) -> (Receiver<Value>, Receiver<Value>) {
+fn read_stdin(abort: Arc<AtomicBool>, cancelled: Arc<AtomicBool>, permission_mode: Arc<Mutex<Mode>>) -> (Receiver<Value>, Receiver<Value>) {
     let (requests, request_rx) = mpsc::channel();
     let (replies, reply_rx) = mpsc::channel();
     std::thread::spawn(move || {
@@ -89,6 +89,20 @@ fn read_stdin(abort: Arc<AtomicBool>, cancelled: Arc<AtomicBool>) -> (Receiver<V
                 Some("session/close") => {
                     cancelled.store(true, Ordering::Relaxed);
                     abort.store(true, Ordering::Relaxed);
+                    requests.send(message).map_err(|_| ())
+                }
+                // A new turn: a cancel that came before it was for an earlier one.
+                Some("session/prompt") => {
+                    cancelled.store(false, Ordering::Relaxed);
+                    requests.send(message).map_err(|_| ())
+                }
+                // Now and not after the running turn, as check_permission reads the mode before each call.
+                Some("session/set_mode" | "session/set_config_option") => {
+                    let params = &message["params"];
+                    let asked = if params["configId"] == "mode" { &params["value"] } else { &params["modeId"] };
+                    if let Ok(mode) = mode_by_id(asked.as_str().unwrap_or_default()) {
+                        *permission_mode.lock().unwrap() = mode;
+                    }
                     requests.send(message).map_err(|_| ())
                 }
                 Some(_) => requests.send(message).map_err(|_| ()),
@@ -222,6 +236,10 @@ fn handle(agent: &mut Agent, connection: &mut Connection, message: &Value) -> Re
             send(&json!({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": session_id, "update": commands.update()}}));
             let text = commands.expand(&prompt_text(&params["prompt"])).map_err(|error| (INTERNAL_ERROR, error))?;
             let images: Vec<Value> = image_blocks(&params["prompt"]).map(crate::image::from_base64).collect::<Result<_, _>>().map_err(|error| (INVALID_PARAMS, error))?;
+            // A cancel during the work above, which agent.prompt would forget as it clears the abort flag.
+            if cancelled.load(Ordering::Relaxed) {
+                return Ok(json!({"stopReason": "cancelled"}));
+            }
             agent.images.extend(images);
             // Only the TUI's sessions name themselves, and an editor lists its sessions by title.
             if agent.messages.is_empty() {
@@ -236,7 +254,6 @@ fn handle(agent: &mut Agent, connection: &mut Connection, message: &Value) -> Re
                 editor: editor_client.clone(),
                 ..Turn::default()
             };
-            cancelled.store(false, Ordering::Relaxed);
             let mut on_event = |event: Event| match event {
                 Event::Permission { call, request, reply } => {
                     let tool_call = turn.permission_tool_call(call.as_deref(), &request);
