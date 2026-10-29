@@ -317,7 +317,7 @@ fn a_permission_request_names_the_call_and_shows_its_input() {
 
     let asked = editor.seen.iter().find(|message| message["method"] == "session/request_permission").expect("a permission request");
     let tool_call = &asked["params"]["toolCall"];
-    assert_eq!((&asked["id"], &tool_call["toolCallId"], &tool_call["kind"]), (&json!("permission-toolu_touch"), &json!("toolu_touch"), &json!("execute")));
+    assert_eq!((&tool_call["toolCallId"], &tool_call["kind"]), (&json!("toolu_touch"), &json!("execute")));
     assert_eq!(tool_call["rawInput"], json!({"command": "touch made"}));
     assert!(home.project().join("made").exists());
     // Zed keeps the title a permission request gives the card, so the answer gives the call its own title back.
@@ -404,9 +404,10 @@ fn two_sessions_run_side_by_side_each_in_its_own_directory() {
     let other = home.dir.join("other");
     std::fs::create_dir(&other).unwrap();
     let api = fake_api(vec![
-        reply(&[tool_use("toolu_b", "Bash", json!({"command": "touch b"}))], "tool_use"),
+        // The same tool call id in both sessions, as llama.cpp gives every first call.
+        reply(&[tool_use("call_0", "Bash", json!({"command": "touch b"}))], "tool_use"),
         reply(&[text("Made b.")], "end_turn"),
-        reply(&[tool_use("toolu_a", "Bash", json!({"command": "touch a"}))], "tool_use"),
+        reply(&[tool_use("call_0", "Bash", json!({"command": "touch a"}))], "tool_use"),
         reply(&[text("Made a.")], "end_turn"),
     ]);
     let mut editor = Editor::start(&home, &api);
@@ -419,6 +420,9 @@ fn two_sessions_run_side_by_side_each_in_its_own_directory() {
     assert_ne!(first, second);
     assert!(other.join("b").exists() && home.project().join("a").exists());
     assert!(!home.project().join("b").exists() && !other.join("a").exists());
+    // The router keys the editor's replies by id across every session's process.
+    let asked: Vec<&Value> = editor.seen.iter().filter(|message| message["method"] == "session/request_permission").map(|message| &message["id"]).collect();
+    assert!(asked.len() == 2 && asked[0] != asked[1], "{asked:?}");
     assert!(editor.prompt("no-such-session", "Hi.").unwrap_err().contains("Unknown session"));
     assert!(editor.request("session/new", json!({"cwd": "relative/dir", "mcpServers": []})).is_err());
     assert!(editor.request("session/new", json!({"cwd": home.project(), "mcpServers": [], "additionalDirectories": [other]})).is_ok());

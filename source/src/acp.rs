@@ -223,8 +223,8 @@ fn handle(agent: &mut Agent, connection: &mut Connection, message: &Value) -> Re
             let mut on_event = |event: Event| match event {
                 Event::Permission { call, request, reply } => {
                     let tool_call = turn.permission_tool_call(call.as_deref(), &request);
-                    // Tool call ids are unique, so a late reply from an earlier turn cannot answer this request.
-                    let id = format!("permission-{}", tool_call["toolCallId"].as_str().unwrap_or_default());
+                    // The pid too: tool call ids repeat across sessions (`call_0`), and the router keys replies by id.
+                    let id = format!("permission-{}-{}", std::process::id(), tool_call["toolCallId"].as_str().expect("permission_tool_call sets a toolCallId"));
                     send(&json!({"jsonrpc": "2.0", "id": id, "method": "session/request_permission", "params": {
                         "sessionId": session_id,
                         "toolCall": tool_call,
@@ -690,7 +690,7 @@ impl Turn {
     fn permission_tool_call(&self, call: Option<&str>, request: &Request) -> Value {
         let title = format!("{} {}", request.question, request.detail);
         let Some(mut tool_call) = call.and_then(|id| self.started.get(id)).cloned() else {
-            let id = format!("edit-hook-{}", crate::process::now_ms());
+            let id = format!("edit-hook-{}-{}", std::process::id(), crate::process::now_ms());
             return json!({"toolCallId": id, "title": title, "kind": "execute", "status": "pending"});
         };
         if let Some(fields) = tool_call.as_object_mut() {
