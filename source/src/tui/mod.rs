@@ -554,7 +554,7 @@ const HOTKEYS: [(&str, &[(&str, &str)]); 4] = [
             ("Enter", "send; while working, steers the turn or waits for it to end, per Messages while working"),
             (if cfg!(target_os = "macos") { "Option+Enter" } else { "Alt+Enter" }, "while working, send the other way; otherwise a new line"),
             ("Shift+Enter", "new line (also Ctrl+J)"),
-            ("Tab", "complete a slash command or an @path"),
+            ("Tab", "complete a /command, a $skill or an @path"),
             ("Up, Down", "history, menu selection"),
             ("Ctrl+R", "search previous prompts"),
             (if cfg!(target_os = "macos") { "Option+Up" } else { "Alt+Up" }, "edit queued messages"),
@@ -2292,6 +2292,7 @@ impl App {
     /// `flip` sends a mid-turn message the other way than `mid_turn` says.
     fn submit(&mut self, text: String, flip: bool) {
         self.scroll = 0;
+        let text = self.skill_command(text);
         // A side question and /goal pause work mid-turn, so they skip the steering queue.
         if let Some(question) = command_args(&text, "/btw") {
             self.open_btw(question);
@@ -2500,7 +2501,7 @@ impl App {
             "hotkeys" => self.push(Item::Lines(hotkeys_lines())),
             "help" => {
                 let mut lines: Vec<String> = self.slash_commands.iter().map(|(name, description)| format!("/{name:<14}\t{description}")).collect();
-                lines.push(format!("/{:<14}\trun a skill ({} loaded)", "skill:<name>", self.enabled_skills().count()));
+                lines.push(format!("{:<15}\trun a skill ({} loaded)", "$<name>", self.enabled_skills().count()));
                 lines.push(format!("/{:<14}\trun a prompt ({} loaded)", "prompt:<name>", self.templates.len()));
                 lines.push(format!("/{:<14}\tturn a skill profile on or off ({} defined)", "profile:<name>", self.settings.skill_profiles.len()));
                 self.system("help", format!("{} commands\n{}", lines.len(), lines.join("\n")));
@@ -4397,13 +4398,11 @@ impl App {
             None => {
                 // A closed menu forgets its listing, so typing `@` again sees files created since.
                 self.path_matches.take();
-                let skills = self.enabled_skills().map(|skill| (format!("skill:{}", skill.name), skill.description.split_whitespace().collect::<Vec<_>>().join(" ")));
                 if let Some(word) = self.skill_query() {
-                    let query = format!("/skill:{}", word.trim_start_matches('/').trim_start_matches("skill:"));
-                    return matching_commands(&skills.collect::<Vec<_>>(), &query);
+                    let skills: Vec<_> = self.enabled_skills().map(|skill| (skill.name.clone(), skill.description.split_whitespace().collect::<Vec<_>>().join(" "))).collect();
+                    return matching_commands(&skills, &format!("/{word}"));
                 }
                 let mut commands = self.slash_commands.clone();
-                commands.extend(skills);
                 commands.extend(self.templates.iter().map(|template| (format!("prompt:{}", template.name), template.description.clone())));
                 commands.extend(self.settings.skill_profiles.keys().map(|profile| {
                     let action = if self.settings.active_profiles.contains(profile) { "turn off" } else { "turn on" };
@@ -4452,21 +4451,28 @@ impl App {
         cached.1.clone()
     }
 
-    /// A `/` word right before the cursor with text in front of it: there the menu offers only skills.
+    /// The `$` word right before the cursor, without the `$`. A shell line's `$HOME` and a price's `$5` open no menu.
     fn skill_query(&self) -> Option<&str> {
         let before = self.editor.before_cursor();
-        let word = before.rsplit(char::is_whitespace).next()?;
-        (word.starts_with('/') && word.len() < before.len()).then_some(word)
+        let word = before.rsplit(char::is_whitespace).next()?.strip_prefix('$')?;
+        (!before.starts_with('!') && !word.starts_with(|c: char| c.is_ascii_digit())).then_some(word)
+    }
+
+    /// A leading `$name` of an enabled skill becomes the `/skill:name` command.
+    fn skill_command(&self, text: String) -> String {
+        let Some(rest) = text.trim_start().strip_prefix('$') else { return text };
+        let name = rest.split_once(char::is_whitespace).map_or(rest, |(name, _)| name);
+        if self.enabled_skills().any(|skill| skill.name == name) { format!("/skill:{rest}") } else { text }
     }
 
     fn accept_skill(&mut self, name: &str) {
-        let typed = self.skill_query().map_or(0, |word| word.chars().count());
+        let typed = self.skill_query().map_or(0, |word| word.chars().count() + 1);
         for _ in 0..typed {
             self.editor.backspace();
         }
-        // Only a leading `/skill:` expands on submit, so the pick moves to the front.
+        // Only a leading `$name` expands on submit, so the pick moves to the front.
         let text = self.editor.text();
-        self.editor.set(&format!("/{name} {}", text.trim_start()));
+        self.editor.set(&format!("${name} {}", text.trim_start()));
         self.menu_index = 0;
     }
 
@@ -4489,7 +4495,6 @@ impl App {
         let matches = self.menu_matches();
         let name = matches[self.menu_index.min(matches.len() - 1)].0.clone();
         let takes_args = matches!(name.as_str(), "thinking" | "rename-title" | "btw" | "goal" | "import" | "workspace add" | "workspace remove")
-            || name.starts_with("skill:")
             || name.starts_with("prompt:")
             || self.saved_workflows.iter().any(|saved| saved.meta.name == name);
         let text = self.editor.text();
@@ -4782,6 +4787,9 @@ impl App {
             self.editor_width = width;
         }
         let (mut editor_rows, (cursor_x, cursor_row)) = self.editor.render(width);
+        if self.editor.text().is_empty() {
+            editor_rows[0].push(span("Ask anything, / commands, $ skills, @ files", DIM));
+        }
         let editor_top = bottom.len();
         let shown = editor_rows.len().min(EDITOR_ROWS);
         self.input_top = self.input_top.clamp((cursor_row + 1).saturating_sub(shown), cursor_row).min(editor_rows.len() - shown);
