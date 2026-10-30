@@ -285,9 +285,11 @@ fn offered(server: &str, tools: Vec<Value>) -> Vec<Tool> {
     let mut offered = Vec::new();
     for tool in tools {
         let Some(name) = tool["name"].as_str() else { continue };
+        // Anthropic's BM25 tool search does not split `mcp__zed-echo__echo`, so a search for "echo" misses it without these words.
+        let description = format!("MCP server {server}, tool {name}. {}", tool["description"].as_str().unwrap_or_default());
         let schema = json!({
             "name": tool_name(server, name),
-            "description": tool["description"].as_str().unwrap_or_default(),
+            "description": description.trim_end(),
             "input_schema": if tool["inputSchema"].is_object() { tool["inputSchema"].clone() } else { json!({"type": "object", "properties": {}}) },
         });
         offered.push(Tool { name: name.to_string(), schema });
@@ -346,6 +348,7 @@ for line in sys.stdin:
         let names: Vec<_> = mcp.tools().iter().map(|tool| tool["name"].clone()).collect();
         assert_eq!(names, ["mcp__fake__echo", "mcp__fake__fail"]);
         assert_eq!(mcp.tools()[1]["input_schema"], json!({"type": "object", "properties": {}}));
+        assert_eq!((mcp.tools()[0]["description"].as_str(), mcp.tools()[1]["description"].as_str()), (Some("MCP server fake, tool echo. Echoes"), Some("MCP server fake, tool fail.")));
         let never = AtomicBool::new(false);
         assert_eq!(mcp.tool("mcp__fake__echo", &json!({"text": "hi"}), &never), Some(("hi".into(), false)));
         assert_eq!(mcp.tool("mcp__fake__fail", &json!({}), &never), Some(("boom".into(), true)));
