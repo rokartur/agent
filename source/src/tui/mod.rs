@@ -673,8 +673,8 @@ struct App {
     /// This session's usage per model, priced at render so the footer cost appears once the catalog loads.
     session_usage: Vec<ModelTotal>,
     cwd: PathBuf,
-    /// The `@` menu's last listing and the cwd-joined query it answers.
-    path_matches: std::cell::RefCell<(PathBuf, Vec<(String, String)>)>,
+    /// The path menu's last listing and the cwd and query it answers.
+    path_matches: std::cell::RefCell<(String, Vec<(String, String)>)>,
     git: Git,
     /// When the next background git read starts; None while one runs.
     git_due: Option<Instant>,
@@ -1837,6 +1837,15 @@ impl App {
             match key.code {
                 KeyCode::Up => self.menu_index = (self.menu_index.min(menu_len - 1) + menu_len - 1) % menu_len,
                 KeyCode::Down => self.menu_index = (self.menu_index.min(menu_len - 1) + 1) % menu_len,
+                KeyCode::Tab if self.workspace_query().is_some() => {
+                    let path = matches[self.menu_index.min(menu_len - 1)].0.clone();
+                    self.accept_path(&path);
+                }
+                KeyCode::Enter if self.workspace_query().is_some() => {
+                    let path = matches[self.menu_index.min(menu_len - 1)].0.clone();
+                    self.accept_path(&path);
+                    self.edit(key, ctrl, alt, shift);
+                }
                 KeyCode::Tab | KeyCode::Enter if self.file_query().is_some() => {
                     let path = &matches[self.menu_index.min(menu_len - 1)].0;
                     self.accept_path(path);
@@ -4380,15 +4389,11 @@ impl App {
     }
 
     fn menu_matches(&self) -> Vec<(String, String)> {
+        if let Some(query) = self.workspace_query() {
+            return self.workspace_matches(query);
+        }
         match self.file_query() {
-            Some(query) => {
-                // Redraws repeat every 80 ms while the agent works, so the listing runs once per typed query.
-                let mut cached = self.path_matches.borrow_mut();
-                if cached.0 != self.cwd.join(query) {
-                    *cached = (self.cwd.join(query), matching_paths(&self.cwd, query));
-                }
-                cached.1.clone()
-            }
+            Some(query) => self.listed_paths(query),
             None => {
                 // A closed menu forgets its listing, so typing `@` again sees files created since.
                 self.path_matches.take();
@@ -4416,6 +4421,37 @@ impl App {
         self.editor.before_cursor().rsplit(char::is_whitespace).next()?.strip_prefix('@')
     }
 
+    /// The path typed after `/workspace add ` or `/workspace remove `, up to the cursor.
+    fn workspace_query(&self) -> Option<&str> {
+        let before = self.editor.before_cursor();
+        before.strip_prefix("/workspace add ").or_else(|| before.strip_prefix("/workspace remove "))
+    }
+
+    /// Remove offers the added directories; add offers directories, led by the typed one once it ends in `/` so Enter can add it.
+    fn workspace_matches(&self, query: &str) -> Vec<(String, String)> {
+        if self.editor.before_cursor().starts_with("/workspace remove ") {
+            let added = self.extra_dirs.iter().map(|dir| dir.display().to_string());
+            return added.filter(|dir| dir.starts_with(query)).map(|dir| (dir, String::new())).collect();
+        }
+        let mut dirs = Vec::new();
+        if query.ends_with('/') && crate::tools::hashline::resolve(&self.cwd, query).is_dir() {
+            dirs.push((query.to_string(), "this directory".to_string()));
+        }
+        dirs.extend(self.listed_paths(query).into_iter().filter(|(path, _)| path.ends_with('/')));
+        dirs
+    }
+
+    /// Redraws repeat every 80 ms while the agent works, so the listing runs once per typed query.
+    /// Keyed by the text, not a `Path`: `..` and `../` compare equal as paths but list different entries.
+    fn listed_paths(&self, query: &str) -> Vec<(String, String)> {
+        let mut cached = self.path_matches.borrow_mut();
+        let key = format!("{}\n{query}", self.cwd.display());
+        if cached.0 != key {
+            *cached = (key, matching_paths(&self.cwd, query));
+        }
+        cached.1.clone()
+    }
+
     /// A `/` word right before the cursor with text in front of it: there the menu offers only skills.
     fn skill_query(&self) -> Option<&str> {
         let before = self.editor.before_cursor();
@@ -4436,7 +4472,7 @@ impl App {
 
     /// Swaps the typed query for the path; a directory keeps the menu open for its entries.
     fn accept_path(&mut self, path: &str) {
-        let typed = self.file_query().map_or(0, |query| query.chars().count());
+        let typed = self.file_query().or(self.workspace_query()).map_or(0, |query| query.chars().count());
         for _ in 0..typed {
             self.editor.backspace();
         }
@@ -4452,7 +4488,7 @@ impl App {
     fn accept_slash(&mut self, run: bool) {
         let matches = self.menu_matches();
         let name = matches[self.menu_index.min(matches.len() - 1)].0.clone();
-        let takes_args = matches!(name.as_str(), "thinking" | "rename-title" | "btw" | "goal" | "import")
+        let takes_args = matches!(name.as_str(), "thinking" | "rename-title" | "btw" | "goal" | "import" | "workspace add" | "workspace remove")
             || name.starts_with("skill:")
             || name.starts_with("prompt:")
             || self.saved_workflows.iter().any(|saved| saved.meta.name == name);
@@ -5545,6 +5581,7 @@ fn matching_args(name: &str, arg: &str) -> Vec<(String, String)> {
             ("exit", "Leave plan mode, dropping a ready plan"),
         ],
         "context-window" => vec![("auto", "Drop this model's override")],
+        "workspace" => vec![("add", "Add a directory"), ("remove", "Remove an added directory"), ("list", "List the added directories")],
         _ => return Vec::new(),
     };
     let arg = arg.to_lowercase();
@@ -5562,7 +5599,7 @@ fn matching_args(name: &str, arg: &str) -> Vec<(String, String)> {
 /// A query without a `/` also lists deeper paths whose names start with it, after the top-level ones.
 fn matching_paths(cwd: &Path, query: &str) -> Vec<(String, String)> {
     let (dir, prefix) = query.split_at(query.rfind('/').map_or(0, |slash| slash + 1));
-    let Ok(entries) = std::fs::read_dir(cwd.join(dir)) else { return Vec::new() };
+    let Ok(entries) = std::fs::read_dir(crate::tools::hashline::resolve(cwd, dir)) else { return Vec::new() };
     let prefix = prefix.to_lowercase();
     let mut paths = Vec::new();
     for entry in entries.flatten() {
@@ -6585,6 +6622,7 @@ mod tests {
         assert_eq!(names("/thinking m"), ["thinking minimal", "thinking medium", "thinking max"]);
         assert_eq!(names("/permissions "), ["permissions ask", "permissions auto", "permissions full access"]);
         assert_eq!(names("/plan e"), ["plan export", "plan exit"]);
+        assert_eq!(names("/workspace r"), ["workspace remove"]);
         assert!(names("/thinking medium ").is_empty());
     }
 
