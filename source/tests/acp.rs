@@ -426,6 +426,29 @@ fn the_editor_sets_the_permission_mode_model_and_effort_of_the_next_prompt() {
 }
 
 #[test]
+fn a_loaded_session_keeps_the_mode_model_and_effort_it_last_ran_with() {
+    let home = Home::new("config-load");
+    let api = fake_api(vec![reply(&[text("Done.")], "end_turn")]);
+    let mut editor = Editor::start(&home, &api);
+    let session_id = editor.new_session(&home.project());
+    let set = |editor: &mut Editor, config_id: &str, value: &str| editor.request("session/set_config_option", json!({"sessionId": session_id, "configId": config_id, "value": value})).unwrap();
+    let fresh = set(&mut editor, "effort", "high")["configOptions"].clone();
+    set(&mut editor, "model", "claude-sonnet-9");
+    set(&mut editor, "effort", "low");
+    editor.request("session/set_mode", json!({"sessionId": session_id, "modeId": "auto"})).unwrap();
+    editor.request("session/close", json!({"sessionId": session_id})).unwrap();
+
+    let loaded = editor.request("session/load", json!({"sessionId": session_id, "cwd": home.project(), "mcpServers": []})).unwrap();
+    editor.prompt(&session_id, "Hi.").unwrap();
+
+    let current = |options: &Value| options.as_array().unwrap().iter().map(|option| option["currentValue"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+    assert!(current(&fresh)[0] != "auto" && current(&fresh)[1] != "claude-sonnet-9", "the test needs other defaults: {fresh}");
+    assert_eq!(current(&loaded["configOptions"]), ["auto", "claude-sonnet-9", "low"]);
+    assert_eq!(loaded["modes"]["currentModeId"], "auto");
+    assert_eq!(api.requests.recv_timeout(WAIT).unwrap()["model"], "claude-sonnet-9");
+}
+
+#[test]
 fn two_sessions_run_side_by_side_each_in_its_own_directory() {
     let home = Home::new("sessions");
     let other = home.dir.join("other");

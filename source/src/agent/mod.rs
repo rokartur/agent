@@ -356,6 +356,23 @@ pub struct History {
     /// Provider to the account id that served the session's last reply, so a resume keeps the same account.
     pub accounts: HashMap<String, String>,
     pub extra_dirs: Vec<PathBuf>,
+    pub config: Option<SessionConfig>,
+}
+
+/// What an opened session brings besides its state: messages for the transcript, the accounts that served it and the
+/// config an editor last saved for it.
+pub struct Opened {
+    pub messages: Vec<Value>,
+    pub accounts: HashMap<String, String>,
+    pub config: Option<SessionConfig>,
+}
+
+/// The mode, model and effort an editor picked for one session over ACP, which leaves settings.json as it is.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SessionConfig {
+    pub mode: Mode,
+    pub model: String,
+    pub effort: String,
 }
 
 /// Time and tokens of the user's commands, saved per command so the footer total survives a resume.
@@ -1663,15 +1680,16 @@ impl Agent {
         Ok(())
     }
 
-    /// Switches to the saved session `id`; returns its messages for the transcript and the accounts that served it.
-    pub fn open_session(&mut self, id: &str) -> Result<(Vec<Value>, HashMap<String, String>), String> {
+    /// Switches to the saved session `id`.
+    pub fn open_session(&mut self, id: &str) -> Result<Opened, String> {
         let (session, mut history) = Session::resume(&self.sessions_dir, id)?;
         self.session = session;
         let messages = history.messages.clone();
         let accounts = std::mem::take(&mut history.accounts);
+        let config = history.config.take();
         self.load(history);
         self.announce_session();
-        Ok((messages, accounts))
+        Ok(Opened { messages, accounts, config })
     }
 
     /// --add-dir and /workspace add: `path` is relative to cwd or starts with `~`; saved so a resume restores it. Returns the notice to show.
@@ -1705,6 +1723,12 @@ impl Agent {
 
     fn save_extra_dirs(&self) -> Result<(), String> {
         self.session.append(&json!({"type": "extra_dirs", "dirs": self.extra_dirs}))
+    }
+
+    /// Saves the mode, model and effort, so `open_session` returns them as a `SessionConfig`.
+    pub fn save_session_config(&self) -> Result<(), String> {
+        let mode = self.permission_mode.lock().unwrap().label();
+        self.session.append(&json!({"type": "config", "mode": mode, "model": self.model, "effort": self.effort}))
     }
 
     /// `cd DIR` typed after `!` or sent as the model's whole Bash command: the session moves to DIR, like /worktree.
@@ -1759,7 +1783,7 @@ impl Agent {
     }
 
     /// /import: copies an exported session into the sessions dir and resumes it.
-    pub fn import_session(&mut self, file: &Path) -> Result<(Vec<Value>, HashMap<String, String>), String> {
+    pub fn import_session(&mut self, file: &Path) -> Result<Opened, String> {
         let id = Session::import(&self.sessions_dir, file)?;
         let target = self.sessions_dir.join(format!("{id}.jsonl"));
         self.open_session(&id).inspect_err(|_| {
@@ -2091,6 +2115,11 @@ impl Session {
                 Some("todo") => history.todos = Todos::from_entry(&entry),
                 Some("spent") => history.spent.add(Spent::from_entry(&entry)),
                 Some("extra_dirs") => history.extra_dirs = serde_json::from_value(entry["dirs"].clone()).map_err(|_| missing("dirs"))?,
+                Some("config") => {
+                    let text = |field: &str| entry[field].as_str().map(String::from).ok_or_else(|| missing(field));
+                    let mode = entry["mode"].as_str().and_then(Mode::parse).ok_or_else(|| missing("mode"))?;
+                    history.config = Some(SessionConfig { mode, model: text("model")?, effort: text("effort")? });
+                }
                 Some("usage") => {
                     if let (Some(provider), Some(account)) = (entry["provider"].as_str(), entry["account"].as_str()) {
                         history.accounts.insert(provider.to_string(), account.to_string());

@@ -169,7 +169,7 @@ fn handle(agent: &mut Agent, connection: &mut Connection, message: &Value) -> Re
             if std::fs::canonicalize(cwd).ok().as_deref() != Some(agent.cwd.as_path()) {
                 return Err((INVALID_PARAMS, format!("agent acp serves the directory it started in, {}, not {cwd}.", agent.cwd.display())));
             }
-            let settings = crate::settings::load(&agent.home).map_err(|error| (INTERNAL_ERROR, error))?;
+            let mut settings = crate::settings::load(&agent.home).map_err(|error| (INTERNAL_ERROR, error))?;
             if !agent.client.catalog().iter().any(usable) {
                 return Err((AUTH_REQUIRED, "No account can run a model. Log in with /login in agent.".into()));
             }
@@ -185,15 +185,19 @@ fn handle(agent: &mut Agent, connection: &mut Connection, message: &Value) -> Re
                 // shortcut: a session the model moved with `cd` opens as it was before the move; follow its copy when that bites.
                 let asked = params["sessionId"].as_str().unwrap_or_default();
                 // The router sends a load of the open session here; opening it again would fork it.
-                if *session_id != asked {
-                    agent.open_session(asked).map_err(|error| (INVALID_PARAMS, error))?;
-                }
+                let config = if *session_id != asked { agent.open_session(asked).map_err(|error| (INVALID_PARAMS, error))?.config } else { None };
                 if agent.session.fork_notice().is_some() {
                     // The editor cannot learn a copy's id, so its turns would land where it never looks.
                     if let Some(copy) = &agent.session.path {
                         std::fs::remove_file(copy).map_err(|error| (INTERNAL_ERROR, format!("Cannot remove {}: {error}", copy.display())))?;
                     }
                     return Err((INVALID_PARAMS, format!("Session {asked} is open in another process. Close it there first.")));
+                }
+                if let Some(config) = config {
+                    settings.model = config.model;
+                    settings.thinking = config.effort;
+                    settings.permission_mode = config.mode;
+                    agent.settle_model(&mut settings).map_err(|error| (INTERNAL_ERROR, error))?;
                 }
                 *session_id = asked.to_string();
                 if method == "session/load" {
@@ -227,6 +231,7 @@ fn handle(agent: &mut Agent, connection: &mut Connection, message: &Value) -> Re
         "session/set_mode" => {
             known_session(params, session_id)?;
             *agent.permission_mode.lock().unwrap() = mode_by_id(params["modeId"].as_str().unwrap_or_default())?;
+            agent.save_session_config().map_err(|error| (INTERNAL_ERROR, error))?;
             Ok(json!({}))
         }
         "session/set_config_option" => {
@@ -239,6 +244,7 @@ fn handle(agent: &mut Agent, connection: &mut Connection, message: &Value) -> Re
             }
             if option["id"] == "mode" {
                 *agent.permission_mode.lock().unwrap() = mode_by_id(value)?;
+                agent.save_session_config().map_err(|error| (INTERNAL_ERROR, error))?;
                 return Ok(json!({"configOptions": config_options(agent)}));
             }
             let mut settings = crate::settings::load(&agent.home).map_err(|error| (INTERNAL_ERROR, error))?;
@@ -251,6 +257,7 @@ fn handle(agent: &mut Agent, connection: &mut Connection, message: &Value) -> Re
                 _ => settings.thinking = value.to_string(),
             }
             agent.settle_model(&mut settings).map_err(|error| (INTERNAL_ERROR, error))?;
+            agent.save_session_config().map_err(|error| (INTERNAL_ERROR, error))?;
             Ok(json!({"configOptions": config_options(agent)}))
         }
         "session/prompt" => {
