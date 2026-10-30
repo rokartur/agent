@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
+pub use client::CONNECT_TIMEOUT;
 use client::{Client, Launch};
 use config::Server;
 
@@ -144,11 +145,12 @@ impl Mcp {
         self.state.lock().unwrap().client_list.clone()
     }
 
-    /// Waits until no server is still connecting, so a run without a UI starts with every tool.
-    pub fn settled(&self) {
+    /// Waits until no server is still connecting or `limit` passes, so a run without a UI starts with every tool.
+    /// A server still connecting after it offers its tools once it connects.
+    pub fn settled(&self, limit: Duration) {
         let start = Instant::now();
         let connecting = || self.state.lock().unwrap().servers.iter().any(|entry| matches!(entry.connection, Connection::Connecting));
-        while connecting() && start.elapsed() < client::CONNECT_TIMEOUT {
+        while connecting() && start.elapsed() < limit {
             std::thread::sleep(Duration::from_millis(50));
         }
     }
@@ -285,9 +287,11 @@ fn offered(server: &str, tools: Vec<Value>) -> Vec<Tool> {
     let mut offered = Vec::new();
     for tool in tools {
         let Some(name) = tool["name"].as_str() else { continue };
+        // Anthropic's BM25 tool search does not split `mcp__zed-echo__echo`, so a search for "echo" misses it without these words.
+        let description = format!("MCP server {server}, tool {name}. {}", tool["description"].as_str().unwrap_or_default());
         let schema = json!({
             "name": tool_name(server, name),
-            "description": tool["description"].as_str().unwrap_or_default(),
+            "description": description.trim_end(),
             "input_schema": if tool["inputSchema"].is_object() { tool["inputSchema"].clone() } else { json!({"type": "object", "properties": {}}) },
         });
         offered.push(Tool { name: name.to_string(), schema });
@@ -340,12 +344,13 @@ for line in sys.stdin:
             let _ = changed.send(());
         });
         mcp.sync(&[], &[]);
-        mcp.settled();
+        mcp.settled(CONNECT_TIMEOUT);
         assert!(change.try_recv().is_ok());
 
         let names: Vec<_> = mcp.tools().iter().map(|tool| tool["name"].clone()).collect();
         assert_eq!(names, ["mcp__fake__echo", "mcp__fake__fail"]);
         assert_eq!(mcp.tools()[1]["input_schema"], json!({"type": "object", "properties": {}}));
+        assert_eq!((mcp.tools()[0]["description"].as_str(), mcp.tools()[1]["description"].as_str()), (Some("MCP server fake, tool echo. Echoes"), Some("MCP server fake, tool fail.")));
         let never = AtomicBool::new(false);
         assert_eq!(mcp.tool("mcp__fake__echo", &json!({"text": "hi"}), &never), Some(("hi".into(), false)));
         assert_eq!(mcp.tool("mcp__fake__fail", &json!({}), &never), Some(("boom".into(), true)));
@@ -399,7 +404,7 @@ for line in sys.stdin:
         mcp.sync(&[], &[]);
 
         mcp.set_client_servers(&json!([{"name": "fake", "command": "python3", "args": ["-c", FAKE_SERVER], "env": []}]), &[], &[]).unwrap();
-        mcp.settled();
+        mcp.settled(CONNECT_TIMEOUT);
         let names: Vec<_> = mcp.tools().iter().map(|tool| tool["name"].clone()).collect();
         let (views, _) = mcp.list();
         mcp.set_client_servers(&json!([]), &[], &[]).unwrap();

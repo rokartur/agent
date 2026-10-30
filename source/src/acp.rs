@@ -18,6 +18,7 @@ use crate::agent::permissions::{Decision, MODES, Mode, Request};
 use crate::agent::prompt::{self, Skill};
 use crate::agent::{Agent, Event, workflow};
 use crate::api::models::{Model, PROVIDERS};
+use crate::mcp;
 use crate::settings::THINKING_LEVELS;
 use crate::tools::ask::{self, Answer, Question};
 use crate::tools::hashline::EditorFiles;
@@ -31,6 +32,8 @@ const INVALID_PARAMS: i64 = -32602;
 const INTERNAL_ERROR: i64 = -32603;
 const AUTH_REQUIRED: i64 = -32000;
 const REQUEST_CANCELLED: i64 = -32800;
+/// How long a new session waits for MCP servers; one still connecting then offers its tools once it connects.
+pub const MCP_WAIT: Duration = Duration::from_secs(5);
 
 pub fn serve(agent: &mut Agent) -> Result<(), String> {
     let cancelled = Arc::new(AtomicBool::new(false));
@@ -53,12 +56,33 @@ pub fn serve(agent: &mut Agent) -> Result<(), String> {
         // After the answer, so the editor knows the session the update is for.
         if opened_session {
             send(&json!({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": connection.session_id, "update": connection.commands.update()}}));
+            for notice in mcp_notices(agent) {
+                if connection.client["session"]["notices"].is_null() {
+                    eprintln!("agent acp: {notice}");
+                    continue;
+                }
+                let update = json!({"sessionUpdate": "notice", "severity": "info", "title": notice});
+                send(&json!({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": connection.session_id, "update": update}}));
+            }
         }
         if closed_session {
             break;
         }
     }
     Ok(())
+}
+
+/// What the user should know of the MCP servers a session opened without.
+fn mcp_notices(agent: &Agent) -> Vec<String> {
+    let mut notices = Vec::new();
+    for server in agent.mcp.list().0 {
+        match server.status {
+            mcp::Status::Connecting => notices.push(format!("MCP server {} did not connect in {} s; its tools join the session once it does.", server.name, MCP_WAIT.as_secs())),
+            mcp::Status::Failed(error) => notices.push(format!("MCP server {}: {error}", server.name)),
+            _ => {}
+        }
+    }
+    notices
 }
 
 /// Requests go to the first receiver, the replies to every request we sent the editor to the second.
@@ -145,12 +169,12 @@ fn handle(agent: &mut Agent, connection: &mut Connection, message: &Value) -> Re
             if std::fs::canonicalize(cwd).ok().as_deref() != Some(agent.cwd.as_path()) {
                 return Err((INVALID_PARAMS, format!("agent acp serves the directory it started in, {}, not {cwd}.", agent.cwd.display())));
             }
-            let settings = crate::settings::load(&agent.home).map_err(|error| (INTERNAL_ERROR, error))?;
+            let mut settings = crate::settings::load(&agent.home).map_err(|error| (INTERNAL_ERROR, error))?;
             if !agent.client.catalog().iter().any(usable) {
                 return Err((AUTH_REQUIRED, "No account can run a model. Log in with /login in agent.".into()));
             }
             agent.mcp.set_client_servers(&params["mcpServers"], &settings.disabled_mcp, &settings.approved_mcp).map_err(|error| (INVALID_PARAMS, error))?;
-            agent.mcp.settled();
+            agent.mcp.settled(MCP_WAIT);
             agent.asks = !client["elicitation"]["form"].is_null();
             if method == "session/new" {
                 if !agent.messages.is_empty() {
@@ -161,15 +185,19 @@ fn handle(agent: &mut Agent, connection: &mut Connection, message: &Value) -> Re
                 // shortcut: a session the model moved with `cd` opens as it was before the move; follow its copy when that bites.
                 let asked = params["sessionId"].as_str().unwrap_or_default();
                 // The router sends a load of the open session here; opening it again would fork it.
-                if *session_id != asked {
-                    agent.open_session(asked).map_err(|error| (INVALID_PARAMS, error))?;
-                }
+                let config = if *session_id != asked { agent.open_session(asked).map_err(|error| (INVALID_PARAMS, error))?.config } else { None };
                 if agent.session.fork_notice().is_some() {
                     // The editor cannot learn a copy's id, so its turns would land where it never looks.
                     if let Some(copy) = &agent.session.path {
                         std::fs::remove_file(copy).map_err(|error| (INTERNAL_ERROR, format!("Cannot remove {}: {error}", copy.display())))?;
                     }
                     return Err((INVALID_PARAMS, format!("Session {asked} is open in another process. Close it there first.")));
+                }
+                if let Some(config) = config {
+                    settings.model = config.model;
+                    settings.thinking = config.effort;
+                    settings.permission_mode = config.mode;
+                    agent.settle_model(&mut settings).map_err(|error| (INTERNAL_ERROR, error))?;
                 }
                 *session_id = asked.to_string();
                 if method == "session/load" {
@@ -203,6 +231,7 @@ fn handle(agent: &mut Agent, connection: &mut Connection, message: &Value) -> Re
         "session/set_mode" => {
             known_session(params, session_id)?;
             *agent.permission_mode.lock().unwrap() = mode_by_id(params["modeId"].as_str().unwrap_or_default())?;
+            agent.save_session_config().map_err(|error| (INTERNAL_ERROR, error))?;
             Ok(json!({}))
         }
         "session/set_config_option" => {
@@ -215,6 +244,7 @@ fn handle(agent: &mut Agent, connection: &mut Connection, message: &Value) -> Re
             }
             if option["id"] == "mode" {
                 *agent.permission_mode.lock().unwrap() = mode_by_id(value)?;
+                agent.save_session_config().map_err(|error| (INTERNAL_ERROR, error))?;
                 return Ok(json!({"configOptions": config_options(agent)}));
             }
             let mut settings = crate::settings::load(&agent.home).map_err(|error| (INTERNAL_ERROR, error))?;
@@ -227,6 +257,7 @@ fn handle(agent: &mut Agent, connection: &mut Connection, message: &Value) -> Re
                 _ => settings.thinking = value.to_string(),
             }
             agent.settle_model(&mut settings).map_err(|error| (INTERNAL_ERROR, error))?;
+            agent.save_session_config().map_err(|error| (INTERNAL_ERROR, error))?;
             Ok(json!({"configOptions": config_options(agent)}))
         }
         "session/prompt" => {

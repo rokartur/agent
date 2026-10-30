@@ -41,7 +41,7 @@ use crate::agent::skill_usage;
 use crate::agent::subagent::{Run, Runs};
 use crate::agent::usage::{self, ModelTotal, tokens};
 use crate::agent::workflow::{self, StepStatus, Workflow};
-use crate::agent::{self, Agent, Event, FileChange, RestoredFiles, RewindPoint, Session, SessionInfo, Spent};
+use crate::agent::{self, Agent, Event, FileChange, Opened, RestoredFiles, RewindPoint, Session, SessionInfo, Spent};
 use crate::api::accounts::Policy;
 use crate::api::models::{self, Model};
 use crate::api::oauth::Tokens;
@@ -924,7 +924,8 @@ fn spawn_worker(mut agent: Agent, mut settings: Settings, model_lists: JoinHandl
                         _ => unreachable!("the outer arm matched Resume or Import"),
                     };
                     match opened {
-                        Ok((messages, accounts)) => {
+                        // The TUI's model, effort and mode follow settings.json.
+                        Ok(Opened { messages, accounts, .. }) => {
                             let path = agent.session.display_path();
                             let _ = events.send(Msg::Resumed { id: agent.session.id.clone(), path, messages, spent: agent.spent, notice: agent.session.fork_notice(), accounts });
                             let _ = events.send(Msg::Workspace(agent.extra_dirs.clone()));

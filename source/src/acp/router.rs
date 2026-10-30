@@ -156,7 +156,7 @@ fn relay(mut child: Child, stdout: ChildStdout, writer: Writer, starting: Value,
     let _ = child.wait();
 }
 
-/// `$/cancel_request` for a session still starting, which can wait up to two minutes for the editor's MCP servers:
+/// `$/cancel_request` for a session still starting, which waits up to `MCP_WAIT` for mcp.json's servers and again for the editor's:
 /// its process stops, and the request ends as cancelled. Other requests run on, which the protocol allows.
 fn cancel_start(request_id: &Value, routes: &Arc<Mutex<Routes>>) {
     let Some(pid) = routes.lock().unwrap().starting.remove(&request_id.to_string()) else { return };
