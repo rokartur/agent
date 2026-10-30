@@ -427,10 +427,10 @@ enum MidTurn {
 
 /// Built-in commands: pi's wording for pi's commands, fx's for the ones taken from fx.
 const BUILTIN_COMMANDS: &[(&str, MidTurn, &str)] = &[
-    ("help", MidTurn::Runs, "show available slash commands"),
-    ("clear", MidTurn::Waits, "start a fresh conversation"),
-    ("resume", MidTurn::Runs, "resume a saved session"),
-    ("rename-title", MidTurn::Runs, "rename the current session"),
+    ("help", MidTurn::Runs, "Show available slash commands"),
+    ("clear", MidTurn::Waits, "Start a fresh conversation"),
+    ("resume", MidTurn::Runs, "Resume a saved session"),
+    ("rename-title", MidTurn::Runs, "Rename the current session"),
     ("rename-title-ai", MidTurn::Waits, "Name the session again from its first prompt"),
     ("clone", MidTurn::Waits, "Duplicate the current session at the current position"),
     ("import", MidTurn::Waits, "<file.jsonl>: Import and resume a session from a JSONL file"),
@@ -4844,7 +4844,7 @@ impl App {
         // Sticky header: the prompt of the turn at the top of the view, once its first line scrolls out above.
         if let Some(&(_, index)) = prompts.iter().find(|(top, _)| *top >= self.scroll + visible) {
             // shortcut: clicks and selection on the pinned rows hit the transcript lines under them.
-            let prompt = self.entries[index].lines(content_width, self.expanded);
+            let prompt = self.entries[index].lines(content_width, self.expanded, &self.cwd);
             pin_prompt(&mut rows, prompt, content_width);
         }
         for (row, line) in rows.iter_mut().enumerate() {
@@ -4948,10 +4948,11 @@ impl App {
     /// While a subagent is viewed, its session stands in for the transcript, so scrolling, selection and copy follow it.
     fn transcript_tail(&mut self, width: usize, needed: usize) -> (Vec<Line>, usize, Vec<(usize, usize)>) {
         if let Some(view) = &mut self.viewed {
-            let lines = view.lines(width);
+            let lines = view.lines(width, &self.cwd);
             return (lines[lines.len().saturating_sub(needed)..].to_vec(), lines.len(), Vec::new());
         }
         let expanded = self.expanded;
+        let spinner = self.working.map(|started| crate::spinner::FRAMES[(started.elapsed().as_millis() / ANIMATION_TICK.as_millis()) as usize % crate::spinner::FRAMES.len()]);
         let mut chunks: Vec<Vec<Line>> = Vec::new();
         let mut count = 0;
         let mut prompts = Vec::new();
@@ -4960,7 +4961,8 @@ impl App {
         for index in (0..self.entries.len()).rev() {
             let gap = below.is_some_and(|below: usize| blank_between(&self.entries[index].item, &self.entries[below].item));
             let is_prompt = matches!(self.entries[index].item, Item::User(_));
-            let lines = self.entries[index].lines(width, expanded);
+            let is_running = matches!(self.entries[index].item, Item::Tool { result: None, .. });
+            let lines = self.entries[index].lines(width, expanded, &self.cwd);
             if lines.is_empty() {
                 continue;
             }
@@ -4971,7 +4973,12 @@ impl App {
                 count += 1;
             }
             if count < needed {
-                chunks.push(lines.clone());
+                let mut lines = lines.clone();
+                // Rows are cached, so the running tool's icon turns here, on every frame.
+                if is_running && let Some(frame) = spinner {
+                    lines[0][0] = span(frame, MUTED);
+                }
+                chunks.push(lines);
             }
             count += lines.len();
             if is_prompt {
@@ -5062,7 +5069,7 @@ impl App {
             right.push(span(format!(" {}", self.settings.speed), WARN));
         }
         if self.context_tokens > 0 {
-            right.push(span(format!(" {} {percent}%", tokens(self.context_tokens)), MUTED));
+            right.push(span(format!(" {} {percent}%", tokens(self.context_tokens)), context_style(percent)));
         }
         if self.settings.footer_cost
             && let Some(cost) = usage::total_cost(&self.session_usage, &self.client.catalog())
@@ -5074,10 +5081,10 @@ impl App {
 }
 
 impl Entry {
-    fn lines(&mut self, width: usize, expanded: bool) -> &Vec<Line> {
+    fn lines(&mut self, width: usize, expanded: bool, cwd: &Path) -> &Vec<Line> {
         let fresh = matches!(&self.cache, Some((w, e, _)) if *w == width && *e == expanded);
         if !fresh {
-            self.cache = Some((width, expanded, render_item(&self.item, width, expanded)));
+            self.cache = Some((width, expanded, render_item(&self.item, width, expanded, cwd)));
         }
         &self.cache.as_ref().unwrap().2
     }
@@ -5337,7 +5344,7 @@ fn prompt_rows(text: &str, style: Style, width: usize) -> Vec<Line> {
     rows
 }
 
-fn render_item(item: &Item, width: usize, expanded: bool) -> Vec<Line> {
+fn render_item(item: &Item, width: usize, expanded: bool, cwd: &Path) -> Vec<Line> {
     match item {
         Item::Lines(lines) => lines.clone(),
         Item::System { source, text, failed: false } => system_lines("⚙", source, text, SYSTEM, width),
@@ -5362,7 +5369,7 @@ fn render_item(item: &Item, width: usize, expanded: bool) -> Vec<Line> {
             }
             lines
         }
-        Item::Tool { name, input, result, .. } => render_tool(name, input, result.as_ref(), width, expanded),
+        Item::Tool { name, input, result, .. } => render_tool(name, input, result.as_ref(), width, expanded, cwd),
         Item::Todos(tasks) => update_todos_lines(tasks, width),
         Item::Done { took, usage, total } => {
             let stats = format!(" (↑{} ↓{}) total {}", tokens(usage.input), tokens(usage.output), duration(*total));
@@ -5419,11 +5426,12 @@ fn subagent_done_lines(run: &Run, width: usize) -> Vec<Line> {
     lines
 }
 
-fn render_tool(name: &str, input: &Value, result: Option<&(String, bool)>, width: usize, expanded: bool) -> Vec<Line> {
+fn render_tool(name: &str, input: &Value, result: Option<&(String, bool)>, width: usize, expanded: bool, cwd: &Path) -> Vec<Line> {
     // The list itself replaces this row once the call ends; see show_todos.
     if result.is_none() && edits_todos(name, input) {
         return vec![vec![span("•", MUTED), span(" Update Todos", TOOL_NAME)]];
     }
+    let edits_lines = matches!(name, "ReplaceLines" | "Edit" | "InsertLines");
     let (icon, icon_style) = match result {
         None => ("•", MUTED),
         Some((_, false)) => ("✓", OK),
@@ -5435,11 +5443,22 @@ fn render_tool(name: &str, input: &Value, result: Option<&(String, bool)>, width
             vec![span(icon, icon_style), span(" Skill ", TOOL_NAME), span(skill, TOOL_ARGS), span(hint, MUTED)]
         }
         None => {
-            let args = span(tool_args(name, input), TOOL_ARGS);
-            match mcp_tool(name) {
-                Some((server, tool)) => vec![span(icon, icon_style), span(" ", PLAIN), span(tool, TOOL_NAME), span(format!(" MCP: {server} "), MUTED), args],
-                None => vec![span(icon, icon_style), span(" ", PLAIN), span(name, TOOL_NAME), span(" ", PLAIN), args],
+            let mut header = match mcp_tool(name) {
+                Some((server, tool)) => vec![span(icon, icon_style), span(" ", PLAIN), span(tool, TOOL_NAME), span(format!(" MCP: {server}"), MUTED)],
+                None => vec![span(icon, icon_style), span(" ", PLAIN), span(name, TOOL_NAME)],
+            };
+            let args = tool_args(name, input, cwd);
+            if !args.is_empty() {
+                header.extend([span(" ", PLAIN), span(args, TOOL_ARGS)]);
             }
+            // The diff comes first; an LSP report or a truncation note follows after a blank line.
+            if let Some((output, false)) = result
+                && edits_lines
+            {
+                header.push(span(" ", PLAIN));
+                header.extend(diff_stat(output.split("\n\n").next().unwrap_or_default()));
+            }
+            header
         }
     };
     if !expanded {
@@ -5451,7 +5470,7 @@ fn render_tool(name: &str, input: &Value, result: Option<&(String, bool)>, width
     let pretty = serde_json::from_str::<Value>(output).ok().filter(|v| v.is_object() || v.is_array()).and_then(|v| serde_json::to_string_pretty(&v).ok());
     let output = pretty.as_deref().unwrap_or(output);
     let shown = output.lines().take(TOOL_OUTPUT_LINES).map(|line| line.replace('\t', "    "));
-    let is_diff = !is_error && matches!(name, "ReplaceLines" | "Edit" | "InsertLines");
+    let is_diff = !is_error && edits_lines;
     for (index, line) in shown.enumerate() {
         let lead = if index == 0 { "└ " } else { "  " };
         let style = match line.chars().next() {
@@ -5486,8 +5505,13 @@ fn skill_name(name: &str, input: &Value) -> Option<String> {
     Some(path.parent()?.file_name()?.to_string_lossy().into_owned())
 }
 
-fn tool_args(name: &str, input: &Value) -> String {
+fn tool_args(name: &str, input: &Value, cwd: &Path) -> String {
     let field = |key: &str| input[key].as_str().unwrap_or_default().to_string();
+    let relative = |path: &str| match Path::new(path).strip_prefix(cwd) {
+        Ok(rest) if rest.as_os_str().is_empty() => ".".to_string(),
+        Ok(rest) => rest.display().to_string(),
+        Err(_) => path.to_string(),
+    };
     match name {
         "Bash" => {
             let command = field("command").lines().next().unwrap_or_default().to_string();
@@ -5498,9 +5522,9 @@ fn tool_args(name: &str, input: &Value) -> String {
         }
         "Read" => {
             if let Some(paths) = input["paths"].as_array() {
-                return paths.iter().filter_map(|entry| entry.as_str().or(entry["file_path"].as_str())).collect::<Vec<_>>().join(", ");
+                return paths.iter().filter_map(|entry| entry.as_str().or(entry["file_path"].as_str())).map(relative).collect::<Vec<_>>().join(", ");
             }
-            let mut text = field("file_path");
+            let mut text = relative(&field("file_path"));
             if let Some(offset) = input["offset"].as_u64().map(|n| n.to_string()).or(input["offset"].as_str().map(String::from)) {
                 text.push_str(&format!(" from {offset}"));
             }
@@ -5509,24 +5533,10 @@ fn tool_args(name: &str, input: &Value) -> String {
             }
             text
         }
-        "Write" => field("file_path"),
-        "ReplaceLines" | "Edit" | "InsertLines" => {
-            let anchors = match name {
-                "InsertLines" => format!("{} {}", field("direction"), field("anchor")),
-                _ => {
-                    let from = input["remove_from"].as_str().or(input["replace_from"].as_str()).unwrap_or_default();
-                    let to = input["remove_to"].as_str().or(input["replace_to"].as_str()).unwrap_or_default();
-                    if from == to { from.to_string() } else { format!("{from}..{to}") }
-                }
-            };
-            match input["file_path"].as_str() {
-                Some(path) if anchors.is_empty() => path.to_string(),
-                Some(path) => format!("{path} {anchors}"),
-                None => anchors,
-            }
-        }
+        // Anchors mean nothing to the user; render_tool adds the +/- line counts instead.
+        "Write" | "ReplaceLines" | "Edit" | "InsertLines" => relative(&field("file_path")),
         "Grep" => match input["path"].as_str() {
-            Some(path) => format!("{} in {path}", field("pattern")),
+            Some(path) => format!("{} in {}", field("pattern"), relative(path)),
             None => field("pattern"),
         },
         _ => match input {
@@ -5843,14 +5853,14 @@ struct RunView {
 
 impl RunView {
     /// The run's session as transcript lines, reread when its file grows.
-    fn lines(&mut self, width: usize) -> &[Line] {
+    fn lines(&mut self, width: usize, cwd: &Path) -> &[Line] {
         let session = self.run.state.lock().unwrap().session.clone();
         let size = session.as_ref().and_then(|path| std::fs::metadata(path).ok()).map_or(0, |meta| meta.len());
         if self.loaded != Some((size, width)) {
             self.loaded = Some((size, width));
             self.lines = match session {
                 None => system_lines("⚙", "task", &self.run.task, SYSTEM, width),
-                Some(path) => subagent_lines(Path::new(&path), width).unwrap_or_else(|error| system_lines("✗", "error", &error, ERROR, width)),
+                Some(path) => subagent_lines(Path::new(&path), width, cwd).unwrap_or_else(|error| system_lines("✗", "error", &error, ERROR, width)),
             };
         }
         &self.lines
@@ -5858,12 +5868,12 @@ impl RunView {
 }
 
 /// A subagent's session rendered like the main transcript: a blank line between items, except inside a tool or log run.
-fn subagent_lines(path: &Path, width: usize) -> Result<Vec<Line>, String> {
+fn subagent_lines(path: &Path, width: usize, cwd: &Path) -> Result<Vec<Line>, String> {
     let history = Session::history(path)?;
     let mut lines = Vec::new();
     let mut previous_run = None;
     for item in history_items(&history.messages) {
-        let item_lines = render_item(&item, width, false);
+        let item_lines = render_item(&item, width, false, cwd);
         if item_lines.is_empty() {
             continue;
         }
@@ -5978,6 +5988,14 @@ fn window_source(settings: &Settings, model: &Model) -> &'static str {
         "provider"
     } else {
         "catalog"
+    }
+}
+
+fn context_style(percent: u64) -> Style {
+    match percent {
+        90.. => ERROR,
+        70.. => WARN,
+        _ => MUTED,
     }
 }
 
@@ -6451,7 +6469,7 @@ mod tests {
     #[test]
     fn unknown_tool_args_read_as_key_values() {
         let input = json!({"action": "create", "subject": "Manifest: a, b", "ids": [1, 2], "q": [{"header": "Panel"}]});
-        assert_eq!(tool_args("Todo", &input), "action: create · ids: [1, 2] · q: [{header: Panel}] · subject: Manifest: a, b");
+        assert_eq!(tool_args("Todo", &input, Path::new("/repo")), "action: create · ids: [1, 2] · q: [{header: Panel}] · subject: Manifest: a, b");
     }
 
     fn text(line: &Line) -> String {
@@ -6498,7 +6516,7 @@ mod tests {
     #[test]
     fn done_line_reads_cooked_for_with_the_dim_star() {
         let item = Item::Done { took: Duration::from_secs(83), usage: Usage { input: 1200, output: 300, ..Usage::default() }, total: Duration::from_secs(600) };
-        let line = &render_item(&item, 80, false)[0];
+        let line = &render_item(&item, 80, false, Path::new("/repo"))[0];
         assert!(text(line).starts_with(" ✧ Cooked for 1m 23s (↑"), "{}", text(line));
         assert_eq!(line[1].style, DIM);
     }
@@ -6546,17 +6564,17 @@ mod tests {
     fn collapsed_tool_call_is_one_line_even_for_long_bash_and_errors() {
         let ok = ("total 1\na.txt  6B\n".to_string(), false);
         let long = json!({"command": "echo aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"});
-        let rows: Vec<String> = render_tool("Bash", &long, Some(&ok), 20, false).iter().map(text).collect();
+        let rows: Vec<String> = render_tool("Bash", &long, Some(&ok), 20, false, Path::new("/repo")).iter().map(text).collect();
         assert_eq!(rows.len(), 1);
         assert!(rows[0].chars().count() <= 20, "{rows:?}");
         let failed = ("no such file\n".to_string(), true);
-        assert_eq!(render_tool("Read", &json!({"file_path": "x"}), Some(&failed), 40, false).len(), 1);
+        assert_eq!(render_tool("Read", &json!({"file_path": "x"}), Some(&failed), 40, false, Path::new("/repo")).len(), 1);
     }
 
     #[test]
     fn expanded_tool_call_puts_the_output_under_a_hook() {
         let result = ("total 1\na.txt  6B\n".to_string(), false);
-        let lines = render_tool("Bash", &json!({"command": "ls", "timeout": 10000}), Some(&result), 40, true);
+        let lines = render_tool("Bash", &json!({"command": "ls", "timeout": 10000}), Some(&result), 40, true, Path::new("/repo"));
         let rows: Vec<String> = lines.iter().map(text).collect();
         assert_eq!(rows, ["✓ Bash ls (timeout 10000 ms)", "└ total 1", "  a.txt  6B"]);
     }
@@ -6567,7 +6585,7 @@ mod tests {
         let lines = update_todos_lines(&[task("review", Status::Completed), task("fix", Status::InProgress), task("test", Status::Pending)], 40);
         let rows: Vec<String> = lines.iter().map(text).collect();
         assert_eq!(rows, ["✓ Update Todos", "  ⎿  ✔ review", "     ◼ fix", "     ◻ test"]);
-        let running: Vec<String> = render_tool("Todo", &json!({"action": "create", "subject": "x"}), None, 40, false).iter().map(text).collect();
+        let running: Vec<String> = render_tool("Todo", &json!({"action": "create", "subject": "x"}), None, 40, false, Path::new("/repo")).iter().map(text).collect();
         assert_eq!(running, ["• Update Todos"]);
         assert!(lines[1][1].style.strikethrough && lines[2][1].style.bold && lines[3][1].style == PLAIN);
     }
@@ -6575,14 +6593,37 @@ mod tests {
     #[test]
     fn reading_a_skill_file_shows_the_skill_name() {
         let result = ("body".to_string(), false);
-        let lines = render_tool("Read", &json!({"file_path": "/x/skills/verify-web-app/SKILL.md"}), Some(&result), 80, false);
+        let lines = render_tool("Read", &json!({"file_path": "/x/skills/verify-web-app/SKILL.md"}), Some(&result), 80, false, Path::new("/repo"));
         assert_eq!(text(&lines[0]), "✓ Skill verify-web-app (ctrl+o to expand)");
     }
 
     #[test]
     fn mcp_tool_shows_its_name_and_server() {
-        let lines = render_tool("mcp__vexdock__get_service", &json!({"service_id": "s1"}), None, 80, false);
+        let lines = render_tool("mcp__vexdock__get_service", &json!({"service_id": "s1"}), None, 80, false, Path::new("/repo"));
         assert_eq!(text(&lines[0]), "• GetService MCP: vexdock service_id: s1");
+    }
+
+    #[test]
+    fn tool_rows_show_paths_relative_to_the_working_directory() {
+        let ok = ("body".to_string(), false);
+        let row = |name: &str, input: Value| text(&render_tool(name, &input, Some(&ok), 80, false, Path::new("/repo"))[0]);
+        assert_eq!(row("Read", json!({"file_path": "/repo/src/a.rs"})), "✓ Read src/a.rs");
+        assert_eq!(row("Read", json!({"paths": ["/repo/a.rs", "/etc/hosts"]})), "✓ Read a.rs, /etc/hosts");
+        assert_eq!(row("Grep", json!({"pattern": "fn", "path": "/repo"})), "✓ Grep fn in .");
+        assert_eq!(row("Write", json!({"file_path": "/repository/a.rs"})), "✓ Write /repository/a.rs");
+    }
+
+    #[test]
+    fn edit_rows_count_the_changed_lines_in_place_of_anchors() {
+        let result = (" AAAA│keep\n-BBBB│old\n+CCCC│new\n+DDDD│more\n\n[lsp] 1 new error in a.rs:\n+1 more".to_string(), false);
+        let row = |input: Value| text(&render_tool("ReplaceLines", &input, Some(&result), 80, false, Path::new("/repo"))[0]);
+        assert_eq!(row(json!({"file_path": "/repo/a.rs", "remove_from": "BBBB", "remove_to": "BBBB"})), "✓ ReplaceLines a.rs +2 -1");
+        assert_eq!(row(json!({"remove_from": "BBBB", "remove_to": "BBBB"})), "✓ ReplaceLines +2 -1");
+    }
+
+    #[test]
+    fn context_use_turns_yellow_at_70_and_red_at_90_percent() {
+        assert_eq!([69, 70, 89, 90].map(context_style), [MUTED, WARN, WARN, ERROR]);
     }
 
     #[test]
@@ -6602,7 +6643,7 @@ mod tests {
     #[test]
     fn edit_diff_colors_added_green_removed_red_context_gray() {
         let result = (" AAAA│keep\n-BBBB│old\n+CCCC│new".to_string(), false);
-        let lines = render_tool("ReplaceLines", &json!({"file_path": "a.rs"}), Some(&result), 40, true);
+        let lines = render_tool("ReplaceLines", &json!({"file_path": "a.rs"}), Some(&result), 40, true, Path::new("/repo"));
         let colors: Vec<Style> = lines[1..].iter().map(|line| line[1].style).collect();
         assert_eq!(colors, [TOOL_ARGS, ERROR, OK]);
     }
@@ -6708,9 +6749,9 @@ mod tests {
     fn pinned_prompt_keeps_three_rows_and_marks_the_cut() {
         let text = |rows: &[Line]| rows.iter().map(|row| row.iter().map(|s| s.text.as_str()).collect::<String>()).collect::<Vec<_>>();
         let mut rows = vec![vec![span("x", PLAIN)]; 5];
-        pin_prompt(&mut rows, &render_item(&Item::User("a\nb".into()), 10, false), 10);
+        pin_prompt(&mut rows, &render_item(&Item::User("a\nb".into()), 10, false, Path::new("/repo")), 10);
         assert_eq!(text(&rows), ["❯ a       ", "  b       ", "x", "x", "x"]);
-        pin_prompt(&mut rows, &render_item(&Item::User("1\n2\n3\n4".into()), 10, false), 10);
+        pin_prompt(&mut rows, &render_item(&Item::User("1\n2\n3\n4".into()), 10, false, Path::new("/repo")), 10);
         assert_eq!(text(&rows), ["❯ 1       ", "  2       ", "  3…      ", "x", "x"]);
         assert!(rows[2].iter().all(|s| s.style.bg == Some(PROMPT_BG)));
     }
@@ -6772,7 +6813,7 @@ mod tests {
         let messages = [json!({"role": "user", "content": [{"type": "text", "text": "review auth"}]}), json!({"role": "assistant", "content": [{"type": "text", "text": "Token stays cached."}]})];
         let entries: Vec<String> = messages.iter().map(|message| json!({"type": "message", "message": message}).to_string()).collect();
         std::fs::write(&session, entries.join("\n")).unwrap();
-        let lines = subagent_lines(&session, 60);
+        let lines = subagent_lines(&session, 60, Path::new("/repo"));
         std::fs::remove_dir_all(&dir).unwrap();
         let lines: Vec<String> = lines.unwrap().iter().map(text).collect();
         assert!(lines.iter().any(|line| line.contains("review auth")));
@@ -6793,7 +6834,7 @@ mod tests {
         ];
         let entries: Vec<String> = messages.iter().map(|message| json!({"type": "message", "message": message}).to_string()).collect();
         std::fs::write(&session, entries.join("\n")).unwrap();
-        let lines = subagent_lines(&session, 60);
+        let lines = subagent_lines(&session, 60, Path::new("/repo"));
         std::fs::remove_dir_all(&dir).unwrap();
         let lines: Vec<String> = lines.unwrap().iter().map(text).collect();
         let one = lines.iter().position(|line| line.contains("one.rs")).unwrap();

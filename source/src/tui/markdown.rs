@@ -1,4 +1,4 @@
-use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd, TextMergeStream};
+use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd, TextMergeStream};
 
 use super::render::{Line, MUTED, PLAIN, Span, Style, line_width, span, wrap};
 
@@ -106,14 +106,18 @@ pub fn render(text: &str, width: usize) -> Vec<Line> {
             }
             Event::End(TagEnd::Item) => flush(&mut out, &mut spans, &mut item_prefix, base(lists.len(), quote_depth)),
             Event::TaskListMarker(done) => spans.push(span(if done { "[x] " } else { "[ ] " }, BULLET)),
-            Event::Start(Tag::CodeBlock(_)) => {
+            Event::Start(Tag::CodeBlock(kind)) => {
                 flush(&mut out, &mut spans, &mut item_prefix, base(lists.len(), quote_depth));
                 gap(&mut out);
-                out.push(code_rule(&base(lists.len(), quote_depth), width));
+                let language = match &kind {
+                    CodeBlockKind::Fenced(info) => info.split_whitespace().next().unwrap_or_default(),
+                    CodeBlockKind::Indented => "",
+                };
+                out.push(code_rule(&base(lists.len(), quote_depth), width, language));
                 in_code = true;
             }
             Event::End(TagEnd::CodeBlock) => {
-                out.push(code_rule(&base(lists.len(), quote_depth), width));
+                out.push(code_rule(&base(lists.len(), quote_depth), width, ""));
                 in_code = false;
             }
             // Inside a list item or quote pulldown-cmark sends one Text per line.
@@ -171,9 +175,18 @@ pub fn render(text: &str, width: usize) -> Vec<Line> {
     out
 }
 
-fn code_rule(indent: &Line, width: usize) -> Line {
+/// A rule across the code block, with the fence's language on the opening one: `── rust ─────`.
+fn code_rule(indent: &Line, width: usize, language: &str) -> Line {
     let rule_width = width.saturating_sub(line_width(indent)).max(1);
-    [indent.clone(), vec![span("─".repeat(rule_width), CODE_BORDER)]].concat()
+    let mut rule = indent.clone();
+    if language.is_empty() {
+        rule.push(span("─".repeat(rule_width), CODE_BORDER));
+        return rule;
+    }
+    let label = format!(" {language} ");
+    let rest = rule_width.saturating_sub(2 + super::render::width(&label));
+    rule.extend([span("──", CODE_BORDER), span(label, MUTED), span("─".repeat(rest), CODE_BORDER)]);
+    rule
 }
 
 /// Fits the columns into `room`, wraps each cell inside its column, splits columns with `│` and rules off every row from the next.
@@ -246,6 +259,11 @@ mod tests {
     #[test]
     fn a_code_block_in_a_list_item_is_one_box() {
         assert_eq!(text(&render("- step\n\n  ```\n  a\n  b\n  ```\n", 12)), [" - step", "", " ───────────", " a", " b", " ───────────"]);
+    }
+
+    #[test]
+    fn a_fenced_code_block_names_its_language_on_the_opening_rule() {
+        assert_eq!(text(&render("```rust ignore\nfn a() {}\n```", 14)), [" ── rust ─────", " fn a() {}", " ─────────────"]);
     }
 
     #[test]
