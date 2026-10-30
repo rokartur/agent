@@ -730,6 +730,7 @@ struct App {
     extra_dirs: Vec<PathBuf>,
     follow_ups: Arc<Mutex<Vec<FollowUp>>>,
     terminals: Arc<Mutex<Terminals>>,
+    crons: Arc<Mutex<crate::tools::cron::Crons>>,
     subagents: Arc<Mutex<Runs>>,
     workflows: Arc<Mutex<Vec<Arc<Workflow>>>>,
     viewed: Option<RunView>,
@@ -1268,6 +1269,7 @@ impl App {
             extra_dirs: agent.extra_dirs.clone(),
             follow_ups: agent.follow_ups.clone(),
             terminals: agent.terminals.clone(),
+            crons: agent.crons.clone(),
             subagents: agent.subagents.clone(),
             workflows: agent.workflows.clone(),
             viewed: None,
@@ -5017,6 +5019,11 @@ impl App {
         if let Some(goal) = self.goal.lock().unwrap().as_ref() {
             left.push(span(FOOTER_SEPARATOR, DIM));
             left.push(span(format!("goal {}", goal.status.as_str()), MUTED));
+        }
+        let scheduled = self.crons.lock().unwrap().len();
+        if scheduled > 0 {
+            left.push(span(FOOTER_SEPARATOR, DIM));
+            left.push(span(format!("{scheduled} scheduled"), MUTED));
         }
         match *self.plan.lock().unwrap() {
             Plan::Off => {}

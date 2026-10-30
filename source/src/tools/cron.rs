@@ -51,6 +51,10 @@ impl Crons {
         Ok(format!("Cancelled {id}."))
     }
 
+    pub fn len(&self) -> usize {
+        self.jobs.len()
+    }
+
     pub fn list(&self) -> String {
         if self.jobs.is_empty() {
             return "No scheduled tasks.".into();
