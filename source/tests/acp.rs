@@ -694,6 +694,22 @@ fn a_cancelled_session_new_stops_waiting_for_a_hung_mcp_server() {
     assert!(started.elapsed() < Duration::from_secs(10));
 }
 
+#[test]
+fn a_hung_mcp_server_delays_a_new_session_by_seconds_and_the_user_learns_of_it() {
+    let home = Home::new("hung");
+    let api = fake_api(Vec::new());
+    let mut editor = Editor::start_with(&home, &api, json!({"session": {"notices": {}}}), "sk-fake");
+    let hung = json!([{"name": "hung", "command": "sleep", "args": ["100"], "env": []}]);
+    let started = std::time::Instant::now();
+
+    editor.request("session/new", json!({"cwd": home.project(), "mcpServers": hung})).unwrap();
+    let opened = started.elapsed();
+    let notice = editor.until("notice", |message| message["params"]["update"]["sessionUpdate"] == "notice");
+
+    assert!(opened < Duration::from_secs(20), "{opened:?}");
+    assert!(notice["params"]["update"]["title"].as_str().unwrap().starts_with("MCP server hung did not connect"), "{notice}");
+}
+
 /// An MCP server over stdio with one tool, `echo`.
 const FAKE_MCP_SERVER: &str = r#"
 import json, sys

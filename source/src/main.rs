@@ -583,7 +583,7 @@ fn run(options: Options) -> Result<(), String> {
         if let Some(error) = &modes_error {
             eprintln!("{error}");
         }
-        agent.mcp.settled();
+        agent.mcp.settled(if options.acp { acp::MCP_WAIT } else { mcp::CONNECT_TIMEOUT });
         let (servers, mcp_error) = agent.mcp.list();
         if let Some(error) = mcp_error {
             eprintln!("{error}");

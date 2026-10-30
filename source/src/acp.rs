@@ -18,6 +18,7 @@ use crate::agent::permissions::{Decision, MODES, Mode, Request};
 use crate::agent::prompt::{self, Skill};
 use crate::agent::{Agent, Event, workflow};
 use crate::api::models::{Model, PROVIDERS};
+use crate::mcp;
 use crate::settings::THINKING_LEVELS;
 use crate::tools::ask::{self, Answer, Question};
 use crate::tools::hashline::EditorFiles;
@@ -31,6 +32,8 @@ const INVALID_PARAMS: i64 = -32602;
 const INTERNAL_ERROR: i64 = -32603;
 const AUTH_REQUIRED: i64 = -32000;
 const REQUEST_CANCELLED: i64 = -32800;
+/// How long a new session waits for MCP servers; one still connecting then offers its tools once it connects.
+pub const MCP_WAIT: Duration = Duration::from_secs(5);
 
 pub fn serve(agent: &mut Agent) -> Result<(), String> {
     let cancelled = Arc::new(AtomicBool::new(false));
@@ -53,12 +56,33 @@ pub fn serve(agent: &mut Agent) -> Result<(), String> {
         // After the answer, so the editor knows the session the update is for.
         if opened_session {
             send(&json!({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": connection.session_id, "update": connection.commands.update()}}));
+            for notice in mcp_notices(agent) {
+                if connection.client["session"]["notices"].is_null() {
+                    eprintln!("agent acp: {notice}");
+                    continue;
+                }
+                let update = json!({"sessionUpdate": "notice", "severity": "info", "title": notice});
+                send(&json!({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": connection.session_id, "update": update}}));
+            }
         }
         if closed_session {
             break;
         }
     }
     Ok(())
+}
+
+/// What the user should know of the MCP servers a session opened without.
+fn mcp_notices(agent: &Agent) -> Vec<String> {
+    let mut notices = Vec::new();
+    for server in agent.mcp.list().0 {
+        match server.status {
+            mcp::Status::Connecting => notices.push(format!("MCP server {} did not connect in {} s; its tools join the session once it does.", server.name, MCP_WAIT.as_secs())),
+            mcp::Status::Failed(error) => notices.push(format!("MCP server {}: {error}", server.name)),
+            _ => {}
+        }
+    }
+    notices
 }
 
 /// Requests go to the first receiver, the replies to every request we sent the editor to the second.
@@ -150,7 +174,7 @@ fn handle(agent: &mut Agent, connection: &mut Connection, message: &Value) -> Re
                 return Err((AUTH_REQUIRED, "No account can run a model. Log in with /login in agent.".into()));
             }
             agent.mcp.set_client_servers(&params["mcpServers"], &settings.disabled_mcp, &settings.approved_mcp).map_err(|error| (INVALID_PARAMS, error))?;
-            agent.mcp.settled();
+            agent.mcp.settled(MCP_WAIT);
             agent.asks = !client["elicitation"]["form"].is_null();
             if method == "session/new" {
                 if !agent.messages.is_empty() {

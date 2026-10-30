@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
+pub use client::CONNECT_TIMEOUT;
 use client::{Client, Launch};
 use config::Server;
 
@@ -144,11 +145,12 @@ impl Mcp {
         self.state.lock().unwrap().client_list.clone()
     }
 
-    /// Waits until no server is still connecting, so a run without a UI starts with every tool.
-    pub fn settled(&self) {
+    /// Waits until no server is still connecting or `limit` passes, so a run without a UI starts with every tool.
+    /// A server still connecting after it offers its tools once it connects.
+    pub fn settled(&self, limit: Duration) {
         let start = Instant::now();
         let connecting = || self.state.lock().unwrap().servers.iter().any(|entry| matches!(entry.connection, Connection::Connecting));
-        while connecting() && start.elapsed() < client::CONNECT_TIMEOUT {
+        while connecting() && start.elapsed() < limit {
             std::thread::sleep(Duration::from_millis(50));
         }
     }
@@ -342,7 +344,7 @@ for line in sys.stdin:
             let _ = changed.send(());
         });
         mcp.sync(&[], &[]);
-        mcp.settled();
+        mcp.settled(CONNECT_TIMEOUT);
         assert!(change.try_recv().is_ok());
 
         let names: Vec<_> = mcp.tools().iter().map(|tool| tool["name"].clone()).collect();
@@ -402,7 +404,7 @@ for line in sys.stdin:
         mcp.sync(&[], &[]);
 
         mcp.set_client_servers(&json!([{"name": "fake", "command": "python3", "args": ["-c", FAKE_SERVER], "env": []}]), &[], &[]).unwrap();
-        mcp.settled();
+        mcp.settled(CONNECT_TIMEOUT);
         let names: Vec<_> = mcp.tools().iter().map(|tool| tool["name"].clone()).collect();
         let (views, _) = mcp.list();
         mcp.set_client_servers(&json!([]), &[], &[]).unwrap();
