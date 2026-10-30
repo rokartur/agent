@@ -72,6 +72,8 @@ const TOOL_OUTPUT_LINES: usize = 20;
 /// One line per tick while a selection drag rests on the transcript edge.
 const ANIMATION_TICK: Duration = Duration::from_millis(80);
 const HINT_LIFETIME: Duration = Duration::from_millis(1500);
+/// Other sessions and terminals add worktrees, switch branches and edit files, so the footer polls git.
+const GIT_REFRESH: Duration = Duration::from_secs(3);
 const EDGE_SCROLL: Duration = Duration::from_millis(40);
 const PERMISSION_SETTLE: Duration = Duration::from_millis(400);
 
@@ -143,6 +145,8 @@ enum Msg {
     /// Account usage arrived for /account.
     UsageFetched,
     WorktreeRemoved(PathBuf, Result<(), String>),
+    /// The footer's git state, read off the UI thread in this cwd, and how long the read took.
+    Git(PathBuf, Git, Duration),
     /// A plugin set its status or exited: redraw the footer and /plugins.
     PluginsChanged,
     /// An MCP server connected, failed or exited: redraw /mcp.
@@ -672,6 +676,8 @@ struct App {
     /// The `@` menu's last listing and the cwd-joined query it answers.
     path_matches: std::cell::RefCell<(PathBuf, Vec<(String, String)>)>,
     git: Git,
+    /// When the next background git read starts; None while one runs.
+    git_due: Option<Instant>,
     plugins: crate::plugins::Plugins,
     mcp: crate::mcp::Mcp,
     steering: crate::agent::Steering,
@@ -1156,6 +1162,15 @@ fn event_loop(app: &mut App, inbox: &Receiver<Msg>) -> Result<(), String> {
         {
             app.mouse(mouse);
         }
+        if !app.clients.is_empty() && app.git_due.is_some_and(|due| Instant::now() >= due) {
+            app.git_due = None;
+            let (cwd, events) = (app.cwd.clone(), app.events.clone());
+            std::thread::spawn(move || {
+                let started = Instant::now();
+                let git = git_info(&cwd);
+                let _ = events.send(Msg::Git(cwd, git, started.elapsed()));
+            });
+        }
         if app.hint.as_ref().is_some_and(|(_, at)| at.elapsed() > HINT_LIFETIME) {
             app.hint = None;
         }
@@ -1212,6 +1227,7 @@ impl App {
             last_usage: Usage::default(),
             session_usage: agent.session.path.as_deref().map(usage::session_totals).unwrap_or_default(),
             git: git_info(&agent.cwd),
+            git_due: Some(Instant::now() + GIT_REFRESH),
             plugins: agent.plugins.clone(),
             mcp: agent.mcp.clone(),
             cwd: agent.cwd.clone(),
@@ -1701,6 +1717,13 @@ impl App {
                 self.login_action(action);
             }
             Msg::UsageFetched | Msg::McpChanged => {}
+            Msg::Git(cwd, git, took) => {
+                // git status walks the tree: a slow repo is polled less, so git takes at most ~5% of a core.
+                self.git_due = Some(Instant::now() + GIT_REFRESH.max(took * 20));
+                if cwd == self.cwd {
+                    self.git = git;
+                }
+            }
             Msg::WorktreeRemoved(path, result) => match result {
                 Ok(()) => {
                     self.git = git_info(&self.cwd);
