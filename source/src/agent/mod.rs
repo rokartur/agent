@@ -1936,9 +1936,14 @@ impl Agent {
 
 /// The API rejects a whole request when any tool call lacks a result in the next message, so one call cut off
 /// mid-run (the process quit or crashed before its result was saved) would make every later prompt a 400.
+/// A tool search the model asked for after a client tool call ends the reply unrun, with no result to answer it, so it goes.
 fn answer_missing_results(mut messages: Vec<Value>) -> Vec<Value> {
     let mut index = 0;
     while index < messages.len() {
+        if let Some(content) = messages[index]["content"].as_array_mut() {
+            let answered: Vec<Value> = content.iter().map(|b| b["tool_use_id"].clone()).collect();
+            content.retain(|b| b["type"] != "server_tool_use" || answered.contains(&b["id"]));
+        }
         let calls: Vec<Value> = match messages[index]["role"].as_str() {
             Some("assistant") => messages[index]["content"].as_array().into_iter().flatten().filter(|b| b["type"] == "tool_use").map(|b| b["id"].clone()).collect(),
             _ => Vec::new(),
@@ -2672,6 +2677,16 @@ mod tests {
                 json!({"role": "user", "content": [interrupted("d")]}),
             ]
         );
+    }
+
+    #[test]
+    fn a_tool_search_the_api_never_ran_is_left_out() {
+        let call = json!({"type": "tool_use", "id": "a", "name": "Bash", "input": {}});
+        let search = |id: &str| json!({"type": "server_tool_use", "id": id, "name": "tool_search_tool_bm25", "input": {"query": "Todo"}});
+        let found = json!({"type": "tool_search_tool_result", "tool_use_id": "s1", "content": {"type": "tool_search_tool_search_result"}});
+        let result = json!({"type": "tool_result", "tool_use_id": "a", "content": "ok"});
+        let messages = vec![json!({"role": "assistant", "content": [search("s1"), found.clone(), call.clone(), search("s2")]}), json!({"role": "user", "content": [result.clone()]})];
+        assert_eq!(answer_missing_results(messages), vec![json!({"role": "assistant", "content": [search("s1"), found, call]}), json!({"role": "user", "content": [result]})]);
     }
 
     #[test]
