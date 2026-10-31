@@ -7,6 +7,7 @@ A plugin is a directory with a `plugin.json` and the program it names. The agent
 ```sh
 agent plugin install usagefleet        # a plugin from this directory, built into the agent
 agent plugin install ./my-plugin       # your own plugin directory
+agent plugin update                    # every installed plugin; or name some: agent plugin update usagefleet
 agent plugin list
 agent plugin remove usagefleet
 ```
@@ -14,6 +15,8 @@ agent plugin remove usagefleet
 Plugins go to `~/.agents/plugins/<name>/`. In the TUI, `/plugins` installs, removes, enables and disables them. Disabled plugins are kept in `disabled_plugins` in `~/.agents/settings.json`.
 
 At startup, the agent updates each installed plugin from this directory when the agent has a higher `version`, and shows a message. When you change a plugin here, increase its `version`, or users keep the old copy. A local copy with the same or a higher version is not changed.
+
+`agent plugin update` copies each plugin installed from a directory again from that directory, so edit your plugin there and run it. A bundled plugin updates only when the agent has a higher `version`. A plugin installed from a directory before this command existed needs one more `agent plugin install <path>`. Running sessions keep the old plugin process until they restart.
 
 ## plugin.json
 
