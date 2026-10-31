@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { accountLabels, assignToken, blockMessage, claudeAccount, formatGroupLimits, formatLimits, inheritToken, resolveToken, tokenReport, type Context } from "./index.ts";
+import { accountLabels, assignToken, blockMessage, claudeAccount, formatGroupLimits, formatLimits, hasFiveHourWindow, inheritToken, resolveToken, tokenReport, type Context } from "./index.ts";
 
 const now = Date.parse("2026-10-15T12:00:00Z");
 const context: Context = { provider: "anthropic", model: "claude-opus-5-5", accountId: "uuid-2", accountName: "home", cwd: "/", sessionId: "s", settings: { showGroupName: false } };
@@ -11,6 +11,15 @@ describe("usagefleet", () => {
 		expect(formatLimits({ limits: { ...limits, at: "2026-10-15T11:40:00Z" } }, now)).toBeNull();
 	});
 
+	test("shows only the weekly window on a plan without a 5h window", () => {
+		const ultra = { limits: { fiveHourPct: null, sevenDayPct: 41, at: "2026-10-15T11:52:00Z" } };
+		expect(formatLimits(ultra, now)).toEqual([{ text: "7d " }, { text: "41%", tone: "ok" }]);
+		expect(hasFiveHourWindow(ultra)).toBe(false);
+		expect(hasFiveHourWindow(null)).toBe(true);
+		const view = { group: "Artur", sessionPct: 0, weeklyPct: 17 };
+		expect(formatGroupLimits(view, true, false)?.map((part) => part.text).join("")).toBe("Artur: 7d 17%");
+	});
+
 	test("tones percents green below 50, orange below 80, red from 80", () => {
 		const tones = (fiveHourPct: number, sevenDayPct: number) =>
 			formatLimits({ limits: { fiveHourPct, sevenDayPct, at: "2026-10-15T11:58:00Z" } }, now)?.map((part) => part.tone);
@@ -20,9 +29,9 @@ describe("usagefleet", () => {
 
 	test("shows the group budget, named only when asked", () => {
 		const view = { group: "Artur", sessionPct: 30, weeklyPct: 17 };
-		expect(formatGroupLimits(view, true)?.map((part) => part.text).join("")).toBe("Artur: 5h 30% · 7d 17%");
-		expect(formatGroupLimits(view, false)?.map((part) => part.text).join("")).toBe("5h 30% · 7d 17%");
-		expect(formatGroupLimits({ group: null }, true)).toBeNull();
+		expect(formatGroupLimits(view, true, true)?.map((part) => part.text).join("")).toBe("Artur: 5h 30% · 7d 17%");
+		expect(formatGroupLimits(view, false, true)?.map((part) => part.text).join("")).toBe("5h 30% · 7d 17%");
+		expect(formatGroupLimits({ group: null }, true, true)).toBeNull();
 	});
 
 	test("picks the session account's token before the shared one", () => {
