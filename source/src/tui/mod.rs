@@ -2971,15 +2971,14 @@ impl App {
                         let Some(account) = accounts.get(*index) else { return };
                         self.panel = None;
                         if !logout {
-                            let (provider, name) = (account.provider.clone(), account.name.clone());
-                            self.update_settings(|s| {
-                                s.default_accounts.insert(provider, name);
-                            });
+                            // For this session only, like a resumed session's account: /settings saves only the keys it changes.
+                            self.settings.default_accounts.insert(account.provider.clone(), account.name.clone());
+                            self.client.configure(&self.settings);
                             let _ = self.commands.send(Command::AccountPicked);
                             self.system(
                                 "account",
                                 format!(
-                                    "Default {} account: {}{}.",
+                                    "This session uses {} account {}{}.",
                                     account.provider,
                                     account.name,
                                     if self.settings.switch_at_percent == 0 { String::new() } else { format!(", until it reaches {}%", self.settings.switch_at_percent) }
@@ -5178,7 +5177,7 @@ fn account_rows(accounts: &[AccountView], labels: &[(String, HashMap<String, Str
             }
             group = Some(a.oauth);
             let (title, five_hour, seven_day) = if a.oauth { ("Subscription", "5h", "7d") } else { ("API key", "", "") };
-            let mut heading: Vec<String> = ["Provider", five_hour, seven_day, "Default"].map(String::from).into();
+            let mut heading: Vec<String> = ["Provider", five_hour, seven_day, "Pinned"].map(String::from).into();
             if a.oauth {
                 heading.extend(labels.iter().map(|(plugin, _)| plugin.clone()));
             }
@@ -6885,11 +6884,11 @@ mod tests {
         assert_eq!(
             table,
             [
-                ("  Subscription", "Provider    5h   7d  Default  usagefleet".to_string()),
-                ("✓ claudescom", "anthropic  21%  73%           uf_tVdC…".to_string()),
+                ("  Subscription", "Provider    5h   7d  Pinned  usagefleet".to_string()),
+                ("✓ claudescom", "anthropic  21%  73%          uf_tVdC…".to_string()),
                 ("  rokartur", "anthropic    ?    ?  pinned".to_string()),
                 ("", String::new()),
-                ("  API key", "Provider             Default".to_string()),
+                ("  API key", "Provider             Pinned".to_string()),
                 ("  claudescom-api", "anthropic".to_string()),
             ]
         );

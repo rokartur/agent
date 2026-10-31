@@ -34,11 +34,12 @@ describe("usagefleet", () => {
 		expect(formatGroupLimits({ group: null }, true, true)).toBeNull();
 	});
 
-	test("picks the session account's token before the shared one", () => {
+	test("picks the session account's token, never another account's", () => {
 		const config = { token: "shared", accountTokens: { "uuid-1": "first", "uuid-2": "second" } };
 		expect(resolveToken(config, "uuid-2", {})).toBe("second");
 		expect(resolveToken(config, "uuid-9", {})).toBe("shared");
-		expect(resolveToken({ accountTokens: { "uuid-1": "first" } }, "uuid-9", {})).toBe("first");
+		expect(resolveToken({ token: "first", accountTokens: { "uuid-1": "first" } }, "uuid-9", {})).toBeNull();
+		expect(resolveToken({ accountTokens: { "uuid-1": "first" } }, "uuid-9", {})).toBeNull();
 		expect(resolveToken(config, "uuid-2", { USAGEFLEET_TOKEN: "env" })).toBe("env");
 	});
 
@@ -67,6 +68,7 @@ describe("usagefleet", () => {
 		const config = { token: "uf_sharedtoken", accountTokens: { "uuid-1": "uf_firsttoken" } };
 		expect(tokenReport(config, "uuid-1", "work", {})).toBe("Account work uses its own token uf_firs….");
 		expect(tokenReport(config, "uuid-2", "home", {})).toStartWith("Account home has no token of its own and uses uf_shar….");
+		expect(tokenReport({ token: "uf_firsttoken", accountTokens: { "uuid-1": "uf_firsttoken" } }, "uuid-2", "home", {})).toStartWith("Account home has no usagefleet token.");
 		expect(tokenReport({}, "uuid-2", "home", {})).toStartWith("Account home has no usagefleet token.");
 	});
 

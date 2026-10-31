@@ -86,15 +86,16 @@ export function detectAccountUuid(raw: unknown): string | null {
 	return account.accountUuid;
 }
 
-/** USAGEFLEET_TOKEN, then the account's device token, then the shared one, then any account's. */
+/** USAGEFLEET_TOKEN, then the account's device token, then the shared one unless it is another account's.
+ * A token reports the subscription its device signs into, so another account's would show that account's budget. */
 export function resolveToken(config: unknown, accountId: string, env: NodeJS.ProcessEnv = process.env): string | null {
 	if (env.USAGEFLEET_TOKEN) return env.USAGEFLEET_TOKEN;
 	if (!isRecord(config)) return null;
 	const accountTokens = isRecord(config.accountTokens) ? config.accountTokens : {};
 	const own = accountTokens[accountId];
 	if (typeof own === "string" && own) return own;
-	if (typeof config.token === "string" && config.token) return config.token;
-	return Object.values(accountTokens).find((token): token is string => typeof token === "string" && Boolean(token)) ?? null;
+	if (typeof config.token !== "string" || !config.token || Object.values(accountTokens).includes(config.token)) return null;
+	return config.token;
 }
 
 /** usagefleet guards the Claude subscription; other providers and API keys have no budget here. */
