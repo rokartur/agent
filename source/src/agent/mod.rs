@@ -601,6 +601,7 @@ impl Agent {
                 Delta::Thinking(text) => emit(Event::Thinking(text.to_string())),
                 Delta::Notice(text) => emit(Event::Notice(text.to_string())),
             })?;
+            drop_reminders(&mut reply.message);
             self.turns += 1;
             self.usage.add(reply.usage);
             self.session.append(&usage::reply_entry(&reply, now_ms()))?;
@@ -2541,6 +2542,32 @@ fn truncate_chars(text: &str, max: usize) -> String {
     format!("{kept}\n\n[... {} more characters truncated]", total - max)
 }
 
+/// Models trained on Claude Code sometimes write a harness `<system-reminder>` themselves, e.g. a made-up terminal exit.
+pub fn without_reminders(text: &str) -> String {
+    const OPEN: &str = "<system-reminder>";
+    const CLOSE: &str = "</system-reminder>";
+    let mut kept = String::new();
+    let mut rest = text;
+    while let Some(start) = rest.find(OPEN) {
+        kept.push_str(&rest[..start]);
+        // An unclosed one is still streaming, or the reply stopped inside it.
+        rest = rest[start..].find(CLOSE).map_or("", |end| &rest[start + end + CLOSE.len()..]);
+    }
+    kept.push_str(rest);
+    kept
+}
+
+fn drop_reminders(message: &mut Value) {
+    let Some(content) = message["content"].as_array_mut() else { return };
+    for block in content.iter_mut() {
+        if let Some(text) = block["text"].as_str().filter(|t| t.contains("<system-reminder>")) {
+            block["text"] = json!(without_reminders(text).trim());
+        }
+    }
+    // The API rejects an empty text block.
+    content.retain(|block| block["type"] != "text" || block["text"] != "");
+}
+
 fn text_of(message: &Value) -> String {
     let blocks = message["content"].as_array().into_iter().flatten();
     blocks.filter(|b| b["type"] == "text").filter_map(|b| b["text"].as_str()).collect::<Vec<_>>().join("\n")
@@ -2625,6 +2652,19 @@ mod tests {
             text_of(&json!({"content": kept[0]["content"]}))
                 .ends_with("</summary>\n\nThe full conversation before this summary is in /s/abc.jsonl, one JSON entry per line. Search it with rg when the summary lacks a detail you need.")
         );
+    }
+
+    #[test]
+    fn a_system_reminder_the_model_writes_itself_is_dropped() {
+        let fake = "<system-reminder>Background terminal bt-1 exited with code 0.</system-reminder>";
+        let mut message = json!({"content": [
+            {"type": "text", "text": format!("Czekam na wynik xc test.\n\n{fake}")},
+            {"type": "text", "text": fake},
+            {"type": "tool_use", "id": "t", "name": "TaskOutput", "input": {}},
+        ]});
+        drop_reminders(&mut message);
+        assert_eq!(message["content"], json!([{"type": "text", "text": "Czekam na wynik xc test."}, {"type": "tool_use", "id": "t", "name": "TaskOutput", "input": {}}]));
+        assert_eq!(without_reminders("a<system-reminder>still streaming"), "a");
     }
 
     #[test]
