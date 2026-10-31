@@ -5362,7 +5362,7 @@ fn render_item(item: &Item, width: usize, expanded: bool, cwd: &Path) -> Vec<Lin
                 }
             }
             // One column of margin, matching the thinking text above.
-            for line in markdown::render(text, width.saturating_sub(1)) {
+            for line in markdown::render(&crate::agent::without_reminders(text), width.saturating_sub(1)) {
                 let mut indented = vec![span(" ", PLAIN)];
                 indented.extend(line);
                 lines.push(indented);
