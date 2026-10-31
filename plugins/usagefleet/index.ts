@@ -41,32 +41,35 @@ const isRecord = (value: unknown): value is Record<string, unknown> => typeof va
 /** A `ui.setStatus` part; the footer colors it by tone. */
 export type StatusPart = { text: string; tone?: "ok" | "warn" | "error" };
 
-/** "5h 12% · 7d 8%" with toned percents, or null when the config has no fresh reading. */
+/** "5h 12% · 7d 8%" with toned percents, "7d 8%" on a plan without a 5h window, or null when the config has no fresh reading. */
 export function formatLimits(config: unknown, now: number): StatusPart[] | null {
 	const limits = isRecord(config) ? config.limits : undefined;
 	if (!isRecord(limits)) return null;
 	const { fiveHourPct, sevenDayPct, at } = limits;
-	if (typeof fiveHourPct !== "number" || typeof sevenDayPct !== "number") return null;
+	if ((fiveHourPct !== null && typeof fiveHourPct !== "number") || typeof sevenDayPct !== "number") return null;
 	const reported = typeof at === "string" ? Date.parse(at) : Number.NaN;
 	if (Number.isNaN(reported) || now - reported > STALE_AFTER_MS) return null;
 	return formatWindows(fiveHourPct, sevenDayPct);
 }
 
 /** "Artur: 5h 30% · 7d 17%", or null when the device is in no group. */
-export function formatGroupLimits(view: unknown, showName: boolean): StatusPart[] | null {
+export function formatGroupLimits(view: unknown, showName: boolean, hasFiveHour: boolean): StatusPart[] | null {
 	if (!isRecord(view)) return null;
 	const { group, sessionPct, weeklyPct } = view;
 	if (typeof group !== "string" || typeof sessionPct !== "number" || typeof weeklyPct !== "number") return null;
-	const windows = formatWindows(sessionPct, weeklyPct);
+	// The server sends sessionPct 0 for an Ultra plan, so only the watcher's reading tells it has no 5h window.
+	const windows = formatWindows(hasFiveHour ? sessionPct : null, weeklyPct);
 	return showName ? [{ text: `${group}: ` }, ...windows] : windows;
 }
 
-const formatWindows = (fiveHourPct: number, sevenDayPct: number): StatusPart[] => [
-	{ text: "5h " },
-	percentPart(fiveHourPct),
-	{ text: " · 7d " },
-	percentPart(sevenDayPct),
-];
+/** Ultra plans have no 5h window, so the watcher reports `fiveHourPct: null`. */
+export const hasFiveHourWindow = (config: unknown): boolean =>
+	!(isRecord(config) && isRecord(config.limits) && config.limits.fiveHourPct === null);
+
+const formatWindows = (fiveHourPct: number | null, sevenDayPct: number): StatusPart[] =>
+	fiveHourPct === null
+		? [{ text: "7d " }, percentPart(sevenDayPct)]
+		: [{ text: "5h " }, percentPart(fiveHourPct), { text: " · 7d " }, percentPart(sevenDayPct)];
 
 function percentPart(pct: number): StatusPart {
 	const rounded = Math.round(pct);
@@ -212,10 +215,11 @@ async function status(context: Context): Promise<StatusPart[] | null> {
 	// Offline or rejected hides the group numbers rather than freezing old ones.
 	const view = token ? await fetchServerLimits(token).catch(() => null) : null;
 	// The group budget is what blocks prompts, so it replaces the account's own numbers.
-	const group = formatGroupLimits(view, context.settings.showGroupName);
-	if (group) return group;
 	// The watcher reads limits for one account; a session on another account would show the wrong numbers.
-	return account === (await collectorAccount()) ? formatLimits(config, Date.now()) : null;
+	const ownReading = account === (await collectorAccount()) ? config : null;
+	const group = formatGroupLimits(view, context.settings.showGroupName, hasFiveHourWindow(ownReading));
+	if (group) return group;
+	return ownReading ? formatLimits(ownReading, Date.now()) : null;
 }
 
 /** Fails open on every error, the same guarantee `usagefleet guard` makes. */
