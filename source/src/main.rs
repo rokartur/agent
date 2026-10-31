@@ -46,6 +46,8 @@ Commands:
   service install [--on host] Run serve --tailnet now and after every login, here or over ssh on host; status,
                               restart and uninstall manage it
   plugin install <name|path>  Copy a bundled plugin or a plugin directory into ~/.agents/plugins
+  plugin update [name...]     Copy installed plugins again from their directories, or update bundled ones; all
+                              when no name is given
   plugin remove <name>        Remove an installed plugin
   plugin list                 List bundled and installed plugins
   update                      Check for a newer release now and install it
@@ -195,6 +197,11 @@ fn plugin_command(args: &[String]) -> Result<(), String> {
     let home = home()?;
     match args {
         [action, source] if action == "install" => println!("Installed {}.", plugins::install(&home, source)?),
+        [action, names @ ..] if action == "update" => {
+            for line in plugins::update(&home, names)? {
+                println!("{line}");
+            }
+        }
         [action, name] if action == "remove" => {
             plugins::remove(&home, name)?;
             println!("Removed {name}.");
