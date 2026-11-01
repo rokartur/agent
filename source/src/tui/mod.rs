@@ -6943,7 +6943,6 @@ mod tests {
                 ("  Subscription", "Provider    5h   7d  Pinned  usagefleet".to_string()),
                 ("✓ claudescom", "anthropic  21%  73%          uf_tVdC…".to_string()),
                 ("  rokartur", "anthropic    ?    ?  pinned".to_string()),
-                ("  ultra", "anthropic    -  41%".to_string()),
                 ("", String::new()),
                 ("  API key", "Provider             Pinned".to_string()),
                 ("  claudescom-api", "anthropic".to_string()),
