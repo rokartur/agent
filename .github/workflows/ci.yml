@@ -8,6 +8,13 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_PROFILE_DEV_DEBUG: 0
+
 jobs:
   test:
     strategy:
@@ -21,10 +28,22 @@ jobs:
       - uses: actions/checkout@v7
       # Tests run rg, fd and ImageMagick's convert; Ubuntu ships fd as fdfind.
       - if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ripgrep fd-find imagemagick && sudo ln -s "$(command -v fdfind)" /usr/local/bin/fd
+        id: image
+        run: echo "version=$ImageOS-$ImageVersion" >> "$GITHUB_OUTPUT"
+      # The Azure apt mirror sometimes serves these 3.5 MB at 40 kB/s; the cache follows the image so dpkg finds its dependencies.
+      - if: runner.os == 'Linux'
+        id: debs
+        uses: actions/cache@v6
+        with:
+          path: ~/debs
+          key: debs-${{ steps.image.outputs.version }}-ripgrep-fd-find-imagemagick
+      - if: runner.os == 'Linux' && steps.debs.outputs.cache-hit != 'true'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends --download-only ripgrep fd-find imagemagick && mkdir -p ~/debs && cp /var/cache/apt/archives/*.deb ~/debs
+      - if: runner.os == 'Linux'
+        run: sudo dpkg -i ~/debs/*.deb && sudo ln -s "$(command -v fdfind)" /usr/local/bin/fd
       - if: runner.os == 'macOS'
         run: brew install ripgrep fd
-      - run: rustup update stable && rustup default stable && rustup component add clippy rustfmt
+      - run: rustup component add clippy rustfmt
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: source
