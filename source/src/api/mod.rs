@@ -651,6 +651,7 @@ impl Client {
         }
     }
 
+    /// Subscriptions, then API keys, by provider order, each provider's accounts in the priority order failover tries them.
     pub fn accounts(&self) -> Vec<AccountView> {
         let state = self.state.lock().unwrap();
         let mut views: Vec<AccountView> = state
@@ -667,7 +668,7 @@ impl Client {
             })
             .collect();
         let rank = |provider: &str| state.provider_order.iter().position(|listed| *listed == provider).unwrap_or(usize::MAX);
-        views.sort_by(|a, b| (!a.oauth, rank(&a.provider), &a.name).cmp(&(!b.oauth, rank(&b.provider), &b.name)));
+        views.sort_by_key(|a| (!a.oauth, rank(&a.provider)));
         views
     }
 
@@ -695,6 +696,21 @@ impl Client {
             let before = list.len();
             list.retain(|a| a.provider != provider || a.name != name);
             if list.len() == before { Err(format!("{name} is not a saved account.")) } else { Ok(()) }
+        })?;
+        self.reload(saved);
+        Ok(())
+    }
+
+    /// Swaps the account with the one before (`up`) or after it among its provider's accounts; at either end nothing moves.
+    pub fn move_account(&self, provider: &str, name: &str, up: bool) -> Result<(), String> {
+        let saved = accounts::update(&self.home, |list| {
+            let same: Vec<usize> = (0..list.len()).filter(|i| list[*i].provider == provider).collect();
+            let at = same.iter().position(|i| list[*i].name == name).ok_or(format!("{name} is not a saved account."))?;
+            let neighbor = if up { at.checked_sub(1) } else { Some(at + 1) };
+            if let Some(&neighbor) = neighbor.and_then(|n| same.get(n)) {
+                list.swap(same[at], neighbor);
+            }
+            Ok(())
         })?;
         self.reload(saved);
         Ok(())
@@ -1175,6 +1191,25 @@ mod tests {
         assert_eq!(client.account_names(&ids("uuid-work")), HashMap::from([("anthropic".to_string(), "work".to_string())]));
         assert_eq!(client.account_names(&ids("uuid-gone")), HashMap::new());
         std::fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn moving_an_account_reorders_only_its_provider_and_is_saved() {
+        let home = std::env::temp_dir().join(format!("agent-move-{}", std::process::id()));
+        let client = Client::new(&home).unwrap();
+        for (provider, name) in [("anthropic", "zeta"), ("openrouter", "or"), ("anthropic", "alpha"), ("anthropic", "mid")] {
+            client.add(Account { provider: provider.into(), name: name.into(), secret: Secret::ApiKey("k".into()) }).unwrap();
+        }
+        let names = || client.accounts().into_iter().filter(|a| a.provider == "anthropic").map(|a| a.name).collect::<Vec<_>>();
+        assert_eq!(names(), ["zeta", "alpha", "mid"]);
+
+        client.move_account("anthropic", "mid", true).unwrap();
+        client.move_account("anthropic", "zeta", true).unwrap();
+        assert_eq!(names(), ["zeta", "mid", "alpha"]);
+        client.move_account("anthropic", "zeta", false).unwrap();
+        let saved: Vec<_> = accounts::load(&home).unwrap().into_iter().map(|a| a.name).collect();
+        std::fs::remove_dir_all(&home).ok();
+        assert_eq!(saved, ["mid", "zeta", "alpha", "or"]);
     }
 
     #[test]

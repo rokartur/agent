@@ -14,7 +14,7 @@
 
 ## Accounts
 
-`~/.agents/accounts.json` (`api/accounts.rs`): every saved account in priority order per provider, with its secret. Writes go through a 0600 temp file and a rename, under `<path>.lock`, so two agent processes saving at once keep each other's accounts. A key in `ANTHROPIC_API_KEY` or `OPENROUTER_API_KEY` becomes an account named `env` when no saved account exists for that provider (`Client::reload`). This is why the tests run with `env -u ANTHROPIC_API_KEY`.
+`~/.agents/accounts.json` (`api/accounts.rs`): every saved account in priority order per provider, with its secret. `/account` lists them in that order and Shift+↑↓ moves the selected one (`Client::move_account`). Writes go through a 0600 temp file and a rename, under `<path>.lock`, so two agent processes saving at once keep each other's accounts. A key in `ANTHROPIC_API_KEY` or `OPENROUTER_API_KEY` becomes an account named `env` when no saved account exists for that provider (`Client::reload`). This is why the tests run with `env -u ANTHROPIC_API_KEY`.
 
 OAuth accounts report subscription windows (5h, 7d) in percent; `/usage` and `/account` show them. API keys have none.
 
