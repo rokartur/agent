@@ -34,7 +34,7 @@ Looked up in `cwd` and its parents up to the git root, nearest first. A project 
 
 An `AGENTS.md` below cwd is attached to the first `Read` result that reaches its directory, once per session (`nested_instructions`): the file closest to the code applies.
 
-Skills are the `SKILL.md` frontmatter (`name`, `description`, `disable-model-invocation`) listed in the prompt; `/skill:name args` or the `Skill` tool expands the body in a `<skill>` block. Templates use pi's placeholders: `$1`, `$@`, `$ARGUMENTS`, `${1:-default}`, `${@:2}`.
+Skills are the `SKILL.md` frontmatter (`name`, `description`, `disable-model-invocation`) listed in the prompt; `/skill:name args` or the `Skill` tool expands the body in a `<skill>` block. In the TUI, `/name args` runs the skill unless a command has that name, and `/name` typed after prompt text offers skills: Tab moves the pick to the front. Templates use pi's placeholders: `$1`, `$@`, `$ARGUMENTS`, `${1:-default}`, `${@:2}`.
 
 ## `.agents/edit-hooks.json`
 
