@@ -728,6 +728,11 @@ impl Client {
         Some((account.name.clone(), account.account_id().map(String::from)))
     }
 
+    /// The account's last fetched subscription windows; None for API keys and before the first fetch.
+    pub fn account_usage(&self, provider: &str, name: &str) -> Option<accounts::Usage> {
+        self.state.lock().unwrap().usage.get(&format!("{provider}/{name}")).and_then(|(_, usage)| usage.clone())
+    }
+
     /// Provider to saved account name for each provider account id in `ids`; ids of accounts no longer saved drop out.
     pub fn account_names(&self, ids: &HashMap<String, String>) -> HashMap<String, String> {
         let state = self.state.lock().unwrap();
@@ -773,7 +778,10 @@ impl Client {
         }
         let base = if account.provider == "anthropic" { &self.anthropic_base } else { &self.chatgpt_base };
         let usage = match accounts::fetch_usage(&account, base) {
-            Ok(usage) => format!("5h {:.0}%, 7d {:.0}%", usage.five_hour, usage.seven_day),
+            Ok(usage) => match usage.five_hour {
+                Some(five_hour) => format!("5h {five_hour:.0}%, 7d {:.0}%", usage.seven_day),
+                None => format!("7d {:.0}%", usage.seven_day),
+            },
             Err(error) => error,
         };
         Ok(format!("{pinged}, {usage}"))

@@ -14,8 +14,11 @@ describe("usagefleet", () => {
 	test("shows only the weekly window on a plan without a 5h window", () => {
 		const ultra = { limits: { fiveHourPct: null, sevenDayPct: 41, at: "2026-10-15T11:52:00Z" } };
 		expect(formatLimits(ultra, now)).toEqual([{ text: "7d " }, { text: "41%", tone: "ok" }]);
-		expect(hasFiveHourWindow(ultra)).toBe(false);
-		expect(hasFiveHourWindow(null)).toBe(true);
+		expect(hasFiveHourWindow(context, ultra)).toBe(false);
+		expect(hasFiveHourWindow(context, null)).toBe(true);
+		// The watcher reads another account, so the agent's reading of the session's account decides.
+		expect(hasFiveHourWindow({ ...context, accountUsage: { fiveHourPct: null, sevenDayPct: 41 } }, null)).toBe(false);
+		expect(hasFiveHourWindow({ ...context, accountUsage: { fiveHourPct: 0, sevenDayPct: 41 } }, ultra)).toBe(true);
 		const view = { group: "Artur", sessionPct: 0, weeklyPct: 17 };
 		expect(formatGroupLimits(view, true, false)?.map((part) => part.text).join("")).toBe("Artur: 7d 17%");
 	});

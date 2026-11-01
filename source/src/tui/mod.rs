@@ -5197,7 +5197,9 @@ fn account_rows(accounts: &[AccountView], labels: &[(String, HashMap<String, Str
             (false, _) => String::new(),
         };
         let mark = if a.current { "✓ " } else { "  " };
-        let mut cells = vec![a.provider.clone(), percent(a.usage.as_ref().map(|u| u.five_hour)), percent(a.usage.as_ref().map(|u| u.seven_day)), if a.pinned { "pinned" } else { "" }.to_string()];
+        let no_five_hour = a.usage.as_ref().is_some_and(|u| u.five_hour.is_none());
+        let five_hour = if no_five_hour { "-".to_string() } else { percent(a.usage.as_ref().and_then(|u| u.five_hour)) };
+        let mut cells = vec![a.provider.clone(), five_hour, percent(a.usage.as_ref().map(|u| u.seven_day)), if a.pinned { "pinned" } else { "" }.to_string()];
         for (_, by_account) in labels {
             cells.push(a.account_id.as_ref().and_then(|id| by_account.get(id)).cloned().unwrap_or_default());
         }
@@ -6876,7 +6878,7 @@ mod tests {
 
     #[test]
     fn account_rows_group_subscriptions_and_api_keys_in_shared_columns() {
-        let account = |name: &str, oauth: bool, id: Option<&str>, usage: Option<(f64, f64)>| AccountView {
+        let account = |name: &str, oauth: bool, id: Option<&str>, usage: Option<(Option<f64>, f64)>| AccountView {
             provider: "anthropic".into(),
             name: name.into(),
             oauth,
@@ -6885,7 +6887,12 @@ mod tests {
             current: name == "claudescom",
             pinned: name == "rokartur",
         };
-        let accounts = [account("claudescom", true, Some("uuid-1"), Some((21.0, 73.0))), account("rokartur", true, Some("uuid-2"), None), account("claudescom-api", false, None, None)];
+        let accounts = [
+            account("claudescom", true, Some("uuid-1"), Some((Some(21.0), 73.0))),
+            account("rokartur", true, Some("uuid-2"), None),
+            account("ultra", true, Some("uuid-3"), Some((None, 41.0))),
+            account("claudescom-api", false, None, None),
+        ];
         let labels = [("usagefleet".to_string(), HashMap::from([("uuid-1".to_string(), "uf_tVdC…".to_string())]))];
         let (rows, account_rows) = account_rows(&accounts, &labels);
         let table: Vec<(&str, String)> = rows.iter().map(|row| (row.left.as_str(), text(&row.right))).collect();
@@ -6895,14 +6902,15 @@ mod tests {
                 ("  Subscription", "Provider    5h   7d  Pinned  usagefleet".to_string()),
                 ("✓ claudescom", "anthropic  21%  73%          uf_tVdC…".to_string()),
                 ("  rokartur", "anthropic    ?    ?  pinned".to_string()),
+                ("  ultra", "anthropic    -  41%".to_string()),
                 ("", String::new()),
                 ("  API key", "Provider             Pinned".to_string()),
                 ("  claudescom-api", "anthropic".to_string()),
             ]
         );
-        assert_eq!(account_rows, [1, 2, 5]);
+        assert_eq!(account_rows, [1, 2, 3, 6]);
         let names = |query| matching_accounts(accounts.to_vec(), query).into_iter().map(|a| a.name).collect::<Vec<_>>();
-        assert_eq!(names("API"), ["claudescom-api", "claudescom", "rokartur"]);
-        assert_eq!(names("anthropic").len(), 3);
+        assert_eq!(names("API"), ["claudescom-api", "claudescom", "rokartur", "ultra"]);
+        assert_eq!(names("anthropic").len(), 4);
     }
 }

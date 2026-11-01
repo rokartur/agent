@@ -47,12 +47,14 @@ The agent runs `command` in the plugin directory. The directory name is the plug
 Every message has a `context`:
 
 ```json
-{ "provider": "anthropic", "model": "claude-opus-5-5", "accountId": "…", "accountName": "work", "cwd": "/repo", "sessionId": "…", "settings": { "verbose": false } }
+{ "provider": "anthropic", "model": "claude-opus-5-5", "accountId": "…", "accountName": "work", "accountUsage": { "fiveHourPct": 12, "sevenDayPct": 40 }, "cwd": "/repo", "sessionId": "…", "settings": { "verbose": false } }
 ```
 
 `settings` holds the value of each setting in `plugin.json`, with the user's changes.
 
 `accountId` is the Claude account uuid or the ChatGPT account id. It is `null` for API keys. `accountName` is the name the user gave the account at `/login`. It is `null` when the provider has no account.
+
+`accountUsage` is the agent's last reading of the account's subscription windows in percent. `fiveHourPct` is `null` on plans without a 5h window, like Claude Ultra. `accountUsage` is `null` for API keys and until the agent first reads the windows.
 
 `provider`, `accountId` and `accountName` are `null` when every model list failed at startup.
 

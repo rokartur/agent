@@ -20,6 +20,8 @@ export type Context = {
 	accountId: string | null;
 	/** The name the user gave the account at /login. */
 	accountName: string | null;
+	/** The agent's last reading of the account's windows; null for API keys and before the first one. */
+	accountUsage?: { fiveHourPct: number | null; sevenDayPct: number } | null;
 	cwd: string;
 	sessionId: string;
 	settings: { showGroupName: boolean };
@@ -62,9 +64,11 @@ export function formatGroupLimits(view: unknown, showName: boolean, hasFiveHour:
 	return showName ? [{ text: `${group}: ` }, ...windows] : windows;
 }
 
-/** Ultra plans have no 5h window, so the watcher reports `fiveHourPct: null`. */
-export const hasFiveHourWindow = (config: unknown): boolean =>
-	!(isRecord(config) && isRecord(config.limits) && config.limits.fiveHourPct === null);
+/** Ultra plans have no 5h window: the agent's reading of the session's account, else the watcher's, has `fiveHourPct: null`. */
+export const hasFiveHourWindow = (context: Context, config: unknown): boolean =>
+	context.accountUsage
+		? context.accountUsage.fiveHourPct !== null
+		: !(isRecord(config) && isRecord(config.limits) && config.limits.fiveHourPct === null);
 
 const formatWindows = (fiveHourPct: number | null, sevenDayPct: number): StatusPart[] =>
 	fiveHourPct === null
@@ -218,7 +222,7 @@ async function status(context: Context): Promise<StatusPart[] | null> {
 	// The group budget is what blocks prompts, so it replaces the account's own numbers.
 	// The watcher reads limits for one account; a session on another account would show the wrong numbers.
 	const ownReading = account === (await collectorAccount()) ? config : null;
-	const group = formatGroupLimits(view, context.settings.showGroupName, hasFiveHourWindow(ownReading));
+	const group = formatGroupLimits(view, context.settings.showGroupName, hasFiveHourWindow(context, ownReading));
 	if (group) return group;
 	return ownReading ? formatLimits(ownReading, Date.now()) : null;
 }
