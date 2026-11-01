@@ -130,7 +130,8 @@ pub(crate) fn locked<T>(path: &Path, change: impl FnOnce() -> Result<T, String>)
 /// Subscription windows in percent (0-100) and when the fuller one resets.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Usage {
-    pub five_hour: f64,
+    /// None on plans without a 5h window, like Claude Ultra.
+    pub five_hour: Option<f64>,
     pub seven_day: f64,
     /// Unix milliseconds.
     pub resets_at: Option<u64>,
@@ -138,7 +139,7 @@ pub struct Usage {
 
 impl Usage {
     pub fn peak(&self) -> f64 {
-        self.five_hour.max(self.seven_day)
+        self.five_hour.unwrap_or(0.0).max(self.seven_day)
     }
 }
 
@@ -149,8 +150,8 @@ fn parse_claude_usage(data: &Value) -> Option<Usage> {
     if five_hour.is_none() && seven_day.is_none() {
         return None;
     }
-    let (five_hour, seven_day) = (five_hour.unwrap_or(0.0), seven_day.unwrap_or(0.0));
-    Some(Usage { five_hour, seven_day, resets_at: if five_hour >= seven_day { five_reset } else { seven_reset } })
+    let seven_day = seven_day.unwrap_or(0.0);
+    Some(Usage { five_hour, seven_day, resets_at: if five_hour.unwrap_or(0.0) >= seven_day { five_reset } else { seven_reset } })
 }
 
 /// `GET /wham/usage`: `rate_limit.primary_window` (5h) and `secondary_window` (7d) with `used_percent` and unix `reset_at`.
@@ -162,7 +163,7 @@ fn parse_codex_usage(data: &Value) -> Option<Usage> {
     let ((five_hour, five_reset), (seven_day, seven_reset)) = (window("primary_window"), window("secondary_window"));
     let five_hour = five_hour?;
     let seven_day = seven_day.unwrap_or(0.0);
-    Some(Usage { five_hour, seven_day, resets_at: if five_hour >= seven_day { five_reset } else { seven_reset } })
+    Some(Usage { five_hour: Some(five_hour), seven_day, resets_at: if five_hour >= seven_day { five_reset } else { seven_reset } })
 }
 
 /// Fetches an OAuth account's windows; `base` is the provider's API root.
@@ -282,7 +283,7 @@ mod tests {
     use super::*;
 
     fn usage(five_hour: f64, seven_day: f64) -> Option<Usage> {
-        Some(Usage { five_hour, seven_day, resets_at: Some(five_hour as u64) })
+        Some(Usage { five_hour: Some(five_hour), seven_day, resets_at: Some(five_hour as u64) })
     }
 
     #[test]
@@ -304,10 +305,12 @@ mod tests {
     #[test]
     fn parses_both_usage_endpoints() {
         let claude = json!({"five_hour": {"utilization": 26.0, "resets_at": "2026-09-27T05:30:00.000Z"}, "seven_day": {"utilization": 40.5, "resets_at": "2026-10-01T00:00:00+00:00"}});
-        assert_eq!(parse_claude_usage(&claude), Some(Usage { five_hour: 26.0, seven_day: 40.5, resets_at: Some(1_790_812_800_000) }));
+        assert_eq!(parse_claude_usage(&claude), Some(Usage { five_hour: Some(26.0), seven_day: 40.5, resets_at: Some(1_790_812_800_000) }));
+        let ultra = json!({"five_hour": null, "seven_day": {"utilization": 41.0, "resets_at": "2026-10-01T00:00:00Z"}});
+        assert_eq!(parse_claude_usage(&ultra), Some(Usage { five_hour: None, seven_day: 41.0, resets_at: Some(1_790_812_800_000) }));
         assert_eq!(iso_ms("1970-01-02T00:00:01Z"), Some(86_401_000));
         let codex = json!({"rate_limit": {"allowed": true, "primary_window": {"used_percent": 93, "reset_at": 1790000000, "limit_window_seconds": 18000}, "secondary_window": null}});
-        assert_eq!(parse_codex_usage(&codex), Some(Usage { five_hour: 93.0, seven_day: 0.0, resets_at: Some(1_790_000_000_000) }));
+        assert_eq!(parse_codex_usage(&codex), Some(Usage { five_hour: Some(93.0), seven_day: 0.0, resets_at: Some(1_790_000_000_000) }));
         assert_eq!(parse_codex_usage(&json!({"plan_type": "free"})), None);
     }
 
