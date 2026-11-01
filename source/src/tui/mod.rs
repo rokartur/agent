@@ -554,7 +554,7 @@ const HOTKEYS: [(&str, &[(&str, &str)]); 4] = [
             ("Enter", "send; while working, steers the turn or waits for it to end, per Messages while working"),
             (if cfg!(target_os = "macos") { "Option+Enter" } else { "Alt+Enter" }, "while working, send the other way; otherwise a new line"),
             ("Shift+Enter", "new line (also Ctrl+J)"),
-            ("Tab", "complete a /command, a $skill or an @path"),
+            ("Tab", "complete a /command or /skill, or an @path"),
             ("Up, Down", "history, menu selection"),
             ("Ctrl+R", "search previous prompts"),
             (if cfg!(target_os = "macos") { "Option+Up" } else { "Alt+Up" }, "edit queued messages"),
@@ -1852,10 +1852,12 @@ impl App {
                     let path = &matches[self.menu_index.min(menu_len - 1)].0;
                     self.accept_path(path);
                 }
-                KeyCode::Tab | KeyCode::Enter if self.skill_query().is_some() => {
+                // Prose holds `/api` and `/tmp`, so Enter there sends the prompt and only Tab picks a skill.
+                KeyCode::Tab if self.skill_query().is_some() => {
                     let name = &matches[self.menu_index.min(menu_len - 1)].0;
                     self.accept_skill(name);
                 }
+                KeyCode::Enter if self.skill_query().is_some() => self.edit(key, ctrl, alt, shift),
                 KeyCode::Tab => self.accept_slash(false),
                 KeyCode::Enter => self.accept_slash(true),
                 _ => self.edit(key, ctrl, alt, shift),
@@ -2503,7 +2505,7 @@ impl App {
             "hotkeys" => self.push(Item::Lines(hotkeys_lines())),
             "help" => {
                 let mut lines: Vec<String> = self.slash_commands.iter().map(|(name, description)| format!("/{name:<14}\t{description}")).collect();
-                lines.push(format!("{:<15}\trun a skill ({} loaded)", "$<name>", self.enabled_skills().count()));
+                lines.push(format!("/{:<14}\trun a skill ({} loaded)", "<skill>", self.enabled_skills().count()));
                 lines.push(format!("/{:<14}\trun a prompt ({} loaded)", "prompt:<name>", self.templates.len()));
                 lines.push(format!("/{:<14}\tturn a skill profile on or off ({} defined)", "profile:<name>", self.settings.skill_profiles.len()));
                 self.system("help", format!("{} commands\n{}", lines.len(), lines.join("\n")));
@@ -4407,21 +4409,34 @@ impl App {
             None => {
                 // A closed menu forgets its listing, so typing `@` again sees files created since.
                 self.path_matches.take();
+                let mut commands = self.commands_without_skills();
+                // A skill named like a command stays reachable as `/skill:name`.
+                let skills: Vec<_> = self
+                    .enabled_skills()
+                    .map(|skill| {
+                        let name = if commands.iter().any(|(command, _)| *command == skill.name) { format!("skill:{}", skill.name) } else { skill.name.clone() };
+                        (name, skill.description.split_whitespace().collect::<Vec<_>>().join(" "))
+                    })
+                    .collect();
                 if let Some(word) = self.skill_query() {
-                    let skills: Vec<_> = self.enabled_skills().map(|skill| (skill.name.clone(), skill.description.split_whitespace().collect::<Vec<_>>().join(" "))).collect();
                     return matching_commands(&skills, &format!("/{word}"));
                 }
-                let mut commands = self.slash_commands.clone();
-                commands.extend(self.templates.iter().map(|template| (format!("prompt:{}", template.name), template.description.clone())));
-                commands.extend(self.settings.skill_profiles.keys().map(|profile| {
-                    let action = if self.settings.active_profiles.contains(profile) { "turn off" } else { "turn on" };
-                    (format!("profile:{profile}"), format!("{action} {}", self.profile_skills(profile)))
-                }));
-                commands.extend(self.plugins.commands());
-                commands.extend(self.saved_workflows.iter().map(|saved| (saved.meta.name.clone(), saved.meta.description.clone())));
+                commands.extend(skills);
                 matching_commands(&commands, slash_query(&self.editor.text(), self.editor.before_cursor()))
             }
         }
+    }
+
+    fn commands_without_skills(&self) -> Vec<(String, String)> {
+        let mut commands = self.slash_commands.clone();
+        commands.extend(self.templates.iter().map(|template| (format!("prompt:{}", template.name), template.description.clone())));
+        commands.extend(self.settings.skill_profiles.keys().map(|profile| {
+            let action = if self.settings.active_profiles.contains(profile) { "turn off" } else { "turn on" };
+            (format!("profile:{profile}"), format!("{action} {}", self.profile_skills(profile)))
+        }));
+        commands.extend(self.plugins.commands());
+        commands.extend(self.saved_workflows.iter().map(|saved| (saved.meta.name.clone(), saved.meta.description.clone())));
+        commands
     }
 
     /// The `@` token right before the cursor, without the `@`.
@@ -4460,18 +4475,14 @@ impl App {
         cached.1.clone()
     }
 
-    /// The `$` word right before the cursor, without the `$`. A shell line's `$HOME` and a price's `$5` open no menu.
     fn skill_query(&self) -> Option<&str> {
-        let before = self.editor.before_cursor();
-        let word = before.rsplit(char::is_whitespace).next()?.strip_prefix('$')?;
-        (!before.starts_with('!') && !word.starts_with(|c: char| c.is_ascii_digit())).then_some(word)
+        mid_text_skill(self.editor.before_cursor())
     }
 
-    /// A leading `$name` of an enabled skill becomes the `/skill:name` command.
+    /// A leading `/name` of an enabled skill that no command takes becomes the `/skill:name` command.
     fn skill_command(&self, text: String) -> String {
-        let Some(rest) = text.trim_start().strip_prefix('$') else { return text };
-        let name = rest.split_once(char::is_whitespace).map_or(rest, |(name, _)| name);
-        if self.enabled_skills().any(|skill| skill.name == name) { format!("/skill:{rest}") } else { text }
+        let commands = self.commands_without_skills();
+        as_skill_command(text, |name| self.enabled_skills().any(|skill| skill.name == name) && !commands.iter().any(|(command, _)| command == name))
     }
 
     fn accept_skill(&mut self, name: &str) {
@@ -4479,9 +4490,9 @@ impl App {
         for _ in 0..typed {
             self.editor.backspace();
         }
-        // Only a leading `$name` expands on submit, so the pick moves to the front.
+        // Only a leading `/name` expands on submit, so the pick moves to the front.
         let text = self.editor.text();
-        self.editor.set(&format!("${name} {}", text.trim_start()));
+        self.editor.set(&format!("/{name} {}", text.trim_start()));
         self.menu_index = 0;
     }
 
@@ -4505,6 +4516,8 @@ impl App {
         let name = matches[self.menu_index.min(matches.len() - 1)].0.clone();
         let takes_args = matches!(name.as_str(), "thinking" | "rename-title" | "btw" | "goal" | "import" | "workspace add" | "workspace remove")
             || name.starts_with("prompt:")
+            || name.starts_with("skill:")
+            || self.skill_command(format!("/{name}")).starts_with("/skill:")
             || self.saved_workflows.iter().any(|saved| saved.meta.name == name);
         let text = self.editor.text();
         let rest = text[slash_query(&text, self.editor.before_cursor()).len()..].trim().to_string();
@@ -4797,7 +4810,7 @@ impl App {
         }
         let (mut editor_rows, (cursor_x, cursor_row)) = self.editor.render(width);
         if self.editor.text().is_empty() {
-            editor_rows[0].push(span("Ask anything, / commands, $ skills, @ files", DIM));
+            editor_rows[0].push(span("Ask anything, / commands and skills, @ files", DIM));
         }
         let editor_top = bottom.len();
         let shown = editor_rows.len().min(EDITOR_ROWS);
@@ -5575,6 +5588,22 @@ fn mentions_ultracode(text: &str) -> bool {
 /// What the slash menu completes: the `/word` up to the cursor when the cursor sits in the text's first word, else the whole text.
 fn slash_query<'a>(text: &'a str, before_cursor: &'a str) -> &'a str {
     if text.starts_with(before_cursor) && !before_cursor.contains(char::is_whitespace) { before_cursor } else { text }
+}
+
+/// A `/word` right before the cursor with text in front of it, without the `/`: there the menu offers only skills.
+/// A shell line and a path like `/tmp/x` open no menu.
+fn mid_text_skill(before: &str) -> Option<&str> {
+    let word = before.rsplit(char::is_whitespace).next()?;
+    let name = word.strip_prefix('/')?;
+    let in_front = before[..before.len() - word.len()].trim();
+    (!in_front.is_empty() && !before.starts_with('!') && !name.contains('/')).then_some(name)
+}
+
+/// `/name args` becomes `/skill:name args` when `is_skill(name)`.
+fn as_skill_command(text: String, is_skill: impl Fn(&str) -> bool) -> String {
+    let Some(rest) = text.trim_start().strip_prefix('/') else { return text };
+    let name = rest.split_once(char::is_whitespace).map_or(rest, |(name, _)| name);
+    if is_skill(name) { format!("/skill:{rest}") } else { text }
 }
 
 /// Commands matching a typed `/name`: prefix matches first, then names containing it. Past the name, its known arguments.
@@ -6679,6 +6708,25 @@ mod tests {
         assert_eq!(slash_query("/skfix the bug", "/sk"), "/sk");
         assert_eq!(slash_query("/thinking m", "/thinking m"), "/thinking m");
         assert_eq!(slash_query("fix the bug /sk", "fix the bug /sk"), "fix the bug /sk");
+    }
+
+    #[test]
+    fn a_slash_word_after_text_offers_skills_but_a_path_or_shell_line_does_not() {
+        assert_eq!(mid_text_skill("fix the bug /co"), Some("co"));
+        assert_eq!(mid_text_skill("fix the bug /"), Some(""));
+        assert_eq!(mid_text_skill("/co"), None);
+        assert_eq!(mid_text_skill("look at /tmp/x"), None);
+        assert_eq!(mid_text_skill("!ls /tm"), None);
+        assert_eq!(mid_text_skill("fix /co the bug"), None);
+    }
+
+    #[test]
+    fn a_leading_slash_skill_runs_as_skill_and_a_command_name_stays_a_command() {
+        let is_skill = |name: &str| name == "code-review";
+        assert_eq!(as_skill_command("/code-review src/".into(), is_skill), "/skill:code-review src/");
+        assert_eq!(as_skill_command("/code-review".into(), is_skill), "/skill:code-review");
+        assert_eq!(as_skill_command("/compact".into(), is_skill), "/compact");
+        assert_eq!(as_skill_command("fix /code-review".into(), is_skill), "fix /code-review");
     }
 
     #[test]
