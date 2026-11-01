@@ -2965,6 +2965,14 @@ impl App {
                 let accounts = matching_accounts(self.client.accounts(), &query.text());
                 let logout = *logout;
                 match code {
+                    KeyCode::Up | KeyCode::Down if !logout && key.modifiers.contains(KeyModifiers::SHIFT) => {
+                        let Some(account) = accounts.get(*index) else { return };
+                        if let Err(error) = self.client.move_account(&account.provider, &account.name, code == KeyCode::Up) {
+                            return self.push(Item::Error(error));
+                        }
+                        let moved = matching_accounts(self.client.accounts(), &query.text());
+                        *index = moved.iter().position(|a| a.provider == account.provider && a.name == account.name).unwrap_or(*index);
+                    }
                     KeyCode::Up => *index = index.saturating_sub(1),
                     KeyCode::Down => *index = (*index + 1).min(accounts.len().saturating_sub(1)),
                     KeyCode::Enter => {
@@ -4225,7 +4233,7 @@ impl App {
                     rows: &rows,
                     selected: account_rows.get(*index).copied().unwrap_or(0),
                     empty: "No matching accounts.",
-                    hint: if *logout { "↑↓ navigate     enter remove     esc close" } else { "↑↓ navigate     enter use     esc close" },
+                    hint: if *logout { "↑↓ navigate     enter remove     esc close" } else { "↑↓ navigate     shift+↑↓ failover order     enter use     esc close" },
                 };
                 view.render(width, PANEL_ROWS)
             }
