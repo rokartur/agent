@@ -1957,8 +1957,7 @@ impl App {
             KeyCode::PageDown => self.scroll = self.scroll.saturating_sub(self.transcript_view.0.max(1)),
             KeyCode::Up => self.editor.up(self.editor_width),
             KeyCode::Down
-                if self.editor.is_empty()
-                    && (self.subagents.lock().unwrap().running() > 0 || self.terminals.lock().unwrap().running() > 0 || self.viewed.is_some() || !footer_workflows(&self.workflows).is_empty()) =>
+                if self.editor.is_empty() && (footer_agents(&self.subagents.lock().unwrap()) > 0 || self.terminals.lock().unwrap().running() > 0 || !footer_workflows(&self.workflows).is_empty()) =>
             {
                 self.panel = Some(Panel::Agents { row: 1 });
             }
@@ -2928,25 +2927,21 @@ impl App {
                 }
             }
             Some(Panel::Agents { row }) => {
-                let runs = listed_runs(&self.subagents.lock().unwrap(), self.viewed.as_ref());
                 let workflows = footer_workflows(&self.workflows);
-                let pill = self.terminals.lock().unwrap().running() > 0;
-                let first_run = 1 + usize::from(pill);
-                let last = usize::from(pill) + runs.len() + workflows.len();
+                let pill = self.terminals.lock().unwrap().running() + footer_agents(&self.subagents.lock().unwrap()) > 0;
+                let last = usize::from(pill) + workflows.len();
                 let selected = (*row).min(last);
-                let workflow = selected.checked_sub(first_run + runs.len()).map(|offset| workflows[offset].clone());
-                let run = selected.checked_sub(first_run).and_then(|offset| runs.get(offset).cloned());
+                let workflow = selected.checked_sub(1 + usize::from(pill)).map(|offset| workflows[offset].clone());
                 match code {
                     KeyCode::Up if selected > 0 => *row = selected - 1,
                     KeyCode::Down => *row = (selected + 1).min(last),
-                    KeyCode::Char('x') => match (workflow, run) {
-                        (Some(workflow), _) => workflow.stop(),
-                        (None, Some(run)) => run.stop(),
-                        (None, None) => {}
-                    },
+                    KeyCode::Char('x') => {
+                        if let Some(workflow) = workflow {
+                            workflow.stop();
+                        }
+                    }
                     KeyCode::Enter if pill && selected == 1 => self.open_tasks(),
-                    KeyCode::Enter if workflow.is_some() => self.panel = workflow.map(|workflow| Panel::WorkflowRun { id: workflow.id.clone(), phase: None, index: 0 }),
-                    KeyCode::Enter => self.view_run(run),
+                    KeyCode::Enter => self.panel = workflow.map(|workflow| Panel::WorkflowRun { id: workflow.id.clone(), phase: None, index: 0 }),
                     KeyCode::Up | KeyCode::Esc => self.panel = None,
                     _ => {}
                 }
@@ -4856,9 +4851,10 @@ impl App {
         }
         bottom.extend(todo_lines(&self.todos.lock().unwrap()));
         let shells = self.terminals.lock().unwrap().running();
-        let runs = listed_runs(&self.subagents.lock().unwrap(), self.viewed.as_ref());
+        let agents = footer_agents(&self.subagents.lock().unwrap());
         let workflows = footer_workflows(&self.workflows);
-        if shells == 0 && runs.is_empty() && workflows.is_empty() && matches!(self.panel, Some(Panel::Agents { .. })) {
+        let pill = shells + agents > 0;
+        if !pill && workflows.is_empty() && matches!(self.panel, Some(Panel::Agents { .. })) {
             self.panel = None;
         }
         let mut panel_cursor = None;
@@ -4898,12 +4894,11 @@ impl App {
         bottom.push(Vec::new());
         bottom.extend(self.footer(width));
         let focus = match self.panel {
-            Some(Panel::Agents { row }) => Some(row.min(usize::from(shells > 0) + runs.len() + workflows.len())),
+            Some(Panel::Agents { row }) => Some(row.min(usize::from(pill) + workflows.len())),
             _ => None,
         };
-        let viewed = self.viewed.as_ref().and_then(|view| runs.iter().position(|run| Arc::ptr_eq(run, &view.run)));
-        bottom.extend(background_rows(shells, &runs, focus, viewed, width));
-        let workflow_focus = focus.and_then(|row| row.checked_sub(1 + usize::from(shells > 0) + runs.len()));
+        bottom.extend(background_rows(shells, agents, self.viewed.as_ref().map(|view| view.run.label.as_str()), focus == Some(1) && pill, width));
+        let workflow_focus = focus.and_then(|row| row.checked_sub(1 + usize::from(pill)));
         bottom.extend(workflow_rows(&workflows, workflow_focus, width));
 
         let room = height.saturating_sub(bottom.len());
@@ -5946,10 +5941,9 @@ fn log_lines(text: &str, width: usize) -> Vec<Line> {
     lines
 }
 
-/// The rows under the footer list the running subagents, and the viewed one even after it finished.
-fn listed_runs(runs: &Runs, viewed: Option<&RunView>) -> Vec<Arc<Run>> {
-    let is_viewed = |run: &Arc<Run>| viewed.is_some_and(|view| Arc::ptr_eq(&view.run, run));
-    runs.list.iter().filter(|run| (run.is_running() && run.workflow.is_none()) || is_viewed(run)).cloned().collect()
+/// Running subagents counted in the footer pill; workflow agents show on their workflow's line instead.
+fn footer_agents(runs: &Runs) -> usize {
+    runs.list.iter().filter(|run| run.is_running() && run.workflow.is_none()).count()
 }
 
 /// The subagent shown in place of the transcript. `loaded` is the (file size, width) `lines` were built for.
@@ -6115,47 +6109,23 @@ fn thinking_style(level: &str) -> Style {
     Style::rgb(gray * 0x010101)
 }
 
-/// The rows under the footer, as in Claude Code: a shells pill, then main and the running subagents.
-/// `focus` is the row walked to with ↓ (1 is the pill when shells run), None while typing; `viewed` indexes `runs`.
-fn background_rows(shells: usize, runs: &[Arc<Run>], focus: Option<usize>, viewed: Option<usize>, columns: usize) -> Vec<Line> {
+/// The rows under the footer, as in Claude Code: one pill counting shells and agents, whose list is /tasks,
+/// then the subagent viewed in place of the transcript. `focused` is the pill walked to with ↓.
+fn background_rows(shells: usize, agents: usize, viewed: Option<&str>, focused: bool, columns: usize) -> Vec<Line> {
     let mut rows = Vec::new();
+    let mut counts = Vec::new();
     if shells > 0 {
-        let focused = focus == Some(1);
-        let noun = if shells == 1 { "shell" } else { "shells" };
+        counts.push(format!("{shells} {}", if shells == 1 { "shell" } else { "shells" }));
+    }
+    if agents > 0 {
+        counts.push(format!("{agents} {}", if agents == 1 { "agent" } else { "agents" }));
+    }
+    if !counts.is_empty() {
         let (style, hint) = if focused { (Style::fg(16).on(80), " · Enter to view tasks") } else { (Style::fg(80), " · ↓ to view tasks") };
-        rows.push(vec![span(format!("{shells} {noun}"), style), span(hint, DIM)]);
+        rows.push(vec![span(counts.join(" · "), style), span(hint, DIM)]);
     }
-    if runs.is_empty() {
-        return rows;
-    }
-    let first_run = if shells > 0 { 2 } else { 1 };
-    let selected_run = match focus {
-        Some(row) => row.checked_sub(first_run),
-        None => viewed,
-    };
-    let main_style = if selected_run.is_none() { BRIGHT.bold() } else { PLAIN };
-    let main_glyph = if selected_run.is_none() { "● " } else { "○ " };
-    let mut main = vec![span(main_glyph, main_style), span("main", main_style)];
-    match (focus, selected_run) {
-        (Some(_), Some(_)) => main.push(span("   ↑↓ select · Enter view · x stop · Esc back", DIM)),
-        (None, Some(_)) => main.push(span("   Esc back", DIM)),
-        _ => {}
-    }
-    rows.extend([Vec::new(), main]);
-    for (offset, run) in runs.iter().enumerate() {
-        let elapsed = duration(run.elapsed());
-        let state = run.state.lock().unwrap();
-        let activity = match &state.result {
-            Some(Ok(_)) => "done",
-            Some(Err(_)) => "failed",
-            None if state.last_tool.is_empty() => "starting",
-            None => &state.last_tool,
-        };
-        let tokens = if state.usage.output == 0 { String::new() } else { format!(" · ↓ {} tokens", usage::tokens(state.usage.output)) };
-        let (glyph, style) = if selected_run == Some(offset) { ("● ", BRIGHT.bold()) } else { ("○ ", PLAIN) };
-        let left = vec![span(glyph, style), span(&run.label, style), span(format!("  {activity}"), MUTED)];
-        let right = vec![span(format!("{elapsed} · {} tools{tokens}", state.tool_calls), DIM)];
-        rows.push(truncate(&spread(left, right, columns), columns));
+    if let Some(label) = viewed {
+        rows.push(truncate(&vec![span("viewing ", MUTED), span(label, BRIGHT.bold()), span(" · Esc back", DIM)], columns));
     }
     rows
 }
@@ -6259,14 +6229,16 @@ fn tasks_panel(terminals: &[Arc<Terminal>], runs: &[Arc<Run>], catalog: &[Model]
     }
     for (offset, run) in runs.iter().enumerate() {
         let index = terminals.len() + offset;
-        let (status, dot) = match run.state.lock().unwrap().result {
-            None => ("running", MUTED),
-            Some(Ok(_)) => ("done", OK),
-            Some(Err(_)) => ("failed", ERROR),
+        let state = run.state.lock().unwrap();
+        let (status, dot) = match state.result {
+            None if state.last_tool.is_empty() => ("running".to_string(), MUTED),
+            None => (format!("running {}", state.last_tool), MUTED),
+            Some(Ok(_)) => ("done".to_string(), OK),
+            Some(Err(_)) => ("failed".to_string(), ERROR),
         };
         let mut row = vec![span("● ", dot)];
-        row.extend(name(&run.label, index, status == "running"));
-        row.push(span(format!("{status} · {} {}", model_name(catalog, &run.model), run.thinking), DIM));
+        row.extend(name(&run.label, index, state.result.is_none()));
+        row.push(span(format!("{status} · {} tools · {} {}", state.tool_calls, model_name(catalog, &run.model), run.thinking), DIM));
         rows.push((Some(index), row));
     }
     let shown = PANEL_ROWS + 3;
@@ -6544,34 +6516,19 @@ mod tests {
         let rows: Vec<String> = tasks_panel(&[], &[Arc::new(done), Arc::new(running)], &[sonnet], 1, 80).iter().map(text).collect();
         assert_eq!(rows[1..3], ["Background", "1 active agent"]);
         assert_eq!(rows[4], "  Local agents (2)");
-        assert_eq!(rows[5], "  ● scan       done · opus high");
-        assert_eq!(rows[6], "❯ ● recon 1a   running · sonnet 5 medium");
+        assert_eq!(rows[5], "  ● scan       done · 0 tools · opus high");
+        assert_eq!(rows[6], "❯ ● recon 1a   running · 0 tools · sonnet 5 medium");
         assert_eq!(rows.last().unwrap(), "↑/↓ to select · Enter to view · x to stop · Esc to close");
     }
 
     #[test]
-    fn background_rows_put_the_shells_pill_before_main_and_the_running_subagents() {
-        use crate::agent::subagent::scan_run;
-        let run = scan_run();
-        {
-            let mut state = run.state.lock().unwrap();
-            (state.tool_calls, state.last_tool) = (3, "Read".into());
-        }
-        let runs = [Arc::new(run)];
-        let typing: Vec<String> = background_rows(2, &runs, None, None, 40).iter().map(text).collect();
-        assert_eq!(typing, ["2 shells · ↓ to view tasks", "", "● main", "○ scan  Read                0s · 3 tools"]);
-        let on_pill: Vec<String> = background_rows(2, &runs, Some(1), None, 40).iter().map(text).collect();
-        assert_eq!(on_pill[0], "2 shells · Enter to view tasks");
-        assert_eq!(on_pill[2], "● main");
-        let on_agent: Vec<String> = background_rows(2, &runs, Some(2), None, 40).iter().map(text).collect();
-        assert_eq!(on_agent[2], "○ main   ↑↓ select · Enter view · x stop · Esc back");
-        assert!(on_agent[3].starts_with("● scan"));
-        let agents_only: Vec<String> = background_rows(0, &runs, Some(1), None, 40).iter().map(text).collect();
-        assert!(agents_only[2].starts_with("● scan"));
-        let viewing: Vec<String> = background_rows(0, &runs, None, Some(0), 40).iter().map(text).collect();
-        assert_eq!(viewing[1], "○ main   Esc back");
-        assert!(viewing[2].starts_with("● scan"));
-        assert!(background_rows(0, &[], None, None, 40).is_empty());
+    fn background_rows_fold_shells_and_agents_into_one_pill() {
+        let rows = |shells, agents, viewed, focused| background_rows(shells, agents, viewed, focused, 40).iter().map(text).collect::<Vec<_>>();
+        assert_eq!(rows(2, 13, None, false), ["2 shells · 13 agents · ↓ to view tasks"]);
+        assert_eq!(rows(0, 1, None, true), ["1 agent · Enter to view tasks"]);
+        assert_eq!(rows(1, 0, Some("scan"), false), ["1 shell · ↓ to view tasks", "viewing scan · Esc back"]);
+        assert_eq!(rows(0, 0, Some("scan"), false), ["viewing scan · Esc back"]);
+        assert!(rows(0, 0, None, false).is_empty());
     }
 
     #[test]
