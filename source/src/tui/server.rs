@@ -69,6 +69,12 @@ impl Client {
         self.close();
     }
 
+    /// /attach: tells the terminal to show the session server `pid` instead, lets go of it.
+    pub fn attach(self, pid: u32) {
+        self.send(json!({"attach": pid}));
+        self.close();
+    }
+
     fn close(self) {
         drop(self.lines);
         let _ = self.writer.join();

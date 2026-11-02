@@ -154,7 +154,23 @@ pub fn show(home: &Path, environment: &str, connect: impl FnOnce() -> Result<Str
                 return Ok(());
             }
             Ending::Switch(next) => next,
-            Ending::Lost(_) if environment == LOCAL => return Err("The session server stopped.".into()),
+            Ending::Attach(server) if environment == LOCAL => {
+                stream = Stream::Local(self::connect(home, server)?);
+                continue;
+            }
+            Ending::Attach(server) => {
+                stream = match tailnet::reattach(settings, &environment, server) {
+                    Reattach::Back(stream) => stream,
+                    Reattach::Refused(reason) | Reattach::NotYet(reason) => return Err(reason),
+                };
+                continue;
+            }
+            // The server drops a terminal that stops reading for 5 s, e.g. behind a locked screen, and runs on.
+            Ending::Lost(Some(server)) if environment == LOCAL => {
+                stream = Stream::Local(self::connect(home, server).map_err(|_| "The session server stopped.")?);
+                continue;
+            }
+            Ending::Lost(None) if environment == LOCAL => return Err("The session server stopped.".into()),
             Ending::Lost(Some(server)) => {
                 let Some(back) = reconnect(settings, &environment, server)? else {
                     drop(fullscreen);

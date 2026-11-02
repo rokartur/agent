@@ -23,8 +23,11 @@ pub enum Ending {
     Exit(String),
     /// /env picked this environment: the terminal starts a new session there.
     Switch(String),
-    /// The connection closed, failed or went silent with no goodbye: the server crashed, or the network to its computer
-    /// went. Carries the pid of the session server the client can reattach to, once it named it.
+    /// /attach picked another running session, by its server's pid on the same computer as this one.
+    Attach(u32),
+    /// The connection closed, failed or went silent with no goodbye: the server crashed or dropped this terminal for
+    /// not reading, or the network to its computer went. Carries the pid of the session server the client can reattach
+    /// to, once it named it.
     Lost(Option<u32>),
 }
 
@@ -138,6 +141,8 @@ fn show(stream: impl BufRead, out: &mut impl Write, mut requests: impl FnMut(&Va
             return Ok(Ending::Exit(text.to_string()));
         } else if let Some(environment) = message["switch"].as_str() {
             return Ok(Ending::Switch(environment.to_string()));
+        } else if let Some(pid) = message["attach"].as_u64().and_then(|pid| u32::try_from(pid).ok()) {
+            return Ok(Ending::Attach(pid));
         } else if let Some(error) = message["error"].as_str() {
             return Err(error.to_string());
         } else if let Some(pid) = message["server"].as_u64() {
@@ -241,6 +246,7 @@ mod tests {
         assert_eq!(show(stream.as_bytes(), &mut out, |_| panic!("no request was sent")), Ok(Ending::Exit("bye".into())));
         assert_eq!(out, b"a\x1b[2Kbc");
         assert_eq!(show("{\"switch\":\"studio\"}\n".as_bytes(), &mut Vec::new(), |_| {}), Ok(Ending::Switch("studio".into())));
+        assert_eq!(show("{\"attach\":42}\n".as_bytes(), &mut Vec::new(), |_| {}), Ok(Ending::Attach(42)));
     }
 
     #[test]
