@@ -319,8 +319,10 @@ fn rg_args(input: &Value) -> Result<Vec<String>, String> {
     if input["hidden"].as_bool() == Some(true) {
         args.push("--hidden".into());
     }
-    if !input["-C"].is_null() {
-        args.extend(["--context".into(), clamped(&input["-C"], 0, 0, MAX_CONTEXT_LINES)]);
+    for (flag, rg_flag) in [("-C", "--context"), ("-A", "--after-context"), ("-B", "--before-context")] {
+        if !input[flag].is_null() {
+            args.extend([rg_flag.into(), clamped(&input[flag], 0, 0, MAX_CONTEXT_LINES)]);
+        }
     }
     if let Some(glob) = input["glob"].as_str().filter(|g| !g.is_empty()) {
         args.extend(["--glob".into(), glob.into()]);
@@ -604,7 +606,7 @@ mod tests {
     fn parameters_a_schema_lacks_are_named_at_any_depth() {
         let tools = schemas("", false);
         let undeclared = |name: &str, input: Value| undeclared_params(&tools, name, &input);
-        assert_eq!(undeclared("Grep", json!({"pattern": "x", "head_limit": 5, "-A": 2})).unwrap(), "Grep does not take `-A`, `head_limit`.");
+        assert_eq!(undeclared("Grep", json!({"pattern": "x", "head_limit": 5, "-n": true})).unwrap(), "Grep does not take `-n`, `head_limit`.");
         let edits = json!({"file_path": "a", "edits": [{"old_string": "a", "new_string": "b", "replace_all": true}, {"old_string": "c", "new_string": "d", "replace_all": true}]});
         assert_eq!(undeclared("Edit", edits).unwrap(), "Edit does not take `edits.replace_all`.");
         assert_eq!(undeclared("Agent", json!({"tasks": [{"description": "a", "prompt": "x", "subagent_type": "Explore"}]})).unwrap(), "Agent does not take `tasks.subagent_type`.");
@@ -615,7 +617,8 @@ mod tests {
     fn declared_parameters_free_form_values_and_other_tools_pass() {
         let tools = schemas("", false);
         let undeclared = |name: &str, input: Value| undeclared_params(&tools, name, &input);
-        assert_eq!(undeclared("Grep", json!({"pattern": "x", "-C": 2, "output_mode": "count"})), None);
+        assert_eq!(undeclared("Grep", json!({"pattern": "x", "-C": 2, "-A": 3, "-B": 1, "output_mode": "count"})), None);
+        assert_eq!(undeclared("TaskStop", json!({"task_id": "bt-1"})), None);
         assert_eq!(undeclared("Workflow", json!({"script": "x", "args": {"any": {"key": 1}}})), None);
         assert_eq!(undeclared("Read", json!({"paths": [{"file_path": "a", "offset": 2}, "b"]})), None);
         assert_eq!(undeclared("mcp__server__tool", json!({"anything": 1})), None);
@@ -836,5 +839,7 @@ mod tests {
     fn search_arguments_match_pi_file_search() {
         let rg = rg_args(&json!({"pattern": "-x", "path": "@src", "-C": 50, "limit": 5000, "-i": true, "glob": "*.rs"})).unwrap();
         assert_eq!(rg.join(" "), "--json --ignore-case --context 20 --glob *.rs --max-count 1000 -- -x src");
+        let rg = rg_args(&json!({"pattern": "x", "-A": 3, "-B": 1})).unwrap();
+        assert!(rg.join(" ").contains("--after-context 3 --before-context 1"), "{rg:?}");
     }
 }
