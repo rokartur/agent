@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { accountLabels, assignToken, blockMessage, claudeAccount, formatGroupLimits, formatLimits, hasFiveHourWindow, inheritToken, resolveToken, tokenReport, type Context } from "./index.ts";
+import { accountLabels, assignToken, blockMessage, claudeAccount, formatGroupLimits, footer, formatLimits, hasFiveHourWindow, inheritToken, resolveToken, tokenReport, type Context } from "./index.ts";
 
 const now = Date.parse("2026-10-15T12:00:00Z");
 const context: Context = { provider: "anthropic", model: "claude-opus-5-5", accountId: "uuid-2", accountName: "home", cwd: "/", sessionId: "s", settings: { showGroupName: false } };
@@ -21,6 +21,13 @@ describe("usagefleet", () => {
 		expect(hasFiveHourWindow({ ...context, accountUsage: { fiveHourPct: 0, sevenDayPct: 41 } }, ultra)).toBe(true);
 		const view = { group: "Artur", sessionPct: 0, weeklyPct: 17 };
 		expect(formatGroupLimits(view, true, false)?.map((part) => part.text).join("")).toBe("Artur: 7d 17%");
+	});
+
+	test("falls back to the agent's reading of an account without a token or the watcher", () => {
+		const text = (accountUsage: Context["accountUsage"]) => footer({ ...context, accountUsage }, null, null, now)?.map((part) => part.text).join("");
+		expect(text({ fiveHourPct: 12, sevenDayPct: 40 })).toBe("5h 12% · 7d 40%");
+		expect(text({ fiveHourPct: null, sevenDayPct: 40 })).toBe("7d 40%");
+		expect(text(null)).toBeUndefined();
 	});
 
 	test("tones percents green below 50, orange below 80, red from 80", () => {
