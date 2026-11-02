@@ -736,13 +736,13 @@ impl Agent {
             // The directory is part of what gets approved, so a grant does not also cover the command in cwd.
             let approved = json!({"command": format!("cd {} && {}", edit_hooks::shell_quote(&hook.dir.display().to_string()), hook.command), "timeout": 120_000});
             if let Some(refusal) = self.check_permission(None, "Bash", &approved, &[], user_request, emit) {
-                emit(Event::Notice(format!("[edit-hooks] {} skipped: {refusal}", hook.command)));
+                emit(Event::Notice(format!("[edit-hooks] {} skipped: {refusal}", hook.label)));
                 continue;
             }
-            emit(Event::Notice(format!("[edit-hooks] {}", hook.command)));
+            emit(Event::Notice(format!("[edit-hooks] {}", hook.label)));
             let (output, is_error) = tools::run("Bash", &input, &hook.dir, &mut self.anchors, &self.rtk, &self.abort);
             if is_error {
-                failures.push(edit_hooks::failure(&hook.command, &output));
+                failures.push(edit_hooks::failure(&hook.label, &output));
             }
         }
         failures
