@@ -87,7 +87,11 @@ fn mark_checked(stamp: &Path, channel: &str) -> Result<(), String> {
 /// Offline start is normal, so a network failure means no update; an HTTP error such as a 403 rate limit is reported.
 fn latest_version(include_prereleases: bool) -> Result<Option<String>, String> {
     let http: ureq::Agent = ureq::Agent::config_builder().timeout_global(Some(Duration::from_secs(10))).build().into();
-    let mut response = match http.get(RELEASES_API).call() {
+    let mut request = http.get(RELEASES_API);
+    if let Some(token) = github_token() {
+        request = request.header("Authorization", format!("Bearer {token}"));
+    }
+    let mut response = match request.call() {
         Ok(response) => response,
         Err(ureq::Error::StatusCode(status)) => return Err(format!("Cannot check for updates: GitHub answered {status}.")),
         Err(_) => return Ok(None),
@@ -98,11 +102,22 @@ fn latest_version(include_prereleases: bool) -> Result<Option<String>, String> {
     Ok(Some(newest(&releases, include_prereleases).unwrap_or(CURRENT).to_owned()))
 }
 
-/// Unauthenticated API calls never list drafts.
+/// GitHub allows a token 5000 API calls an hour instead of 60 per IP. Same order as `gh`: GH_TOKEN, GITHUB_TOKEN, its login.
+fn github_token() -> Option<String> {
+    let from_env = ["GH_TOKEN", "GITHUB_TOKEN"].into_iter().find_map(|name| std::env::var(name).ok().filter(|token| !token.trim().is_empty()));
+    from_env.or_else(|| {
+        let output = process::output_within(process::command("gh").args(["auth", "token"]), Duration::from_secs(5)).ok()??;
+        let token = String::from_utf8(output.stdout).ok()?.trim().to_owned();
+        (output.status.success() && !token.is_empty()).then_some(token)
+    })
+}
+
+/// A token with access to the repo also lists drafts, whose assets cannot be downloaded.
 fn newest(releases: &Value, include_prereleases: bool) -> Option<&str> {
     releases
         .as_array()?
         .iter()
+        .filter(|release| release["draft"] != true)
         .filter(|release| include_prereleases || release["prerelease"] == false)
         .filter_map(|release| release["tag_name"].as_str()?.strip_prefix('v'))
         .max_by_key(|version| precedence(version))
@@ -217,6 +232,7 @@ mod tests {
     #[test]
     fn channel_picks_the_newest_release_it_follows() {
         let releases = serde_json::json!([
+            {"tag_name": "v0.4.0", "prerelease": false, "draft": true},
             {"tag_name": "v0.3.0-beta.1", "prerelease": true},
             {"tag_name": "v0.2.1", "prerelease": false},
             {"tag_name": "v0.2.0", "prerelease": false},
