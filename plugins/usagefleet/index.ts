@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * Shows this device's group budget in the footer, or its usagefleet limits (5h + weekly) outside a group,
+ * Shows this device's group budget in the footer, or the account's limits (5h + weekly) outside a group,
  * and refuses prompts while that budget is blocked.
  *
  * usagefleet's watcher writes the device's last limits report into its config file every minute.
@@ -222,9 +222,15 @@ async function status(context: Context): Promise<StatusPart[] | null> {
 	// The group budget is what blocks prompts, so it replaces the account's own numbers.
 	// The watcher reads limits for one account; a session on another account would show the wrong numbers.
 	const ownReading = account === (await collectorAccount()) ? config : null;
+	return footer(context, view, ownReading, Date.now());
+}
+
+/** The group budget, else the watcher's reading of this account, else the agent's. */
+export function footer(context: Context, view: unknown, ownReading: unknown, now: number): StatusPart[] | null {
 	const group = formatGroupLimits(view, context.settings.showGroupName, hasFiveHourWindow(context, ownReading));
 	if (group) return group;
-	return ownReading ? formatLimits(ownReading, Date.now()) : null;
+	const usage = context.accountUsage;
+	return formatLimits(ownReading, now) ?? (usage ? formatWindows(usage.fiveHourPct, usage.sevenDayPct) : null);
 }
 
 /** Fails open on every error, the same guarantee `usagefleet guard` makes. */
