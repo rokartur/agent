@@ -373,11 +373,11 @@
   },
   {
     "name": "TaskStop",
-    "description": "Stop background tasks: a Bash task (bt-N) gets SIGTERM to its process group and SIGKILL after 2s; a subagent (sa-N) stops and SendMessage can resume it later; a workflow (wf-N) stops with its agents. Returns each final state.",
+    "description": "Stop a background task: a Bash task (bt-N) gets SIGTERM to its process group and SIGKILL after 2s; a subagent (sa-N) stops and SendMessage can resume it later; a workflow (wf-N) stops with its agents. Returns its final state.",
     "input_schema": {
       "type": "object",
-      "required": ["task_ids"],
-      "properties": { "task_ids": { "type": "array", "items": { "type": "string" }, "description": "Task ids to stop, e.g. [\"bt-1\"]" } }
+      "required": ["task_id"],
+      "properties": { "task_id": { "type": "string", "description": "Task id to stop, e.g. \"bt-1\"" } }
     }
   },
   {
@@ -551,6 +551,12 @@
           "type": "boolean"
         },
         "-C": {
+          "type": "integer"
+        },
+        "-A": {
+          "type": "integer"
+        },
+        "-B": {
           "type": "integer"
         },
         "fixed_strings": {

@@ -132,7 +132,7 @@ impl Terminals {
         ))
     }
 
-    fn find(&self, id: &str) -> Result<Arc<Terminal>, String> {
+    pub fn find(&self, id: &str) -> Result<Arc<Terminal>, String> {
         let found = self.list.iter().find(|t| t.id == id).cloned();
         found.ok_or_else(|| format!("Unknown terminal id \"{id}\". Known: {}.", self.known()))
     }
@@ -140,24 +140,6 @@ impl Terminals {
     fn known(&self) -> String {
         let ids: Vec<&str> = self.list.iter().map(|t| t.id.as_str()).collect();
         if ids.is_empty() { "none".into() } else { ids.join(", ") }
-    }
-
-    /// The terminals `TaskStop` names; it runs without the lock, since stopping can take seconds.
-    pub fn for_kill(&self, input: &Value) -> Result<Vec<Arc<Terminal>>, String> {
-        let mut ids: Vec<&str> = Vec::new();
-        for id in input["task_ids"].as_array().into_iter().flatten().filter_map(Value::as_str) {
-            if !ids.contains(&id) {
-                ids.push(id);
-            }
-        }
-        if ids.is_empty() {
-            return Err("Provide at least one terminal id.".into());
-        }
-        let unknown: Vec<&str> = ids.iter().copied().filter(|id| self.list.iter().all(|t| t.id != *id)).collect();
-        if !unknown.is_empty() {
-            return Err(format!("Unknown terminal id(s): {}. Known: {}.", unknown.join(", "), self.known()));
-        }
-        Ok(ids.iter().filter_map(|id| self.list.iter().find(|t| t.id == *id).cloned()).collect())
     }
 
     /// Process groups do not end with the agent, so quitting kills them, also the members that outlived their `sh`.
@@ -361,7 +343,7 @@ mod tests {
         let follow_ups = Arc::default();
         let mut terminals = Terminals::default();
         terminals.start(&json!({"command": "sleep 30 & sleep 30", "description": "sleeper"}), &dir, &follow_ups).unwrap();
-        let targets = terminals.for_kill(&json!({"task_ids": ["bt-1"]})).unwrap();
+        let targets = [terminals.find("bt-1").unwrap()];
         let abort = AtomicBool::new(false);
         assert_eq!(kill(&targets, &follow_ups, &abort), "Killed bt-1 \"sleeper\" (SIGTERM).");
         assert!(follow_ups.lock().unwrap().is_empty());
