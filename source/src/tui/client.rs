@@ -23,8 +23,9 @@ pub enum Ending {
     Exit(String),
     /// /env picked this environment: the terminal starts a new session there.
     Switch(String),
-    /// The connection closed, failed or went silent with no goodbye: the server crashed, or the network to its computer
-    /// went. Carries the pid of the session server the client can reattach to, once it named it.
+    /// The connection closed, failed or went silent with no goodbye: the server crashed or dropped this terminal for
+    /// not reading, or the network to its computer went. Carries the pid of the session server the client can reattach
+    /// to, once it named it.
     Lost(Option<u32>),
 }
 
