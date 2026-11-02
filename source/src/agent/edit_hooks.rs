@@ -7,12 +7,15 @@ use crate::tools::hashline::{self, Anchors};
 const CONFIG: &str = ".agents/edit-hooks.json";
 const MAX_FIX_ROUNDS: usize = 3;
 const MAX_OUTPUT_CHARS: usize = 4000;
+const MAX_LABEL_FILES: usize = 3;
 
 /// A command from `.agents/edit-hooks.json`, run in the directory that holds `.agents`.
 #[derive(Debug)]
 pub struct Hook {
     pub dir: PathBuf,
     pub command: String,
+    /// The command with a long `{files}` list cut to its first files, for the transcript.
+    pub label: String,
 }
 
 /// Files an edit tool call changes. Call it before the tool runs: a replace retires the anchors it names.
@@ -44,14 +47,14 @@ pub fn hooks(files: &[PathBuf], trusted_projects: &[String]) -> (Vec<Hook>, Vec<
     for (dir, files) in files_by_dir {
         match dir_commands(&dir, &files) {
             Ok(commands) if !crate::agent::prompt::is_trusted(trusted_projects, &dir) => skipped += commands.len(),
-            Ok(commands) => hooks.extend(commands.into_iter().map(|command| Hook { dir: dir.clone(), command })),
+            Ok(commands) => hooks.extend(commands.into_iter().map(|(command, label)| Hook { dir: dir.clone(), command, label })),
             Err(e) => errors.push(format!("[edit-hooks] {} is invalid: {e}", dir.join(CONFIG).display())),
         }
     }
     (hooks, errors, skipped)
 }
 
-fn dir_commands(dir: &Path, files: &[String]) -> Result<Vec<String>, String> {
+fn dir_commands(dir: &Path, files: &[String]) -> Result<Vec<(String, String)>, String> {
     let text = std::fs::read_to_string(dir.join(CONFIG)).map_err(|e| e.to_string())?;
     let config: Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
     commands(&config, files)
@@ -74,7 +77,7 @@ fn config_dir(file: &Path) -> Option<PathBuf> {
 
 /// Each file goes to the first glob it matches; a glob with a slash matches the path from the config dir.
 // shortcut: serde_json sorts object keys, so "first" is key order, not file order; enable its preserve_order feature if a config needs file order.
-fn commands(config: &Value, files: &[String]) -> Result<Vec<String>, String> {
+fn commands(config: &Value, files: &[String]) -> Result<Vec<(String, String)>, String> {
     let on_stop = config["onStop"].as_object().ok_or("\"onStop\" must map globs to commands")?;
     let mut files_by_glob: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
     for file in files {
@@ -96,11 +99,16 @@ fn commands(config: &Value, files: &[String]) -> Result<Vec<String>, String> {
             }
             if template.contains("{files}") {
                 let quoted: Vec<String> = matched.iter().map(|file| shell_quote(file)).collect();
-                commands.push(template.replace("{files}", &quoted.join(" ")));
+                let command = template.replace("{files}", &quoted.join(" "));
+                let label = if quoted.len() > MAX_LABEL_FILES { template.replace("{files}", &format!("{} +{} more", quoted[..2].join(" "), quoted.len() - 2)) } else { command.clone() };
+                commands.push((command, label));
             } else if template.contains("{file}") {
-                commands.extend(matched.iter().map(|file| template.replace("{file}", &shell_quote(file))));
+                commands.extend(matched.iter().map(|file| {
+                    let command = template.replace("{file}", &shell_quote(file));
+                    (command.clone(), command)
+                }));
             } else {
-                commands.push(template.to_string());
+                commands.push((template.to_string(), template.to_string()));
             }
         }
     }
@@ -276,6 +284,16 @@ mod tests {
         let (hooks, _, _) = hooks(&[root.join("a.txt")], &[root.display().to_string()]);
         std::fs::remove_dir_all(&root).unwrap();
         assert!(hooks.is_empty());
+    }
+
+    #[test]
+    fn a_long_files_list_shows_its_first_two_files_in_the_label() {
+        let config = serde_json::json!({"onStop": {"*.ts": "fmt {files} --check"}});
+        let files: Vec<String> = ["a.ts", "b.ts", "c.ts", "d.ts"].map(String::from).into();
+        let long = commands(&config, &files).unwrap();
+        assert_eq!(long, [("fmt 'a.ts' 'b.ts' 'c.ts' 'd.ts' --check".to_string(), "fmt 'a.ts' 'b.ts' +2 more --check".to_string())]);
+        let short = commands(&config, &files[..3]).unwrap();
+        assert_eq!(short[0].0, short[0].1);
     }
 
     #[test]
