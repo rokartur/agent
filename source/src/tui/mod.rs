@@ -35,6 +35,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use crate::agent::FollowUp;
 use crate::agent::modes::{self, CAVEMAN_LEVELS, PONYTAIL_LEVELS};
+use crate::agent::peers::Peer;
 use crate::agent::permissions::{Decision, Kind, MODES, Mode, Request};
 use crate::agent::prompt::{Skill, Template};
 use crate::agent::skill_usage;
@@ -174,6 +175,13 @@ enum Panel {
         all: bool,
         index: usize,
         sessions: Vec<SessionInfo>,
+    },
+    /// /attach: the other sessions running on this session's computer.
+    Running {
+        index: usize,
+        sessions: Vec<Peer>,
+        /// `x` was pressed once on the selected session; a second `x` stops it.
+        confirm: bool,
     },
     /// `row` indexes `SETTING_NAMES`; its section is the open tab. Typing filters all sections by name.
     Settings {
@@ -473,6 +481,7 @@ const BUILTIN_COMMANDS: &[(&str, MidTurn, &str)] = &[
     ("logout", MidTurn::Runs, "Remove a saved account"),
     ("account", MidTurn::Runs, "Show accounts and their usage; pick one to use until it reaches the switch threshold"),
     ("detach", MidTurn::Runs, "Close this terminal's view and leave the session running; `agent attach` returns to it"),
+    ("attach", MidTurn::Runs, "Show the running sessions: switch this terminal to one, or stop it"),
     ("env", MidTurn::Runs, "[name]: Pick, add or remove the computers sessions can run on, or start a new session on one; this one keeps running"),
     ("quit", MidTurn::Runs, "Quit agent"),
 ];
@@ -1576,8 +1585,14 @@ impl App {
             self.push(Item::Error(error));
             return;
         }
-        let client = self.clients.remove(index);
-        client.switch(name);
+        self.release_typing_client(|client| client.switch(name));
+    }
+
+    /// Hands the terminal that typed the command to `goodbye`. A session that never got a message and has no other
+    /// terminal ends instead of idling.
+    fn release_typing_client(&mut self, goodbye: impl FnOnce(server::Client)) {
+        let Some(index) = self.clients.iter().position(|client| Some(client.id) == self.typing_client) else { return };
+        goodbye(self.clients.remove(index));
         self.invalidate_screens();
         let talked = self.session_path.as_ref().is_some_and(|path| std::fs::read_to_string(path).is_ok_and(|text| text.contains(r#""type":"message""#)));
         if !talked && self.clients.is_empty() && self.working.is_none() {
@@ -2288,6 +2303,41 @@ impl App {
         }
     }
 
+    fn open_running(&mut self) {
+        let sessions = crate::serve::live(&self.home).into_iter().filter(|peer| peer.session != self.session_id).collect();
+        self.panel = Some(Panel::Running { index: 0, sessions, confirm: false });
+    }
+
+    fn running_key(&mut self, code: KeyCode) {
+        let Some(Panel::Running { index, sessions, confirm }) = self.panel.as_mut() else { return };
+        let stopping = std::mem::take(confirm);
+        match code {
+            KeyCode::Esc => self.panel = None,
+            KeyCode::Up => *index = index.saturating_sub(1),
+            KeyCode::Down => *index = (*index + 1).min(sessions.len().saturating_sub(1)),
+            KeyCode::Enter if !sessions.is_empty() => {
+                let pid = sessions[*index].pid;
+                self.panel = None;
+                self.release_typing_client(|client| client.attach(pid));
+            }
+            KeyCode::Char('x') if !sessions.is_empty() && stopping => {
+                let peer = sessions.remove(*index);
+                *index = (*index).min(sessions.len().saturating_sub(1));
+                // The server ends its turn and children on SIGTERM, as on a closed terminal (`process::exit_on_signal`).
+                // A pid of 0 or past i32 from a broken card would become kill(0) or kill(-1): this group or every process.
+                let Some(pid) = i32::try_from(peer.pid).ok().filter(|&pid| pid > 0) else {
+                    return self.push(Item::Error(format!("Cannot stop session {}: its card names pid {}.", peer.session, peer.pid)));
+                };
+                // SAFETY: kill only sends a signal.
+                if unsafe { libc::kill(pid, libc::SIGTERM) } == -1 {
+                    self.push(Item::Error(format!("Cannot stop session {}: {}", peer.session, std::io::Error::last_os_error())));
+                }
+            }
+            KeyCode::Char('x') if !sessions.is_empty() => *confirm = true,
+            _ => {}
+        }
+    }
+
     fn open_resume(&mut self) {
         let sessions: Vec<SessionInfo> = Session::list(&self.sessions_dir).into_iter().filter(|s| s.id != self.session_id).collect();
         self.panel = Some(Panel::Resume { all: false, index: 0, sessions });
@@ -2363,6 +2413,7 @@ impl App {
         match name {
             "quit" | "exit" => self.quit = true,
             "detach" => self.detach(),
+            "attach" => self.open_running(),
             "env" => self.switch_environment(args),
             "compact" => {
                 self.system("compact", "Compacting context...");
@@ -2653,6 +2704,7 @@ impl App {
             Some(Panel::ContextWindows { .. }) => return self.context_windows_key(key),
             Some(Panel::ProviderOrder { .. }) => return self.provider_order_key(key),
             Some(Panel::Profiles { .. }) => return self.profiles_key(key),
+            Some(Panel::Running { .. }) => return self.running_key(code),
             Some(Panel::Environments { .. }) => return self.environments_key(key),
             Some(Panel::ProfileSkills { .. }) => return self.profile_skills_key(key),
             Some(Panel::Headroom { .. }) => return self.headroom_key(key),
@@ -3020,6 +3072,7 @@ impl App {
                 | Panel::ContextWindows { .. }
                 | Panel::ProviderOrder { .. }
                 | Panel::Profiles { .. }
+                | Panel::Running { .. }
                 | Panel::Environments { .. }
                 | Panel::ProfileSkills { .. }
                 | Panel::Headroom { .. }
@@ -3753,6 +3806,23 @@ impl App {
                     empty: "No saved sessions.",
                     hint: "↑↓ navigate     tab scope     enter resume     esc close",
                 };
+                view.render(width, PANEL_ROWS)
+            }
+            Panel::Running { index, sessions, confirm } => {
+                let rows: Vec<panel::Row> = sessions
+                    .iter()
+                    .enumerate()
+                    .map(|(row, peer)| {
+                        let name = if peer.title.is_empty() { &peer.session } else { &peer.title };
+                        let state = if peer.busy { "working" } else { "idle" };
+                        let style = if row == *index { BRIGHT.bold() } else { MUTED };
+                        // Cards are files any process of this user writes, so their text could carry escape codes.
+                        let printable = |text: &str| -> String { text.chars().filter(|c| !c.is_control()).collect() };
+                        panel::Row { left: printable(name).chars().take(40).collect(), right: vec![span(format!("{} · {state}", printable(&peer.cwd)), style)] }
+                    })
+                    .collect();
+                let hint = if *confirm { "x again stops it     any other key keeps it" } else { "↑↓ navigate     enter attach     x stop     esc close" };
+                let view = panel::Panel { title: format!("Running {}", rows.len()), tabs: &[], tab: 0, search: None, rows: &rows, selected: *index, empty: "No other session is running.", hint };
                 view.render(width, PANEL_ROWS)
             }
             Panel::Settings { row, query } => {
