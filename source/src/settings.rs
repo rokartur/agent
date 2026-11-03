@@ -21,6 +21,8 @@ pub struct Settings {
     pub speed: String,
     /// One of `CACHE_TTLS`, for every Anthropic cache breakpoint.
     pub cache_ttl: String,
+    /// Anthropic turns send only the new messages and the API keeps the rest (the message threads beta).
+    pub message_threads: bool,
     pub permission_mode: Mode,
     /// The auto-mode reviewer; empty means the provider's small model.
     pub reviewer_model: String,
@@ -376,6 +378,7 @@ fn from_json(own: &Value) -> Settings {
         // Before `speed`, fast mode was `"fast": true`.
         speed: if own["speed"].is_null() && own["fast"] == true { "fast".into() } else { level(&own["speed"], &SPEEDS, "standard") },
         cache_ttl: level(&own["cache_ttl"], &CACHE_TTLS, "5m"),
+        message_threads: own["message_threads"].as_bool().unwrap_or(true),
         permission_mode: own["permission_mode"].as_str().and_then(Mode::parse).unwrap_or(Mode::Ask),
         reviewer_model: own["reviewer_model"].as_str().unwrap_or_default().to_string(),
         auto_compact: own["auto_compact"].as_bool().unwrap_or(true),
@@ -516,6 +519,7 @@ fn to_json(settings: &Settings) -> Value {
         "default_thinking": settings.default_thinking,
         "speed": settings.speed,
         "cache_ttl": settings.cache_ttl,
+        "message_threads": settings.message_threads,
         "permission_mode": settings.permission_mode.label(),
         "reviewer_model": settings.reviewer_model,
         "auto_compact": settings.auto_compact,
@@ -741,6 +745,7 @@ mod tests {
             models: vec![CustomModel { id: "qwen".into(), context_window: 65_536, max_tokens: 8_192 }],
         }];
         settings.cache_ttl = "1h".into();
+        settings.message_threads = false;
         settings.headroom = true;
         settings.headroom_url = "https://headroom.example.com".into();
         settings.headroom_token = "t0ken".into();

@@ -20,6 +20,10 @@ _Avoid_: Summarization, condensing
 Replacing batches of old tool results with short summaries that cite the calls they cover, while the rest of the history stays.
 _Avoid_: Compaction, pruning
 
+**Message thread**:
+The copy of a session's history that the Anthropic API keeps between turns, so a turn sends only its new messages. One session can start many, one after each compaction or rewind.
+_Avoid_: Thread alone, which reads as a session
+
 **Rewind**:
 Going back to an earlier prompt in a session, with the files the agent changed restored to that point.
 _Avoid_: Undo, revert

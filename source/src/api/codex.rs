@@ -191,7 +191,7 @@ fn stream_error(error: &Value) -> ApiError {
     let message = format!("Codex error {code}: {}", error["message"].as_str().unwrap_or("no message"));
     let quota = matches!(code, "rate_limit_exceeded" | "usage_limit_reached" | "insufficient_quota");
     let retryable = quota || matches!(code, "server_error" | "server_is_overloaded" | "slow_down");
-    ApiError { message, retryable, quota }
+    ApiError { message, retryable, quota, code: String::new() }
 }
 
 #[cfg(test)]

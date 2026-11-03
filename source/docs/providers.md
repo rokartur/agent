@@ -38,6 +38,14 @@ A `--account p=name` flag or `/account` pins one account for the session; the la
 
 With `headroom` on, requests go to a `headroom proxy` instead of the provider, `HEADROOM_URL` locally. `headroom_url` names a remote one; `headroom_token` is sent as `x-headroom-proxy-token`, the header headroom requires off loopback, and the proxy strips it before forwarding. The agent installs and syncs the local service at start (`headroom.rs`) only when `headroom_url` is empty; `headroom_env` is the service environment the sync enforces.
 
+## Message threads
+
+With `message_threads` on and no proxy in front of `api.anthropic.com` (no headroom, no `ANTHROPIC_BASE_URL`), the Anthropic turns of a session go in a message thread (beta `message-threads-2026-08-12`). The API keeps the conversation, so a turn sends only the messages after the last reply. The `Agent` holds one `MessageThread` per session. `/btw`, condense and compaction summaries send without one.
+
+`MessageThread::continue_request` sends a continue only when all of these are true: the messages are the held ones plus new user messages, every other field (model, thinking, effort, system, tools, speed) is unchanged, the account is the same, and the last reply came less than `THREAD_IDLE` ago. Otherwise the turn creates a new thread: after compaction, condense, a rewind or a model change, for example. A reply that ends in `refusal`, `pause_turn`, `max_tokens` or an abort is not continued. On OAuth the Claude Code identity block goes only in the create, because a continue sends no system.
+
+A continue that fails with a code in `THREAD_LOST` sends the whole conversation again as a create. After `thread_unsupported_request`, or a 404 on the first continue after such a replay, the session sends its turns without a thread until the next compaction.
+
 ## Cost
 
 `agent/usage.rs`. OpenRouter replies carry what was billed and that amount wins; other providers are priced at list prices from the catalog. The footer shows the exact figure, never an estimate.

@@ -235,6 +235,8 @@ pub struct Agent {
     pub usage: Usage,
     pub turns: u64,
     pub tool_calls: u64,
+    /// What the Anthropic API holds of this conversation, so a turn that only appends to it sends just the new messages.
+    message_thread: api::MessageThread,
     /// Set from the UI thread to stop the stream and kill a running bash command.
     pub abort: Arc<AtomicBool>,
     /// Messages typed while the agent works; delivered with the next tool results.
@@ -440,6 +442,7 @@ impl Agent {
             usage: Usage::default(),
             turns: 0,
             tool_calls: 0,
+            message_thread: api::MessageThread::default(),
             abort: Arc::default(),
             steering: Arc::new(Mutex::new(Vec::new())),
             permission_mode: Arc::new(Mutex::new(settings.permission_mode)),
@@ -598,7 +601,7 @@ impl Agent {
             if self.speed != "standard" {
                 request["speed"] = json!(self.speed);
             }
-            let mut reply = self.client.send(&request, &self.abort, &mut |delta| match delta {
+            let mut reply = self.client.send_in_thread(&request, &mut self.message_thread, &self.abort, &mut |delta| match delta {
                 Delta::Text(text) => emit(Event::Text(text.to_string())),
                 Delta::Thinking(text) => emit(Event::Thinking(text.to_string())),
                 Delta::Notice(text) => emit(Event::Notice(text.to_string())),
@@ -1600,6 +1603,8 @@ impl Agent {
         self.session.append(&json!({"type": "compaction", "summary": summary, "cut": cut}))?;
         self.compactions.push(Compaction { cut, summary: summary.clone() });
         self.last_context_tokens = 0;
+        // Turns after a thread the API could not store go without one; the shorter conversation gets another try.
+        self.message_thread = api::MessageThread::default();
         Ok(Some(summary))
     }
 
@@ -1900,6 +1905,7 @@ impl Agent {
         self.file_checkpoints = history.file_checkpoints;
         self.compactions = history.compactions;
         self.extra_dirs = history.extra_dirs;
+        self.message_thread = api::MessageThread::default();
         self.estimate_context_tokens();
     }
 

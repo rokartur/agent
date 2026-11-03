@@ -41,6 +41,7 @@ Run a session on another of your computers over Tailscale: its files, its shell,
 - **Edits that cannot go stale**: the agent edits by line anchors. If the file changed since it last read it, the edit is refused.
 - **It checks its own work**: after each edit, your language server reports new errors and the checks in `.agents/edit-hooks.json` run. The agent fixes what they find.
 - **Fewer tokens through headroom**: turn on `headroom` in `/settings` and model requests go through a `headroom proxy`. The agent installs and syncs a local one, or set `headroom_url` and `headroom_token` to use your own server.
+- **Long loops stop resending history**: on Anthropic accounts, turns go in message threads (an Anthropic beta). The API keeps the conversation, so each turn sends only its new messages. Headroom or `ANTHROPIC_BASE_URL` turn it off, and so does "Message threads" in `/settings`.
 - **Rewind anything**: press Esc twice to go back to an earlier prompt. Your files go back with it.
 - **Subagents**: it splits big work into parallel child agents. You tune how in a plain Markdown prompt, `.agents/swarm-prompt.md`.
 - **MCP and skills**: connect MCP servers, OAuth included. Drop in skills and see which ones you never use with `/skill-usage`.

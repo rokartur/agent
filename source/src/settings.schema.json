@@ -12,6 +12,7 @@
     "default_thinking": { "enum": ["", "off", "minimal", "low", "medium", "high", "xhigh", "max"], "default": "", "description": "Thinking level each start and /clear begin on; when set, thinking changes last until /clear and are not saved." },
     "speed": { "enum": ["standard", "fast", "ultrafast"], "default": "standard", "description": "Faster output at a higher price: Anthropic speed fast (ultrafast counts as fast), OpenAI Codex service_tier priority or ultrafast." },
     "cache_ttl": { "enum": ["5m", "1h"], "default": "5m", "description": "Anthropic prompt cache lifetime; 1h writes cost more." },
+    "message_threads": { "type": "boolean", "default": true, "description": "Anthropic turns send only the new messages, and the API keeps the conversation between them (message threads beta). Off behind headroom or ANTHROPIC_BASE_URL." },
     "permission_mode": { "enum": ["ask", "auto", "full access"], "default": "ask" },
     "reviewer_model": { "type": "string", "default": "", "description": "Model for the auto-mode reviewer; empty means the provider's small model." },
     "auto_compact": { "type": "boolean", "default": true },
