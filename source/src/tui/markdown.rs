@@ -295,4 +295,12 @@ mod tests {
         let lines = render("https://x.com/a_/status/1 (x)", 60);
         assert_eq!(crate::tui::render::link_at(&lines[0], 20).as_deref(), Some("https://x.com/a_/status/1"));
     }
+
+    #[test]
+    fn a_url_wrapped_in_a_table_cell_opens_whole_from_every_row() {
+        let lines = render("| a | PR |\n|---|---|\n| x | http://h:3000/o/vapp-v2/pulls/323 |", 30);
+        let url = Some("http://h:3000/o/vapp-v2/pulls/323");
+        assert_eq!(crate::tui::render::link_at(&lines[2], 6).as_deref(), url);
+        assert_eq!(crate::tui::render::link_at(&lines[3], 6).as_deref(), url);
+    }
 }
