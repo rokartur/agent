@@ -44,7 +44,7 @@ With `message_threads` on and no proxy in front of `api.anthropic.com` (no headr
 
 `MessageThread::continue_request` sends a continue only when all of these are true: the messages are the held ones plus new user messages, every other field (model, thinking, effort, system, tools, speed) is unchanged, the account is the same, and the last reply came less than `THREAD_IDLE` ago. Otherwise the turn creates a new thread: after compaction, condense, a rewind or a model change, for example. A reply that ends in `refusal`, `pause_turn`, `max_tokens` or an abort is not continued. On OAuth the Claude Code identity block goes only in the create, because a continue sends no system.
 
-A continue that fails with a code in `THREAD_LOST` sends the whole conversation again as a create. After `thread_unsupported_request`, or a 404 on the first continue after such a replay, the session sends its turns without a thread until the next compaction.
+A continue that fails with a code in `THREAD_LOST`, or with a 400 that names no code, sends the whole conversation again as a create. After `thread_unsupported_request`, a 404 on the first continue after such a replay, or a create 400 without a code that the same turn without a thread then passes, the session sends its turns on that model without a thread until the next compaction. A create 400 that the plain turn gets too is the request's own error, and threads stay on.
 
 ## Cost
 

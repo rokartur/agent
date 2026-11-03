@@ -350,7 +350,7 @@ impl Client {
                 on_delta(delta);
             };
             let threaded = account.provider == "anthropic" && self.state.lock().unwrap().message_threads;
-            let sent = match thread.as_deref_mut().filter(|thread| threaded && !thread.unsupported) {
+            let sent = match thread.as_deref_mut().filter(|thread| threaded && thread.unsupported_model != request["model"]) {
                 Some(thread) => self.try_send_in_thread(&account, &request, thread, abort, &mut watched),
                 None => self.try_send(&account, &request, abort, &mut watched),
             };
@@ -571,13 +571,20 @@ impl Client {
             }
             Err(error) => error,
         };
-        let lost = continued && THREAD_LOST.contains(&error.code.as_str());
         // A 404 right after a replay: the API may be unable to store a conversation this large.
-        if error.code == "thread_unsupported_request" || (lost && error.code == "thread_not_found" && thread.replayed) {
-            thread.unsupported = true;
+        if error.code == "thread_unsupported_request" || (continued && error.code == "thread_not_found" && thread.replayed) {
+            thread.unsupported_model = request["model"].clone();
             return self.try_send(account, request, abort, on_delta);
         }
-        if !lost {
+        // A 400 the create names no thread code for: the beta header or the model may not take threads, which
+        // the same turn without a thread tells apart from a request the API refuses either way.
+        if !continued && error.code == "invalid_request_error" {
+            let reply = self.try_send(account, request, abort, on_delta)?;
+            thread.unsupported_model = request["model"].clone();
+            return Ok(reply);
+        }
+        // An unknown 400 on a continue gets a replay too, as Claude Code does: a create shows whether the thread caused it.
+        if !continued || !(THREAD_LOST.contains(&error.code.as_str()) || error.code == "invalid_request_error") {
             return Err(error);
         }
         // The API no longer holds the thread, or a dropped stream already continued it: send the whole conversation again.
@@ -703,7 +710,8 @@ impl Client {
             let _ = std::io::Read::read_to_string(&mut reader, &mut text);
             let quota = status == 429 || (status == 529 && text.contains("quota"));
             let retryable = status == 408 || status == 429 || status >= 500;
-            let code = serde_json::from_str::<Value>(&text).map(|error| error["error"]["details"]["error_code"].as_str().unwrap_or_default().to_string()).unwrap_or_default();
+            let error: Value = serde_json::from_str(&text).unwrap_or_default();
+            let code = error["error"]["details"]["error_code"].as_str().or(error["error"]["type"].as_str()).unwrap_or_default().to_string();
             return Err(ApiError { message: format!("API error {status}: {}", text.trim()), retryable, quota, code });
         }
         match account.provider.as_str() {
@@ -919,7 +927,8 @@ pub struct ApiError {
     pub retryable: bool,
     /// 429, or 529 that names a quota: the account is out, another one may not be.
     pub quota: bool,
-    /// Anthropic's `error.details.error_code`, such as `thread_not_found`; empty when the error has none.
+    /// Anthropic's `error.details.error_code`, such as `thread_not_found`, else its `error.type`
+    /// (`invalid_request_error` for a 400 without a code); empty when the error has neither.
     pub code: String,
 }
 
@@ -946,8 +955,9 @@ pub struct MessageThread {
     held: Vec<Value>,
     /// The thread comes from a replay after a lost one.
     replayed: bool,
-    /// `thread_unsupported_request` (a HIPAA organization, for one) or a 404 right after a replay: turns go without a thread.
-    unsupported: bool,
+    /// The model whose turns go without a thread, as Claude Code keeps it per model: after `thread_unsupported_request`
+    /// (a HIPAA organization, for one), a 404 right after a replay, or a create 400 the same turn without a thread passed.
+    unsupported_model: Value,
 }
 
 /// Continue errors that a create with the whole conversation fixes.
@@ -1901,6 +1911,62 @@ mod tests {
         assert!(second.is_ok(), "{:?}", second.err());
         let threads: Vec<Value> = requests.try_iter().map(|request| request["thread"].clone()).collect();
         assert_eq!(threads, [json!({"type": "create"}), Value::Null, Value::Null]);
+    }
+
+    const INVALID_REQUEST: &str = r#"{"type":"error","error":{"type":"invalid_request_error","message":"Invalid."}}"#;
+
+    #[test]
+    fn a_continue_refused_with_an_unknown_400_is_replayed() {
+        let home = std::env::temp_dir().join(format!("agent-thread-continue-400-{}", std::process::id()));
+        let (client, requests) = threaded_client(&home, &[(200, &ended_turn("msg_1")), (400, INVALID_REQUEST), (200, &ended_turn("msg_2"))]);
+        let mut thread = MessageThread::default();
+
+        let mut history = vec![user("ls")];
+        let first = client.send_in_thread(&turn(&history), &mut thread, &AtomicBool::new(false), &mut |_| {}).unwrap();
+        history.extend([first.message, user("and pwd")]);
+        let second = client.send_in_thread(&turn(&history), &mut thread, &AtomicBool::new(false), &mut |_| {});
+        std::fs::remove_dir_all(&home).ok();
+
+        assert!(second.is_ok(), "{:?}", second.err());
+        let threads: Vec<Value> = requests.try_iter().map(|request| request["thread"].clone()).collect();
+        assert_eq!(threads, [json!({"type": "create"}), json!({"type": "continue", "previous_message_id": "msg_1"}), json!({"type": "create"})]);
+    }
+
+    #[test]
+    fn a_create_refused_with_an_unknown_400_goes_without_a_thread_on_that_model_once_the_plain_turn_passes() {
+        let home = std::env::temp_dir().join(format!("agent-thread-create-400-{}", std::process::id()));
+        let (client, requests) = threaded_client(&home, &[(400, INVALID_REQUEST), (200, &ended_turn("msg_1"))]);
+        let models = ["claude", "other"].map(|id| Model { provider: "anthropic".into(), id: id.into(), ..Model::default() });
+        *client.catalog.write().unwrap() = models.to_vec().into();
+        let mut thread = MessageThread::default();
+
+        let mut history = vec![user("ls")];
+        let first = client.send_in_thread(&turn(&history), &mut thread, &AtomicBool::new(false), &mut |_| {}).unwrap();
+        history.extend([first.message, user("and pwd")]);
+        client.send_in_thread(&turn(&history), &mut thread, &AtomicBool::new(false), &mut |_| {}).unwrap();
+        let mut other_model = turn(&history);
+        other_model["model"] = json!("other");
+        client.send_in_thread(&other_model, &mut thread, &AtomicBool::new(false), &mut |_| {}).unwrap();
+        std::fs::remove_dir_all(&home).ok();
+
+        let threads: Vec<Value> = requests.try_iter().map(|request| request["thread"].clone()).collect();
+        assert_eq!(threads, [json!({"type": "create"}), Value::Null, Value::Null, json!({"type": "create"})]);
+    }
+
+    #[test]
+    fn a_create_refused_with_a_400_the_plain_turn_gets_too_keeps_threads_on() {
+        let home = std::env::temp_dir().join(format!("agent-thread-create-real-400-{}", std::process::id()));
+        let (client, requests) = threaded_client(&home, &[(400, INVALID_REQUEST), (400, INVALID_REQUEST), (200, &ended_turn("msg_1"))]);
+        let mut thread = MessageThread::default();
+
+        let history = vec![user("ls")];
+        let refused = client.send_in_thread(&turn(&history), &mut thread, &AtomicBool::new(false), &mut |_| {});
+        let retried = client.send_in_thread(&turn(&history), &mut thread, &AtomicBool::new(false), &mut |_| {});
+        std::fs::remove_dir_all(&home).ok();
+
+        assert!(refused.is_err() && retried.is_ok());
+        let threads: Vec<Value> = requests.try_iter().map(|request| request["thread"].clone()).collect();
+        assert_eq!(threads, [json!({"type": "create"}), Value::Null, json!({"type": "create"})]);
     }
 
     #[test]
