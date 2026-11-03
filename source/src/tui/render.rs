@@ -175,7 +175,7 @@ fn split_words(s: &Span) -> Vec<Span> {
     for ch in s.text.chars() {
         if ch == ' ' || ch == '\n' {
             if !word.is_empty() {
-                out.push(span(std::mem::take(&mut word), s.style));
+                out.push(Span { text: std::mem::take(&mut word), ..s.clone() });
             }
             out.push(span(ch.to_string(), s.style));
         } else {
@@ -183,13 +183,17 @@ fn split_words(s: &Span) -> Vec<Span> {
         }
     }
     if !word.is_empty() {
-        out.push(span(word, s.style));
+        out.push(Span { text: word, ..s.clone() });
     }
     out
 }
 
 /// Splits a word so each http(s) URL in it is its own underlined span carrying the URL.
 fn mark_links(word: Span) -> Vec<Span> {
+    // Table rows are wrapped twice; the second pass sees each cell row's piece of a URL alone.
+    if word.link.is_some() {
+        return vec![word];
+    }
     let mut out = Vec::new();
     let mut rest = word.text.as_str();
     while let Some((before, url, after)) = split_link(rest) {
