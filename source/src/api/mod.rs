@@ -22,6 +22,10 @@ const RETRY_DELAYS_SECS: [u64; 4] = [2, 5, 15, 30];
 #[cfg(test)]
 const RETRY_DELAYS_SECS: [u64; 4] = [0; 4];
 const THINKING_BETA: &str = "thinking-binding-controls-2026-08-01";
+const MESSAGE_THREADS_BETA: &str = "message-threads-2026-08-12";
+/// The API drops a thread 5 minutes after it stored the last response; 10 s less covers that response's trip here.
+const THREAD_IDLE: Duration = Duration::from_secs(290);
+const ANTHROPIC_API: &str = "https://api.anthropic.com";
 /// pi-ai sends OAuth requests as Claude Code: this user agent, its beta flags and its identity as the first system block.
 pub const CLAUDE_CODE_USER_AGENT: &str = "claude-cli/2.1.280";
 const CLAUDE_CODE_IDENTITY: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
@@ -62,6 +66,8 @@ struct State {
     headroom_token: String,
     provider_order: Vec<&'static str>,
     custom_providers: Vec<CustomProvider>,
+    /// The setting is on and Anthropic requests go straight to its API, which a thread needs.
+    message_threads: bool,
 }
 
 #[derive(Default)]
@@ -144,7 +150,7 @@ impl Client {
             // Every request streams, so headers come before the model thinks; a stuck server would otherwise hold the turn past Esc.
             http: ureq::Agent::config_builder().http_status_as_error(false).timeout_connect(Some(Duration::from_secs(30))).timeout_recv_response(Some(STREAM_IDLE)).build().into(),
             home: home.to_path_buf(),
-            anthropic_base: base("ANTHROPIC_BASE_URL", "https://api.anthropic.com"),
+            anthropic_base: base("ANTHROPIC_BASE_URL", ANTHROPIC_API),
             chatgpt_base: base("CHATGPT_BASE_URL", "https://chatgpt.com/backend-api"),
             openrouter_base: base("OPENROUTER_BASE_URL", "https://openrouter.ai/api"),
             catalog: Arc::default(),
@@ -274,8 +280,15 @@ impl Client {
             url => Some(url.to_string()),
         };
         state.headroom_token = settings.headroom_token.clone();
+        // Headroom rewrites each request's whole history, and a proxy at ANTHROPIC_BASE_URL may drop the thread field or its beta.
+        state.message_threads = settings.message_threads && state.headroom.is_none() && self.anthropic_base == ANTHROPIC_API;
         state.provider_order = settings.sort_providers(&models::PROVIDERS);
         state.custom_providers = settings.custom_providers.clone();
+    }
+
+    /// Whether Anthropic turns go in message threads: the setting is on and nothing sits between this client and the API.
+    pub fn message_threads(&self) -> bool {
+        self.state.lock().unwrap().message_threads
     }
 
     fn reload(&self, mut saved: Vec<Account>) {
@@ -290,15 +303,20 @@ impl Client {
 
     /// Streams one model turn into `on_delta` on a fitting account. Setting `abort` ends the stream with stop reason "aborted".
     pub fn send(&self, request: &Value, abort: &AtomicBool, on_delta: &mut dyn FnMut(Delta)) -> Result<Reply, String> {
-        self.send_on_account(request, abort, on_delta, true)
+        self.send_on_account(request, None, abort, on_delta, true)
+    }
+
+    /// Like `send`, inside `thread` when `message_threads` is on and the request goes straight to Anthropic.
+    pub fn send_in_thread(&self, request: &Value, thread: &mut MessageThread, abort: &AtomicBool, on_delta: &mut dyn FnMut(Delta)) -> Result<Reply, String> {
+        self.send_on_account(request, Some(thread), abort, on_delta, true)
     }
 
     /// Like `send` for callers that only read the `Reply`, so a stream that breaks off partway can still be retried.
     pub fn send_quiet(&self, request: &Value, abort: &AtomicBool) -> Result<Reply, String> {
-        self.send_on_account(request, abort, &mut |_| {}, false)
+        self.send_on_account(request, None, abort, &mut |_| {}, false)
     }
 
-    fn send_on_account(&self, request: &Value, abort: &AtomicBool, on_delta: &mut dyn FnMut(Delta), shown: bool) -> Result<Reply, String> {
+    fn send_on_account(&self, request: &Value, mut thread: Option<&mut MessageThread>, abort: &AtomicBool, on_delta: &mut dyn FnMut(Delta), shown: bool) -> Result<Reply, String> {
         let mut request = request.clone();
         let mut fell_back = false;
         let mut rate_limited: Vec<String> = Vec::new();
@@ -327,10 +345,15 @@ impl Client {
                 }
             };
             let mut streamed = false;
-            let sent = self.try_send(&account, &request, abort, &mut |delta| {
+            let mut watched = |delta: Delta| {
                 streamed |= !matches!(delta, Delta::Notice(_));
                 on_delta(delta);
-            });
+            };
+            let threaded = account.provider == "anthropic" && self.state.lock().unwrap().message_threads;
+            let sent = match thread.as_deref_mut().filter(|thread| threaded && !thread.unsupported) {
+                Some(thread) => self.try_send_in_thread(&account, &request, thread, abort, &mut watched),
+                None => self.try_send(&account, &request, abort, &mut watched),
+            };
             let error = match sent {
                 Ok(reply) => {
                     let model = request["model"].as_str().unwrap_or_default().to_string();
@@ -530,6 +553,40 @@ impl Client {
         model.filter(|m| m.provider != provider).cloned()
     }
 
+    /// `try_send` in `thread`: a continue request with only the new messages when the API holds the rest, else a create.
+    fn try_send_in_thread(&self, account: &Account, request: &Value, thread: &mut MessageThread, abort: &AtomicBool, on_delta: &mut dyn FnMut(Delta)) -> Result<Reply, ApiError> {
+        let owner = key(account);
+        let (body, continued) = match thread.continue_request(&owner, request) {
+            Some(body) => (body, true),
+            None => {
+                let mut body = request.clone();
+                body["thread"] = json!({"type": "create"});
+                (body, false)
+            }
+        };
+        let error = match self.try_send(account, &body, abort, on_delta) {
+            Ok(reply) => {
+                thread.record(owner, request, &reply);
+                return Ok(reply);
+            }
+            Err(error) => error,
+        };
+        let lost = continued && THREAD_LOST.contains(&error.code.as_str());
+        // A 404 right after a replay: the API may be unable to store a conversation this large.
+        if error.code == "thread_unsupported_request" || (lost && error.code == "thread_not_found" && thread.replayed) {
+            thread.unsupported = true;
+            return self.try_send(account, request, abort, on_delta);
+        }
+        if !lost {
+            return Err(error);
+        }
+        // The API no longer holds the thread, or a dropped stream already continued it: send the whole conversation again.
+        thread.last = None;
+        let reply = self.try_send_in_thread(account, request, thread, abort, on_delta)?;
+        thread.replayed = true;
+        Ok(reply)
+    }
+
     fn try_send(&self, account: &Account, request: &Value, abort: &AtomicBool, on_delta: &mut dyn FnMut(Delta)) -> Result<Reply, ApiError> {
         let (headroom, headroom_token) = {
             let state = self.state.lock().unwrap();
@@ -566,15 +623,20 @@ impl Client {
                 if body["speed"] == "ultrafast" {
                     body["speed"] = json!("fast");
                 }
+                // Every request of a thread names its beta; the API compares the set with the create's.
+                let thread_beta = if body.get("thread").is_some() { format!(",{MESSAGE_THREADS_BETA}") } else { String::new() };
                 match secret {
-                    Secret::ApiKey(key) => (call.header("x-api-key", key).header("anthropic-beta", THINKING_BETA), body),
+                    Secret::ApiKey(key) => (call.header("x-api-key", key).header("anthropic-beta", format!("{THINKING_BETA}{thread_beta}")), body),
                     Secret::OAuth(tokens) => {
-                        let mut system = vec![json!({"type": "text", "text": CLAUDE_CODE_IDENTITY})];
-                        system.extend(body["system"].as_array().cloned().unwrap_or_default());
-                        body["system"] = json!(system);
+                        // A continue carries no system: the thread keeps the create's, identity block included.
+                        if body["thread"]["type"] != "continue" {
+                            let mut system = vec![json!({"type": "text", "text": CLAUDE_CODE_IDENTITY})];
+                            system.extend(body["system"].as_array().cloned().unwrap_or_default());
+                            body["system"] = json!(system);
+                        }
                         let call = call
                             .header("authorization", format!("Bearer {}", tokens.access))
-                            .header("anthropic-beta", format!("claude-code-20250219,oauth-2025-04-20,{THINKING_BETA}"))
+                            .header("anthropic-beta", format!("claude-code-20250219,oauth-2025-04-20,{THINKING_BETA}{thread_beta}"))
                             .header("user-agent", CLAUDE_CODE_USER_AGENT)
                             .header("x-app", "cli")
                             .header("anthropic-dangerous-direct-browser-access", "true");
@@ -641,7 +703,8 @@ impl Client {
             let _ = std::io::Read::read_to_string(&mut reader, &mut text);
             let quota = status == 429 || (status == 529 && text.contains("quota"));
             let retryable = status == 408 || status == 429 || status >= 500;
-            return Err(ApiError { message: format!("API error {status}: {}", text.trim()), retryable, quota });
+            let code = serde_json::from_str::<Value>(&text).map(|error| error["error"]["details"]["error_code"].as_str().unwrap_or_default().to_string()).unwrap_or_default();
+            return Err(ApiError { message: format!("API error {status}: {}", text.trim()), retryable, quota, code });
         }
         match account.provider.as_str() {
             _ if custom.as_ref().is_some_and(|custom| custom.api == CustomApi::OpenAi) => openai_chat::parse_stream(&mut reader, abort, on_delta),
@@ -856,16 +919,87 @@ pub struct ApiError {
     pub retryable: bool,
     /// 429, or 529 that names a quota: the account is out, another one may not be.
     pub quota: bool,
+    /// Anthropic's `error.details.error_code`, such as `thread_not_found`; empty when the error has none.
+    pub code: String,
 }
 
 impl ApiError {
     pub fn retryable(message: String) -> ApiError {
-        ApiError { message, retryable: true, quota: false }
+        ApiError { message, retryable: true, quota: false, code: String::new() }
     }
 
     pub fn fatal(message: String) -> ApiError {
-        ApiError { message, retryable: false, quota: false }
+        ApiError { message, retryable: false, quota: false, code: String::new() }
     }
+}
+
+/// A conversation the Anthropic API keeps between turns (the message threads beta), so a turn sends only what follows `held`.
+#[derive(Default)]
+pub struct MessageThread {
+    /// The response a continue names, and when it arrived; None when the next turn creates a thread.
+    last: Option<(String, Instant)>,
+    /// `key` of the account that created it: the API answers another account's continue with 404.
+    account: String,
+    /// The last request without its messages: a continue sends no system or tools, and the API refuses another model or thinking.
+    fixed: Value,
+    /// What the API holds: the messages sent so far, without the breakpoint `request` puts on the last one, then the reply.
+    held: Vec<Value>,
+    /// The thread comes from a replay after a lost one.
+    replayed: bool,
+    /// `thread_unsupported_request` (a HIPAA organization, for one) or a 404 right after a replay: turns go without a thread.
+    unsupported: bool,
+}
+
+/// Continue errors that a create with the whole conversation fixes.
+const THREAD_LOST: [&str; 4] = ["thread_not_found", "thread_already_continued", "thread_continue_in_flight", "thread_fingerprint_mismatch"];
+
+impl MessageThread {
+    /// `request` from `account` as a continue: its new messages without system and tools, which a continue must not send.
+    /// None when the API cannot hold its conversation: another account, other fixed fields, an edited history,
+    /// a reply the thread never saw, or an expired thread.
+    fn continue_request(&self, account: &str, request: &Value) -> Option<Value> {
+        let (last_id, stored_at) = self.last.as_ref()?;
+        let messages = request["messages"].as_array()?;
+        let held = self.held.len();
+        // A reply after `held` came from a turn sent outside the thread, which the API does not hold.
+        let appended = messages.len() > held && messages[..held] == self.held[..] && messages[held..].iter().all(|message| message["role"] == "user");
+        let mut continued = without_messages(request);
+        if stored_at.elapsed() >= THREAD_IDLE || self.account != account || !appended || continued != self.fixed {
+            return None;
+        }
+        let fields = continued.as_object_mut().expect("a request is an object");
+        fields.remove("system");
+        fields.remove("tools");
+        fields.insert("messages".into(), json!(messages[held..]));
+        fields.insert("thread".into(), json!({"type": "continue", "previous_message_id": last_id}));
+        Some(continued)
+    }
+
+    /// Keeps the turn the API stored; after a reply it may not hold, the next turn creates a thread.
+    fn record(&mut self, account: String, request: &Value, reply: &Reply) {
+        // No continue after a refusal, a paused turn takes no new message, an aborted stream ends early,
+        // and a tool input that did not parse is `{}` here but not in the API's copy.
+        let stored = matches!(reply.stop_reason.as_str(), "end_turn" | "tool_use") && reply.bad_tool_inputs.is_empty() && !reply.id.is_empty();
+        if !stored {
+            self.last = None;
+            return;
+        }
+        let mut held = request["messages"].as_array().cloned().unwrap_or_default();
+        if let Some(block) = held.last_mut().and_then(|message| message.get_mut("content")?.as_array_mut()?.last_mut()?.as_object_mut()) {
+            block.remove("cache_control");
+        }
+        held.push(reply.message.clone());
+        self.last = Some((reply.id.clone(), Instant::now()));
+        self.account = account;
+        self.fixed = without_messages(request);
+        self.held = held;
+        self.replayed = false;
+    }
+}
+
+fn without_messages(request: &Value) -> Value {
+    let fields = request.as_object().expect("a request is an object");
+    Value::Object(fields.iter().filter(|(name, _)| name.as_str() != "messages").map(|(name, value)| (name.clone(), value.clone())).collect())
 }
 
 /// The tools nearly every coding turn calls. Anthropic's tool search loads any other when the model asks for it,
@@ -1073,7 +1207,7 @@ fn parse_stream(reader: &mut dyn BufRead, abort: &AtomicBool, on_delta: &mut dyn
                 let kind = event["error"]["type"].as_str().unwrap_or_default();
                 let retryable = matches!(kind, "overloaded_error" | "api_error" | "rate_limit_error");
                 let quota = kind == "rate_limit_error";
-                return Err(ApiError { message: format!("API stream error: {}", event["error"]), retryable, quota });
+                return Err(ApiError { message: format!("API stream error: {}", event["error"]), retryable, quota, code: String::new() });
             }
             _ => {}
         }
@@ -1148,7 +1282,7 @@ mod tests {
         let home = std::env::temp_dir().join(format!("agent-remote-headroom-{}", std::process::id()));
         let mut client = Client::new(&home).unwrap();
         client.anthropic_base = "http://127.0.0.1:9".into();
-        let (headroom, requests) = mock_provider(200, PONG);
+        let (headroom, requests) = mock_provider(&[(200, PONG)]);
         client.reload(vec![Account { provider: "anthropic".into(), name: "work".into(), secret: Secret::ApiKey("sk".into()) }]);
         *client.catalog.write().unwrap() = vec![Model { provider: "anthropic".into(), id: "claude".into(), ..Model::default() }].into();
         let mut settings = crate::settings::load(&home).unwrap();
@@ -1371,13 +1505,14 @@ mod tests {
         drop(server);
     }
 
-    /// Serves a models list that both Anthropic and OpenRouter parse; messages get `messages_status` and `messages_body`
-    /// and their request bodies go to the returned receiver.
-    fn mock_provider(messages_status: u16, messages_body: &'static str) -> (String, std::sync::mpsc::Receiver<Value>) {
+    /// Serves a models list that both Anthropic and OpenRouter parse; messages get `replies` in order, the last one from then on,
+    /// and their request bodies go to the returned receiver with the proxy token and beta headers in them.
+    fn mock_provider(replies: &[(u16, &str)]) -> (String, std::sync::mpsc::Receiver<Value>) {
         use std::io::{BufRead, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
         let (sent, received) = std::sync::mpsc::channel();
+        let mut replies: Vec<(u16, String)> = replies.iter().map(|(status, body)| (*status, body.to_string())).collect();
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let mut stream = stream.unwrap();
@@ -1387,6 +1522,7 @@ mod tests {
                 // Read the whole request, so closing the socket does not reset it under the client.
                 let mut length = 0;
                 let mut proxy_token = None;
+                let mut beta = None;
                 let mut header = String::new();
                 while reader.read_line(&mut header).unwrap() > 2 {
                     if let Some(value) = header.to_lowercase().strip_prefix("content-length:") {
@@ -1395,6 +1531,9 @@ mod tests {
                     if let Some(value) = header.to_lowercase().strip_prefix("x-headroom-proxy-token:") {
                         proxy_token = Some(value.trim().to_string());
                     }
+                    if let Some(value) = header.to_lowercase().strip_prefix("anthropic-beta:") {
+                        beta = Some(value.trim().to_string());
+                    }
                     header.clear();
                 }
                 let mut request = vec![0; length];
@@ -1402,19 +1541,22 @@ mod tests {
                 let (status, body) = if request_line.contains("/v1/models") {
                     (
                         200,
-                        r#"{"data":[{"id":"claude-haiku-9","max_input_tokens":200000,"max_tokens":8192},{"id":"a/one:free","context_length":1000,"supported_parameters":["tools"]},{"id":"b/two:free","context_length":1000,"supported_parameters":["tools"]}]}"#,
+                        r#"{"data":[{"id":"claude-haiku-9","max_input_tokens":200000,"max_tokens":8192},{"id":"a/one:free","context_length":1000,"supported_parameters":["tools"]},{"id":"b/two:free","context_length":1000,"supported_parameters":["tools"]}]}"#.to_string(),
                     )
                 } else if request_line.starts_with("GET") {
                     // Codex and Claude usage windows; unknown usage does not block a request.
-                    (404, "{}")
+                    (404, "{}".to_string())
                 } else {
                     let mut request: Value = serde_json::from_slice(&request).unwrap();
                     if let Some(token) = proxy_token {
                         request["x-headroom-proxy-token"] = json!(token);
                     }
+                    if let Some(beta) = beta {
+                        request["anthropic-beta"] = json!(beta);
+                    }
                     // A test that only reads the doctor lines has dropped the receiver.
                     let _ = sent.send(request);
-                    (messages_status, messages_body)
+                    if replies.len() > 1 { replies.remove(0) } else { replies[0].clone() }
                 };
                 write!(stream, "HTTP/1.1 {status} X\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len()).unwrap();
             }
@@ -1429,7 +1571,7 @@ mod tests {
         let home = std::env::temp_dir().join(format!("agent-doctor-{}", std::process::id()));
         let check = |messages_status, messages_body| {
             let mut client = Client::new(&home).unwrap();
-            client.anthropic_base = mock_provider(messages_status, messages_body).0;
+            client.anthropic_base = mock_provider(&[(messages_status, messages_body)]).0;
             client.reload(vec![Account { provider: "anthropic".into(), name: "work".into(), secret: Secret::ApiKey("sk".into()) }]);
             client.doctor(Some("anthropic"))
         };
@@ -1446,7 +1588,7 @@ mod tests {
     fn doctor_pings_openrouter_on_free_models_without_a_thinking_field() {
         let home = std::env::temp_dir().join(format!("agent-doctor-or-{}", std::process::id()));
         let mut client = Client::new(&home).unwrap();
-        let (base, requests) = mock_provider(200, PONG);
+        let (base, requests) = mock_provider(&[(200, PONG)]);
         client.openrouter_base = base;
         client.reload(vec![Account { provider: "openrouter".into(), name: "key".into(), secret: Secret::ApiKey("sk".into()) }]);
 
@@ -1465,7 +1607,7 @@ mod tests {
     fn a_custom_provider_model_replaces_the_openrouter_model_with_the_same_id() {
         let home = std::env::temp_dir().join(format!("agent-custom-clash-{}", std::process::id()));
         let mut client = Client::new(&home).unwrap();
-        let (base, _) = mock_provider(200, PONG);
+        let (base, _) = mock_provider(&[(200, PONG)]);
         client.openrouter_base = base;
         let model = crate::settings::CustomModel { id: "one:free".into(), context_window: 1, max_tokens: 1 };
         client.state.lock().unwrap().custom_providers = vec![CustomProvider { name: "a".into(), base_url: "http://x".into(), api_key_env: String::new(), api: CustomApi::OpenAi, models: vec![model] }];
@@ -1483,7 +1625,7 @@ mod tests {
     fn loading_the_catalog_again_lists_the_models_of_an_account_added_since() {
         let home = std::env::temp_dir().join(format!("agent-catalog-reload-{}", std::process::id()));
         let mut client = Client::new(&home).unwrap();
-        let (base, _) = mock_provider(200, PONG);
+        let (base, _) = mock_provider(&[(200, PONG)]);
         (client.anthropic_base, client.openrouter_base) = (base.clone(), base);
         client.reload(Vec::new());
         client.load_catalog();
@@ -1502,8 +1644,8 @@ mod tests {
     fn send_with_failover(status: u16, body: &'static str) -> (Result<Reply, String>, Vec<String>, std::sync::mpsc::Receiver<Value>) {
         let home = std::env::temp_dir().join(format!("agent-failover-{status}-{}", std::process::id()));
         let mut client = Client::new(&home).unwrap();
-        client.anthropic_base = mock_provider(status, body).0;
-        let (openrouter_base, fallback_requests) = mock_provider(200, PONG);
+        client.anthropic_base = mock_provider(&[(status, body)]).0;
+        let (openrouter_base, fallback_requests) = mock_provider(&[(200, PONG)]);
         client.openrouter_base = openrouter_base;
         client.reload(vec![
             Account { provider: "anthropic".into(), name: "work".into(), secret: Secret::ApiKey("sk".into()) },
@@ -1545,7 +1687,7 @@ mod tests {
     fn a_custom_provider_model_goes_to_its_chat_completions_endpoint_without_the_name_prefix() {
         let home = std::env::temp_dir().join(format!("agent-custom-{}", std::process::id()));
         let client = Client::new(&home).unwrap();
-        let (base, requests) = mock_provider(200, "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"pong\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n");
+        let (base, requests) = mock_provider(&[(200, "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"pong\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")]);
         let local = CustomProvider { name: "ollama".into(), base_url: format!("{base}/v1"), api_key_env: String::new(), api: CustomApi::OpenAi, models: Vec::new() };
         *client.catalog.write().unwrap() = vec![Model { provider: "ollama".into(), id: "ollama/qwen3:8b".into(), ..Model::default() }].into();
         client.state.lock().unwrap().custom_providers = vec![local];
@@ -1563,7 +1705,7 @@ mod tests {
     fn an_anthropic_compatible_provider_gets_a_messages_request_without_anthropic_only_fields() {
         let home = std::env::temp_dir().join(format!("agent-custom-anthropic-{}", std::process::id()));
         let client = Client::new(&home).unwrap();
-        let (base, requests) = mock_provider(200, PONG);
+        let (base, requests) = mock_provider(&[(200, PONG)]);
         let minimax = CustomProvider { name: "minimax".into(), base_url: base, api_key_env: String::new(), api: CustomApi::Anthropic, models: Vec::new() };
         *client.catalog.write().unwrap() = vec![Model { provider: "minimax".into(), id: "minimax/MiniMax-M2".into(), ..Model::default() }].into();
         client.state.lock().unwrap().custom_providers = vec![minimax];
@@ -1584,7 +1726,7 @@ mod tests {
     fn a_rejected_codex_tier_retries_once_at_standard_speed() {
         let home = std::env::temp_dir().join(format!("agent-tier-{}", std::process::id()));
         let mut client = Client::new(&home).unwrap();
-        let (base, requests) = mock_provider(400, r#"{"error":{"message":"Unsupported service_tier: ultrafast"}}"#);
+        let (base, requests) = mock_provider(&[(400, r#"{"error":{"message":"Unsupported service_tier: ultrafast"}}"#)]);
         client.chatgpt_base = base;
         let tokens = oauth::Tokens { access: "a".into(), refresh: "r".into(), expires: u64::MAX, account_id: None };
         client.reload(vec![Account { provider: "openai-codex".into(), name: "pro".into(), secret: Secret::OAuth(tokens) }]);
@@ -1605,5 +1747,178 @@ mod tests {
         assert_eq!(requests.recv_timeout(std::time::Duration::from_secs(5)).unwrap().get("service_tier"), None);
         assert!(requests.try_recv().is_err());
         assert!(notices.iter().any(|n| n.contains("Retrying at standard speed")), "{notices:?}");
+    }
+
+    /// An SSE reply `id` that ends its turn, which a thread keeps.
+    fn ended_turn(id: &str) -> String {
+        let events = [
+            json!({"type": "message_start", "message": {"id": id, "usage": {}}}),
+            json!({"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {}}),
+            json!({"type": "message_stop"}),
+        ];
+        events.iter().map(|event| format!("data: {event}\n\n")).collect()
+    }
+
+    const THREAD_NOT_FOUND: &str = r#"{"type":"error","error":{"type":"not_found_error","message":"Thread not found.","details":{"error_code":"thread_not_found"}}}"#;
+
+    /// A client that sends Anthropic turns in message threads, as it does on api.anthropic.com, to a server answering `replies`.
+    fn threaded_client(home: &Path, replies: &[(u16, &str)]) -> (Client, std::sync::mpsc::Receiver<Value>) {
+        let mut client = Client::new(home).unwrap();
+        let (base, requests) = mock_provider(replies);
+        client.anthropic_base = base;
+        client.reload(vec![Account { provider: "anthropic".into(), name: "work".into(), secret: Secret::ApiKey("sk".into()) }]);
+        *client.catalog.write().unwrap() = vec![Model { provider: "anthropic".into(), id: "claude".into(), ..Model::default() }].into();
+        client.state.lock().unwrap().message_threads = true;
+        (client, requests)
+    }
+
+    /// The request of a turn after `history`, built the way `run_turns` builds it.
+    fn turn(history: &[Value]) -> Value {
+        request("claude", 10, "low", "5m", "You code.", "", &json!([{"name": "Read", "input_schema": {"type": "object"}}]), history)
+    }
+
+    fn user(text: &str) -> Value {
+        json!({"role": "user", "content": [{"type": "text", "text": text}]})
+    }
+
+    #[test]
+    fn a_turn_in_a_thread_sends_only_the_messages_after_the_last_reply() {
+        let home = std::env::temp_dir().join(format!("agent-thread-continue-{}", std::process::id()));
+        let (client, requests) = threaded_client(&home, &[(200, &ended_turn("msg_1")), (200, &ended_turn("msg_2"))]);
+        let mut thread = MessageThread::default();
+
+        let mut history = vec![user("ls")];
+        let first = client.send_in_thread(&turn(&history), &mut thread, &AtomicBool::new(false), &mut |_| {}).unwrap();
+        history.extend([first.message, user("and pwd")]);
+        let second = client.send_in_thread(&turn(&history), &mut thread, &AtomicBool::new(false), &mut |_| {});
+        std::fs::remove_dir_all(&home).ok();
+
+        assert!(second.is_ok(), "{:?}", second.err());
+        let create = requests.recv().unwrap();
+        assert_eq!(create["thread"], json!({"type": "create"}));
+        assert_eq!(create["anthropic-beta"], format!("{THINKING_BETA},{MESSAGE_THREADS_BETA}"));
+        assert!(create.get("system").is_some() && create.get("tools").is_some(), "{create}");
+        let next = requests.recv().unwrap();
+        assert_eq!(next["thread"], json!({"type": "continue", "previous_message_id": "msg_1"}));
+        assert_eq!(next["anthropic-beta"], create["anthropic-beta"]);
+        assert!(next.get("system").is_none() && next.get("tools").is_none(), "{next}");
+        // Only the new message, with the breakpoint that caches the turn.
+        assert_eq!(next["messages"], json!([turn(&history)["messages"][2]]));
+    }
+
+    #[test]
+    fn an_oauth_thread_names_claude_code_only_in_its_create() {
+        let home = std::env::temp_dir().join(format!("agent-thread-oauth-{}", std::process::id()));
+        let (client, requests) = threaded_client(&home, &[(200, &ended_turn("msg_1")), (200, &ended_turn("msg_2"))]);
+        let tokens = oauth::Tokens { access: "a".into(), refresh: "r".into(), expires: u64::MAX, account_id: None };
+        client.reload(vec![Account { provider: "anthropic".into(), name: "pro".into(), secret: Secret::OAuth(tokens) }]);
+        let mut thread = MessageThread::default();
+
+        let mut history = vec![user("ls")];
+        let first = client.send_in_thread(&turn(&history), &mut thread, &AtomicBool::new(false), &mut |_| {}).unwrap();
+        history.extend([first.message, user("and pwd")]);
+        let second = client.send_in_thread(&turn(&history), &mut thread, &AtomicBool::new(false), &mut |_| {});
+        std::fs::remove_dir_all(&home).ok();
+
+        assert!(second.is_ok(), "{:?}", second.err());
+        let create = requests.recv().unwrap();
+        assert_eq!(create["system"][0]["text"], CLAUDE_CODE_IDENTITY);
+        let next = requests.recv().unwrap();
+        assert_eq!(next["thread"]["type"], "continue");
+        assert!(next.get("system").is_none(), "{next}");
+        assert_eq!(next["anthropic-beta"], create["anthropic-beta"]);
+    }
+
+    #[test]
+    fn a_thread_continues_only_an_unchanged_conversation_after_a_reply_the_api_keeps() {
+        let reply =
+            |stop_reason: &str| Reply { message: json!({"role": "assistant", "content": [{"type": "text", "text": "ok"}]}), stop_reason: stop_reason.into(), id: "msg_1".into(), ..Reply::default() };
+        let history = vec![user("ls")];
+        let next = [history.clone(), vec![reply("end_turn").message, user("and pwd")]].concat();
+        let mut thread = MessageThread::default();
+        thread.record("anthropic/work".into(), &turn(&history), &reply("end_turn"));
+        assert!(thread.continue_request("anthropic/work", &turn(&next)).is_some());
+
+        let mut edited = next.clone();
+        edited[0] = user("pwd");
+        assert!(thread.continue_request("anthropic/work", &turn(&edited)).is_none());
+        let answered_elsewhere = [next.clone(), vec![reply("end_turn").message, user("and date")]].concat();
+        assert!(thread.continue_request("anthropic/work", &turn(&answered_elsewhere)).is_none());
+        let mut other_effort = turn(&next);
+        other_effort["output_config"]["effort"] = json!("high");
+        assert!(thread.continue_request("anthropic/work", &other_effort).is_none());
+        assert!(thread.continue_request("anthropic/other", &turn(&next)).is_none());
+        thread.last = Some(("msg_1".into(), Instant::now() - THREAD_IDLE));
+        assert!(thread.continue_request("anthropic/work", &turn(&next)).is_none());
+
+        let unparsed = BadToolInput { id: "t1".into(), error: "Bad tool input JSON.".into(), raw: "{".into() };
+        for kept_back in [reply("max_tokens"), reply("refusal"), reply("pause_turn"), reply("aborted"), Reply { bad_tool_inputs: vec![unparsed], ..reply("tool_use") }] {
+            thread.record("anthropic/work".into(), &turn(&history), &reply("end_turn"));
+            thread.record("anthropic/work".into(), &turn(&history), &kept_back);
+            assert!(thread.continue_request("anthropic/work", &turn(&next)).is_none(), "{}", kept_back.stop_reason);
+        }
+    }
+
+    #[test]
+    fn a_lost_thread_is_replayed_and_turns_go_without_one_once_a_replay_is_lost() {
+        let home = std::env::temp_dir().join(format!("agent-thread-lost-{}", std::process::id()));
+        let (msg_1, msg_2, msg_3) = (ended_turn("msg_1"), ended_turn("msg_2"), ended_turn("msg_3"));
+        let (client, requests) = threaded_client(&home, &[(200, &msg_1), (404, THREAD_NOT_FOUND), (200, &msg_2), (404, THREAD_NOT_FOUND), (200, &msg_3)]);
+        let mut thread = MessageThread::default();
+
+        let mut history = vec![user("ls")];
+        for text in ["and pwd", "and date", "and whoami"] {
+            let reply = client.send_in_thread(&turn(&history), &mut thread, &AtomicBool::new(false), &mut |_| {}).unwrap();
+            history.extend([reply.message, user(text)]);
+        }
+        let last = client.send_in_thread(&turn(&history), &mut thread, &AtomicBool::new(false), &mut |_| {});
+        std::fs::remove_dir_all(&home).ok();
+
+        assert!(last.is_ok(), "{:?}", last.err());
+        let sent: Vec<Value> = requests.try_iter().collect();
+        let threads: Vec<Value> = sent.iter().map(|request| request["thread"].clone()).collect();
+        let create = json!({"type": "create"});
+        let continue_from = |id: &str| json!({"type": "continue", "previous_message_id": id});
+        assert_eq!(threads, [create.clone(), continue_from("msg_1"), create, continue_from("msg_2"), Value::Null, Value::Null]);
+        // The replay carries the whole conversation; a request outside a thread names only the thinking beta.
+        assert_eq!(sent[2]["messages"].as_array().unwrap().len(), 3);
+        assert_eq!(sent[4]["anthropic-beta"], THINKING_BETA);
+    }
+
+    #[test]
+    fn a_turn_the_api_cannot_keep_in_a_thread_goes_without_one() {
+        let home = std::env::temp_dir().join(format!("agent-thread-unsupported-{}", std::process::id()));
+        let refused = r#"{"type":"error","error":{"type":"invalid_request_error","message":"Unsupported.","details":{"error_code":"thread_unsupported_request","unsupported":["hipaa"]}}}"#;
+        let (client, requests) = threaded_client(&home, &[(400, refused), (200, &ended_turn("msg_1"))]);
+        let mut thread = MessageThread::default();
+
+        let mut history = vec![user("ls")];
+        let first = client.send_in_thread(&turn(&history), &mut thread, &AtomicBool::new(false), &mut |_| {}).unwrap();
+        history.extend([first.message, user("and pwd")]);
+        let second = client.send_in_thread(&turn(&history), &mut thread, &AtomicBool::new(false), &mut |_| {});
+        std::fs::remove_dir_all(&home).ok();
+
+        assert!(second.is_ok(), "{:?}", second.err());
+        let threads: Vec<Value> = requests.try_iter().map(|request| request["thread"].clone()).collect();
+        assert_eq!(threads, [json!({"type": "create"}), Value::Null, Value::Null]);
+    }
+
+    #[test]
+    fn threads_stay_off_behind_headroom_or_another_anthropic_base_url() {
+        let home = std::env::temp_dir().join(format!("agent-thread-proxy-{}", std::process::id()));
+        let mut client = Client::new(&home).unwrap();
+        let mut settings = crate::settings::load(&home).unwrap();
+        client.anthropic_base = ANTHROPIC_API.into();
+        client.configure(&settings);
+        assert!(client.message_threads());
+
+        (settings.headroom, settings.headroom_url) = (true, "http://127.0.0.1:9".into());
+        client.configure(&settings);
+        assert!(!client.message_threads());
+        settings.headroom = false;
+        client.anthropic_base = "http://127.0.0.1:9".into();
+        client.configure(&settings);
+        std::fs::remove_dir_all(&home).ok();
+        assert!(!client.message_threads());
     }
 }

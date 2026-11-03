@@ -492,7 +492,7 @@ const PLAN_OPTIONS: [&str; 3] = ["Start fresh and implement", "Export to a _PLAN
 const PLAN_FRESH_ROWS: [&str; 3] = ["Model", "Effort", "Start"];
 const EDITOR_ROWS: usize = 10;
 const SCROLL_LINES: [usize; 5] = [1, 2, 3, 5, 10];
-const SETTING_NAMES: [&str; 37] = [
+const SETTING_NAMES: [&str; 38] = [
     "Model",
     "Thinking level",
     "Permission mode",
@@ -530,11 +530,12 @@ const SETTING_NAMES: [&str; 37] = [
     "Headroom URL",
     "Headroom token",
     "Messages while working",
+    "Message threads",
 ];
 /// The settings panel's tabs with their rows of `SETTING_NAMES`, in the order it lists them.
 const SETTING_SECTIONS: [(&str, &[usize]); 5] = [
     ("Model", &[0, 1, 27, 13, 2, 18, 30, 29]),
-    ("Context", &[3, 4, 5, 7, 8, 9, 28]),
+    ("Context", &[3, 4, 5, 7, 8, 9, 28, 37]),
     ("Accounts", &[10, 11, 12, 25]),
     ("Modes", &[14, 15, 16, 17, 34, 35, 26]),
     ("Interface", &[6, 31, 32, 19, 33, 20, 23, 21, 22, 24, 36]),
@@ -3716,11 +3717,12 @@ impl App {
             32 => s.footer_account = !s.footer_account,
             33 => s.progress_bar = !s.progress_bar,
             36 => s.mid_turn = step(&MID_TURN, &s.mid_turn.as_str(), forward).to_string(),
+            37 => s.message_threads = !s.message_threads,
             _ => unreachable!("rows 0, 8, 12, 13, 29 and 30 open their own panels"),
         });
     }
 
-    fn setting_values(&self) -> [Line; 37] {
+    fn setting_values(&self) -> [Line; 38] {
         let s = &self.settings;
         let condense_model = if s.condense_model.is_empty() { "auto" } else { &s.condense_model };
         let fallback_model = if s.fallback_model.is_empty() { "auto" } else { &s.fallback_model };
@@ -3772,6 +3774,11 @@ impl App {
             },
             vec![span(if s.headroom_token.is_empty() { "none" } else { "set" }, BRIGHT.bold()), span("   enter edit", MUTED)],
             choices(MID_TURN.map(String::from), &s.mid_turn),
+            if s.message_threads && !self.client.message_threads() {
+                [on_off_choices(true), vec![span("  unused behind headroom or ANTHROPIC_BASE_URL", MUTED)]].concat()
+            } else {
+                on_off_choices(s.message_threads)
+            },
         ]
     }
 
