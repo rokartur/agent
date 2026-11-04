@@ -5541,7 +5541,8 @@ fn render_tool(name: &str, input: &Value, result: Option<&(String, bool)>, width
                 Some((server, tool)) => vec![span(icon, icon_style), span(" ", PLAIN), span(tool, TOOL_NAME), span(format!(" MCP: {server}"), MUTED)],
                 None => vec![span(icon, icon_style), span(" ", PLAIN), span(name, TOOL_NAME)],
             };
-            let args = tool_args(name, input, cwd);
+            let answers = result.filter(|_| name == "AskUserQuestion").and_then(|(output, _)| crate::tools::ask::answered(input, output));
+            let args = answers.unwrap_or_else(|| tool_args(name, input, cwd));
             if !args.is_empty() {
                 header.extend([span(" ", PLAIN), span(args, TOOL_ARGS)]);
             }
