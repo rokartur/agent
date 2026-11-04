@@ -224,7 +224,7 @@ pub fn media_type(path: &Path) -> Option<&'static str> {
     }
 }
 
-fn base64(bytes: &[u8]) -> String {
+pub fn base64(bytes: &[u8]) -> String {
     let mut out = String::new();
     for chunk in bytes.chunks(3) {
         let mut padded = [0; 4];

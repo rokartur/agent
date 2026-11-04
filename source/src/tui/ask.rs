@@ -31,6 +31,10 @@ impl AskPanel {
         AskPanel { answers: vec![None; questions.len()], questions, reply, current: 0, drafts }
     }
 
+    pub fn first_question(&self) -> &str {
+        self.questions.first().map_or("", |question| question.question.as_str())
+    }
+
     /// Pasted text can only be a typed answer, so it moves to the "Type something." row.
     pub fn paste(&mut self, text: &str) {
         let draft = &mut self.drafts[self.current];
