@@ -44,12 +44,38 @@ pub fn progress(busy: bool, env: impl Fn(&str) -> Option<String>) -> Option<Stri
     let is = |name: &str, value: &str| env(name).is_some_and(|found| found == value);
     let iterm_version = env("LC_TERMINAL_VERSION").or_else(|| env("TERM_PROGRAM_VERSION")).unwrap_or_default();
     let iterm_supports = (is("LC_TERMINAL", "iTerm2") || is("TERM_PROGRAM", "iTerm.app")) && version(&iterm_version) >= vec![3, 6, 6];
-    let supported = env("GHOSTTY_RESOURCES_DIR").is_some() || env("WT_SESSION").is_some() || env("ConEmuANSI").is_some() || is("TERM_PROGRAM", "tuni") || is("TERM_PROGRAM", "rex") || iterm_supports;
+    let supported = env("GHOSTTY_RESOURCES_DIR").is_some() || env("WT_SESSION").is_some() || env("ConEmuANSI").is_some() || is("TERM_PROGRAM", "tuni") || iterm_supports;
     if !supported {
         return None;
     }
     let state = if busy { 3 } else { 0 };
     Some(through_tmux(format!("\x1b]9;4;{state}\x07"), &env))
+}
+
+/// What the agent is doing, as Rex's Program Status Protocol (OSC 7501) names it: a state, what a blocked turn waits for, one line of text.
+#[derive(Clone, PartialEq, Debug)]
+pub struct Status {
+    pub state: &'static str,
+    pub kind: Option<&'static str>,
+    pub msg: String,
+}
+
+/// OSC 7501 for Rex, which draws tab and sidebar activity from it and decides itself when to notify or play a sound.
+/// https://www.superlogical.com/rex/docs/build/program-status
+pub fn program_status(status: &Status, env: impl Fn(&str) -> Option<String>) -> Option<String> {
+    if env("TERM_PROGRAM").is_none_or(|program| program != "rex") {
+        return None;
+    }
+    let mut body = format!("state={}", status.state);
+    if let Some(kind) = status.kind {
+        body.push_str(&format!(":kind={kind}"));
+    }
+    body.push_str(":app=agent");
+    let msg = printable(&status.msg);
+    if !msg.is_empty() {
+        body.push_str(&format!(":msg={}", crate::image::base64(msg.as_bytes())));
+    }
+    Some(through_tmux(format!("\x1b]7501;{body}\x1b\\"), &env))
 }
 
 fn version(text: &str) -> Vec<u32> {
@@ -101,9 +127,19 @@ mod tests {
         assert_eq!(progress(true, env(&[("LC_TERMINAL", "iTerm2"), ("LC_TERMINAL_VERSION", "3.6.6")])).as_deref(), Some("\x1b]9;4;3\x07"));
         assert_eq!(progress(true, env(&[("LC_TERMINAL", "iTerm2"), ("LC_TERMINAL_VERSION", "3.5.14")])), None);
         assert_eq!(progress(true, env(&[("TERM_PROGRAM", "tuni")])).as_deref(), Some("\x1b]9;4;3\x07"));
-        assert_eq!(progress(true, env(&[("TERM_PROGRAM", "rex")])).as_deref(), Some("\x1b]9;4;3\x07"));
+        assert_eq!(progress(true, env(&[("TERM_PROGRAM", "rex")])), None);
         assert_eq!(progress(true, env(&[("WEZTERM_EXECUTABLE", "/w")])), None);
         assert_eq!(progress(true, env(&[("GHOSTTY_RESOURCES_DIR", "/g"), ("TMUX", "/t")])).as_deref(), Some("\x1bPtmux;\x1b\x1b]9;4;3\x07\x1b\\"));
+    }
+
+    #[test]
+    fn rex_gets_the_program_status_record() {
+        let rex = || env(&[("TERM_PROGRAM", "rex")]);
+        let working = Status { state: "working", kind: None, msg: String::new() };
+        assert_eq!(program_status(&working, rex()).as_deref(), Some("\x1b]7501;state=working:app=agent\x1b\\"));
+        let blocked = Status { state: "blocked", kind: Some("question"), msg: "Which?\n\x1b]0;x".to_string() };
+        assert_eq!(program_status(&blocked, rex()).as_deref(), Some("\x1b]7501;state=blocked:kind=question:app=agent:msg=V2hpY2g/\x1b\\"));
+        assert_eq!(program_status(&working, env(&[("GHOSTTY_RESOURCES_DIR", "/g")])), None);
     }
 
     #[test]
@@ -125,6 +161,7 @@ mod tests {
         for ghostty in [false, true] {
             sequence("agent", "Done", recording(ghostty));
             progress(true, recording(ghostty));
+            program_status(&Status { state: "idle", kind: None, msg: String::new() }, recording(ghostty));
         }
         for name in read.into_inner() {
             assert!(TERMINAL_VARS.contains(&name.as_str()), "{name}");

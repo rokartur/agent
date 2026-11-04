@@ -667,6 +667,10 @@ struct App {
     title: String,
     /// Some inside a cmux terminal, whose sidebar shows the turn's state.
     cmux: Option<cmux::Cmux>,
+    /// How the last turn ended, reported to Rex once nothing is running or waiting.
+    outcome: notify::Status,
+    /// The status Rex last got, so each frame sends only a change.
+    status_sent: Option<notify::Status>,
     prompt_usage: Usage,
     /// Answer and thinking chars streamed since the last request's usage arrived, for the live token estimate.
     streamed_chars: usize,
@@ -1133,6 +1137,7 @@ fn event_loop(app: &mut App, inbox: &Receiver<Msg>) -> Result<(), String> {
             app.show_progress(show);
         }
         app.report_to_cmux();
+        app.report_to_rex();
         app.draw();
         let mut wait = if app.edge_drag.is_some() {
             EDGE_SCROLL
@@ -1227,6 +1232,8 @@ impl App {
             size: (0, 0),
             title: String::new(),
             cmux: cmux::Cmux::detect(),
+            outcome: notify::Status { state: "idle", kind: None, msg: String::new() },
+            status_sent: None,
             prompt_usage: Usage::default(),
             streamed_chars: 0,
             shown_output: 0,
@@ -1518,6 +1525,11 @@ impl App {
         if self.working.is_some()
             && self.settings.progress_bar
             && let Some(sequence) = notify::progress(true, |name| client.env(name))
+        {
+            client.queue(&sequence);
+        }
+        if let Some(status) = &self.status_sent
+            && let Some(sequence) = notify::program_status(status, |name| client.env(name))
         {
             client.queue(&sequence);
         }
@@ -4766,7 +4778,26 @@ impl App {
         }
     }
 
+    fn report_to_rex(&mut self) {
+        let status = match &self.panel {
+            Some(Panel::Permission { request, .. }) => notify::Status { state: "blocked", kind: Some("permission"), msg: format!("{} {}", request.question, request.detail) },
+            Some(Panel::Ask(ask)) => notify::Status { state: "blocked", kind: Some("question"), msg: ask.first_question().to_string() },
+            _ if self.working.is_some() => notify::Status { state: "working", kind: None, msg: String::new() },
+            _ => self.outcome.clone(),
+        };
+        if self.status_sent.as_ref() == Some(&status) {
+            return;
+        }
+        for client in &mut self.clients {
+            if let Some(sequence) = notify::program_status(&status, |name| client.env(name)) {
+                client.queue(&sequence);
+            }
+        }
+        self.status_sent = Some(status);
+    }
+
     /// Desktop notification, sent only while the terminal is in the background; cmux decides that itself and also lists it in its sidebar.
+    /// Rex notifies from the program status record instead, so it gets only `Push`, which has no subtitle.
     fn notify(&mut self, subtitle: &str, body: &str) {
         if !self.settings.notifications {
             return;
@@ -4775,13 +4806,19 @@ impl App {
             cmux.notify(subtitle, &notify::printable(body));
             return;
         }
-        for client in self.clients.iter_mut().filter(|client| client.focused != Some(true)) {
+        let has_status_record = |client: &server::Client| client.env("TERM_PROGRAM").as_deref() == Some("rex") && !subtitle.is_empty();
+        for client in self.clients.iter_mut().filter(|client| client.focused != Some(true) && !has_status_record(client)) {
             let sequence = notify::sequence("agent", body, |name| client.env(name));
             client.queue(&sequence);
         }
     }
 
     fn done(&mut self, result: Result<String, String>) {
+        self.outcome = match &result {
+            _ if self.abort.load(Ordering::Relaxed) => notify::Status { state: "idle", kind: None, msg: String::new() },
+            Ok(answer) => notify::Status { state: "done", kind: None, msg: if answer.trim().is_empty() { "Done".to_string() } else { answer.clone() } },
+            Err(error) => notify::Status { state: "error", kind: None, msg: format!("Failed: {error}") },
+        };
         match &result {
             // Esc aborted it, so the user is at the keyboard already; an aborted turn often still returns Ok.
             _ if self.abort.load(Ordering::Relaxed) => {}
