@@ -16,6 +16,26 @@ env:
   CARGO_PROFILE_DEV_DEBUG: 0
 
 jobs:
+  # Its own job, so clippy's 10 s run beside the tests instead of before them.
+  lint:
+    strategy:
+      matrix:
+        runner: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        working-directory: source
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: source
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets --locked -- -D warnings
+
   test:
     strategy:
       matrix:
@@ -41,14 +61,22 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends --download-only ripgrep fd-find imagemagick && mkdir -p ~/debs && cp /var/cache/apt/archives/*.deb ~/debs
       - if: runner.os == 'Linux'
         run: sudo dpkg -i ~/debs/*.deb && sudo ln -s "$(command -v fdfind)" /usr/local/bin/fd
+      # Release tarballs, as brew install took 7-11 s; macos-latest is arm64.
       - if: runner.os == 'macOS'
-        run: brew install ripgrep fd
+        working-directory: ${{ runner.temp }}
+        run: |
+          curl -fsSLO --retry 3 https://github.com/BurntSushi/ripgrep/releases/download/15.2.0/ripgrep-15.2.0-aarch64-apple-darwin.tar.gz
+          curl -fsSLO --retry 3 https://github.com/sharkdp/fd/releases/download/v10.5.1/fd-v10.5.1-aarch64-apple-darwin.tar.gz
+          shasum -a 256 -c <<'EOF'
+          3750b2e93f37e0c692657da574d7019a101c0084da05a790c83fd335bad973e4  ripgrep-15.2.0-aarch64-apple-darwin.tar.gz
+          2d336895ed27b14c5cc9fc5eb22df03b3ee842b5dce80060e99d9cdc1b1b9fc7  fd-v10.5.1-aarch64-apple-darwin.tar.gz
+          EOF
+          mkdir bin
+          tar xzf ripgrep-15.2.0-aarch64-apple-darwin.tar.gz -C bin --strip-components=1 ripgrep-15.2.0-aarch64-apple-darwin/rg
+          tar xzf fd-v10.5.1-aarch64-apple-darwin.tar.gz -C bin --strip-components=1 fd-v10.5.1-aarch64-apple-darwin/fd
+          echo "$PWD/bin" >> "$GITHUB_PATH"
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: source
-      - run: cargo fmt --check
-      - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo test --locked
