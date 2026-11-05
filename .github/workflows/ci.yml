@@ -49,8 +49,9 @@ jobs:
       # Tests run rg, fd and ImageMagick's convert; Ubuntu ships fd as fdfind.
       - if: runner.os == 'Linux'
         id: image
-        run: . /etc/os-release && echo "version=$ID-$VERSION_ID-$(dpkg --print-architecture)-$(dpkg-query -W | sha256sum | cut -c1-12)" >> "$GITHUB_OUTPUT"
-      # The Azure apt mirror sometimes serves these 3.5 MB at 40 kB/s; the cache follows the installed packages so dpkg finds its dependencies.
+        run: . /etc/os-release && echo "version=$ID-$VERSION_ID-$(dpkg --print-architecture)-$(dpkg-query -W 'libmagick*' | sha256sum | cut -c1-12)" >> "$GITHUB_OUTPUT"
+      # The Azure apt mirror sometimes serves these 3.5 MB at 40 kB/s (105 s on a miss). imagemagick needs the image's libmagick at its exact version,
+      # so the key follows those packages alone: a hash of every package changed with each runner image and missed.
       - if: runner.os == 'Linux'
         id: debs
         uses: actions/cache@v6
