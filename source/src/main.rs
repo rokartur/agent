@@ -222,12 +222,6 @@ fn plugin_command(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-#[allow(dead_code)]
-fn seeded_clippy_error() -> bool {
-    let x = 1u8;
-    x.clone() == 1
-}
-
 fn main() {
     process::exit_on_signal(clean_up_on_signal);
     // An earlier agent with this pid that crashed left files that the spill and bg log `create_new` would refuse.
