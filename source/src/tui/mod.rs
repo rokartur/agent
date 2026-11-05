@@ -636,6 +636,9 @@ struct Entry {
 struct Git {
     branch: Option<String>,
     changed: usize,
+    /// Commits to push and to pull against the upstream, as of the last fetch.
+    ahead: usize,
+    behind: usize,
     /// The main checkout, set only when the session runs in a linked worktree.
     main: Option<Worktree>,
     /// Worktrees of this repository besides the one the session runs in.
@@ -5142,6 +5145,12 @@ impl App {
             left.push(span(" ", PLAIN));
             left.push(span(format!("{} changed", self.git.changed), WARN));
         }
+        if self.git.ahead > 0 {
+            left.push(span(format!(" ↑{} to push", self.git.ahead), WARN));
+        }
+        if self.git.behind > 0 {
+            left.push(span(format!(" ↓{} to pull", self.git.behind), WARN));
+        }
         if let Some(main) = &self.git.main {
             left.push(span(format!(" → {} {}", main.branch, tilde(&main.path)), WARN));
         }
@@ -6113,11 +6122,31 @@ fn history_items(messages: &[Value]) -> Vec<Item> {
 fn git_info(cwd: &Path) -> Git {
     let run = |args: &[&str]| crate::process::command("git").args(args).current_dir(cwd).stderr(std::process::Stdio::null()).output().ok().filter(|o| o.status.success());
     let branch = run(&["branch", "--show-current"]).map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).map(|b| if b.is_empty() { "detached".to_string() } else { b });
-    let changed = run(&["status", "--porcelain", "--untracked-files=all"]).map_or(0, |o| o.stdout.split(|b| *b == b'\n').filter(|l| !l.is_empty()).count());
+    let status = run(&["status", "--porcelain=v2", "--branch", "--untracked-files=all"]).map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default();
+    let (changed, ahead, behind) = status_counts(&status);
     let (worktrees, current) = worktree::list(cwd).unwrap_or_default();
     let others = worktrees.len().saturating_sub(1);
     let main = worktrees.into_iter().next().filter(|main| main.path != current);
-    Git { branch, changed, main, others }
+    Git { branch, changed, ahead, behind, main, others }
+}
+
+/// (changed files, commits ahead, commits behind) from `git status --porcelain=v2 --branch`.
+fn status_counts(status: &str) -> (usize, usize, usize) {
+    let (mut changed, mut ahead, mut behind) = (0, 0, 0);
+    for line in status.lines() {
+        if let Some(counts) = line.strip_prefix("# branch.ab ") {
+            for count in counts.split(' ') {
+                if let Some(n) = count.strip_prefix('+') {
+                    ahead = n.parse().unwrap_or(0);
+                } else if let Some(n) = count.strip_prefix('-') {
+                    behind = n.parse().unwrap_or(0);
+                }
+            }
+        } else if !line.starts_with('#') && !line.is_empty() {
+            changed += 1;
+        }
+    }
+    (changed, ahead, behind)
 }
 
 fn context_window_label(window: Option<u64>) -> String {
@@ -6613,6 +6642,13 @@ mod tests {
 
     fn text(line: &Line) -> String {
         line.iter().map(|s| s.text.as_str()).collect()
+    }
+
+    #[test]
+    fn status_counts_reads_changed_files_and_commits_ahead_and_behind() {
+        let status = "# branch.oid abc\n# branch.head main\n# branch.upstream origin/main\n# branch.ab +2 -3\n1 .M N... 100644 100644 100644 a b src/a.rs\n? new.rs\n";
+        assert_eq!(status_counts(status), (2, 2, 3));
+        assert_eq!(status_counts("# branch.oid abc\n# branch.head main\n"), (0, 0, 0));
     }
 
     #[test]
