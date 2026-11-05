@@ -91,8 +91,8 @@ impl Terminals {
         if self.running() >= MAX_RUNNING {
             return Err(format!("Max {MAX_RUNNING} background terminals can run concurrently. Stop one with TaskStop before starting another."));
         }
-        let title: String = input["description"].as_str().unwrap_or_default().split_whitespace().collect::<Vec<_>>().join(" ").chars().take(MAX_TITLE_CHARS).collect();
-        let title = if title.is_empty() { "terminal".to_string() } else { title };
+        let label = input["description"].as_str().filter(|d| !d.trim().is_empty()).unwrap_or(command);
+        let title: String = label.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(MAX_TITLE_CHARS).collect();
         let (stdout_file, stdout) = super::private_file("bg", "stdout")?;
         let (stderr_file, stderr) = super::private_file("bg", "stderr")?;
         let pid = crate::process::command("sh").args(["-c", command]).current_dir(cwd).stdout(stdout_file).stderr(stderr_file).spawn().map_err(|e| format!("Cannot start sh: {e}"))?.id();
@@ -342,12 +342,12 @@ mod tests {
         let dir = std::env::temp_dir();
         let follow_ups = Arc::default();
         let mut terminals = Terminals::default();
-        terminals.start(&json!({"command": "sleep 30 & sleep 30", "description": "sleeper"}), &dir, &follow_ups).unwrap();
+        terminals.start(&json!({"command": "sleep 30 &\n sleep 30"}), &dir, &follow_ups).unwrap();
         let targets = [terminals.find("bt-1").unwrap()];
         let abort = AtomicBool::new(false);
-        assert_eq!(kill(&targets, &follow_ups, &abort), "Killed bt-1 \"sleeper\" (SIGTERM).");
+        assert_eq!(kill(&targets, &follow_ups, &abort), "Killed bt-1 \"sleep 30 & sleep 30\" (SIGTERM).");
         assert!(follow_ups.lock().unwrap().is_empty());
-        assert_eq!(kill(&targets, &follow_ups, &abort), "bt-1 \"sleeper\" was already killed (SIGTERM).");
+        assert_eq!(kill(&targets, &follow_ups, &abort), "bt-1 \"sleep 30 & sleep 30\" was already killed (SIGTERM).");
     }
 
     #[test]
