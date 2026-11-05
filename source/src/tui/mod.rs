@@ -5839,7 +5839,8 @@ fn nested_paths(cwd: &Path, prefix: &str) -> Vec<(bool, String)> {
     let Ok(mut child) = fd.arg(format!("{{{prefix}*,.{prefix}*}}")).spawn() else { return Vec::new() };
     let started = Instant::now();
     while child.try_wait().is_ok_and(|status| status.is_none()) {
-        if started.elapsed() > Duration::from_millis(150) {
+        // Tests get longer: a loaded 3-core CI runner took over 150 ms to start fd.
+        if started.elapsed() > Duration::from_millis(if cfg!(test) { 5000 } else { 150 }) {
             let _ = child.kill();
             break;
         }

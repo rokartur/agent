@@ -568,7 +568,7 @@ fn a_cancel_right_behind_the_prompt_still_cancels_it() {
 fn a_mode_change_during_a_turn_applies_to_its_next_tool_call() {
     let home = Home::new("mode-mid-turn");
     let api = fake_api(vec![
-        reply(&[tool_use("toolu_sleep", "Bash", json!({"command": "sleep 2"}))], "tool_use"),
+        reply(&[tool_use("toolu_sleep", "Bash", json!({"command": "touch started && sleep 2"}))], "tool_use"),
         reply(&[tool_use("toolu_touch", "Bash", json!({"command": "touch made"}))], "tool_use"),
         reply(&[text("Done.")], "end_turn"),
     ]);
@@ -576,7 +576,12 @@ fn a_mode_change_during_a_turn_applies_to_its_next_tool_call() {
     let session_id = editor.new_session(&home.project());
     editor.request("session/set_mode", json!({"sessionId": session_id, "modeId": "full-access"})).unwrap();
     let prompt = editor.start_request("session/prompt", json!({"sessionId": session_id, "prompt": [{"type": "text", "text": "Wait, then make a file."}]}));
-    editor.until("the sleep's tool call", |message| message["params"]["update"]["sessionUpdate"] == "tool_call");
+    // The tool_call update comes before the permission check, so only the running command shows the check passed.
+    let started = std::time::Instant::now();
+    while !home.project().join("started").exists() {
+        assert!(started.elapsed() < WAIT, "the sleep never started");
+        std::thread::sleep(Duration::from_millis(10));
+    }
 
     let ask = editor.start_request("session/set_mode", json!({"sessionId": session_id, "modeId": "ask"}));
 
