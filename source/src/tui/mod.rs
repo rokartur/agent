@@ -5568,6 +5568,9 @@ fn render_tool(name: &str, input: &Value, result: Option<&(String, bool)>, width
         Some((_, false)) => ("✓", OK),
         Some((_, true)) => ("✗", ERROR),
     };
+    if let Some(answers) = result.filter(|_| name == "AskUserQuestion").and_then(|(output, _)| crate::tools::ask::answered(input, output)) {
+        return answer_lines(icon, icon_style, &answers, width);
+    }
     let header = match skill_name(name, input) {
         Some(skill) => {
             let hint = if expanded { "" } else { " (ctrl+o to expand)" };
@@ -5578,8 +5581,7 @@ fn render_tool(name: &str, input: &Value, result: Option<&(String, bool)>, width
                 Some((server, tool)) => vec![span(icon, icon_style), span(" ", PLAIN), span(tool, TOOL_NAME), span(format!(" MCP: {server}"), MUTED)],
                 None => vec![span(icon, icon_style), span(" ", PLAIN), span(name, TOOL_NAME)],
             };
-            let answers = result.filter(|_| name == "AskUserQuestion").and_then(|(output, _)| crate::tools::ask::answered(input, output));
-            let args = answers.unwrap_or_else(|| tool_args(name, input, cwd));
+            let args = tool_args(name, input, cwd);
             if !args.is_empty() {
                 header.extend([span(" ", PLAIN), span(args, TOOL_ARGS)]);
             }
@@ -5615,6 +5617,26 @@ fn render_tool(name: &str, input: &Value, result: Option<&(String, bool)>, width
     let hidden = output.lines().count().saturating_sub(TOOL_OUTPUT_LINES);
     if hidden > 0 {
         lines.push(vec![span(format!("  … {hidden} more lines"), MUTED)]);
+    }
+    lines
+}
+
+/// Each question, then its answer under a hook like an attached image's row.
+fn answer_lines(icon: &str, icon_style: Style, answers: &[(String, String)], width: usize) -> Vec<Line> {
+    let mut lines = Vec::new();
+    for (index, (question, answer)) in answers.iter().enumerate() {
+        let mut spans = vec![span(question, TOOL_ARGS)];
+        if index == 0 {
+            spans.splice(0..0, [span(icon, icon_style), span(" ", PLAIN), span("AskUserQuestion ", TOOL_NAME)]);
+        }
+        let mut rows = wrap(&spans, width, &vec![span("  ", PLAIN)]);
+        if index == 0 {
+            rows[0].remove(0);
+        }
+        lines.extend(rows);
+        let mut rows = wrap(&[span(answer, PLAIN)], width, &vec![span("    ", PLAIN)]);
+        rows[0][0] = span("  └ ", MUTED);
+        lines.extend(rows);
     }
     lines
 }
@@ -6687,6 +6709,15 @@ mod tests {
         let lines = render_tool("Bash", &json!({"command": "ls", "timeout": 10000}), Some(&result), 40, true, Path::new("/repo"));
         let rows: Vec<String> = lines.iter().map(text).collect();
         assert_eq!(rows, ["✓ Bash ls (timeout 10000 ms)", "└ total 1", "  a.txt  6B"]);
+    }
+
+    #[test]
+    fn answered_question_shows_its_answer_under_a_hook() {
+        let input = json!({"questions": [{"question": "Which db?", "header": "DB", "options": []}]});
+        let result = ("User has answered your questions: \"Which db?\"=\"sqlite\". You can now continue.".to_string(), false);
+        let lines = render_tool("AskUserQuestion", &input, Some(&result), 40, false, Path::new("/repo"));
+        let rows: Vec<String> = lines.iter().map(text).collect();
+        assert_eq!(rows, ["✓ AskUserQuestion Which db?", "  └ sqlite"]);
     }
 
     #[test]
