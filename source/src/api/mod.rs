@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 pub mod accounts;
 pub mod codex;
 pub mod copilot;
+pub mod google;
 pub mod models;
 pub mod oauth;
 pub mod openai_chat;
@@ -254,6 +255,7 @@ impl Client {
                 }
                 return fetch_models(request, copilot::parse_models);
             }
+            (Secret::OAuth(tokens), provider @ (google::GEMINI_CLI | google::ANTIGRAVITY)) => return google::models(google::app(provider), tokens),
             (Secret::OAuth(tokens), _) => http
                 // An old client_version gets an empty list, a missing one a 400.
                 .get(format!("{}/codex/models?client_version=0.160.0", self.chatgpt_base))
@@ -439,8 +441,10 @@ impl Client {
         self.refresh_usage(&accounts);
         let mut state = self.state.lock().unwrap();
         let now = Instant::now();
-        let candidates: Vec<Candidate> =
-            accounts.iter().map(|a| Candidate { usage: state.usage.get(&key(a)).and_then(|(_, u)| u.clone()), limited: state.limited.get(&key(a)).is_some_and(|until| *until > now) }).collect();
+        let candidates: Vec<Candidate> = accounts
+            .iter()
+            .map(|a| Candidate { usage: state.usage.get(&key(a)).and_then(|(_, u)| u.as_ref()?.for_model(&model.id)), limited: state.limited.get(&key(a)).is_some_and(|until| *until > now) })
+            .collect();
         let pinned = state.pinned.get(provider).and_then(|name| accounts.iter().position(|a| &a.name == name));
         let policy = state.policy.unwrap_or(Policy::LeastUsed);
         // After falling back once, the other provider's accounts are the last resort, so least-used decides.
@@ -529,6 +533,7 @@ impl Client {
                     "anthropic" => oauth::refresh_claude(&tokens.refresh),
                     "openai-codex" => oauth::refresh_codex(&tokens.refresh),
                     copilot::PROVIDER => copilot::refresh(&tokens.refresh),
+                    provider @ (google::GEMINI_CLI | google::ANTIGRAVITY) => google::refresh(google::app(provider), &tokens.refresh),
                     other => Err(format!("{other} has no OAuth refresh.")),
                 }
                 .map_err(|e| format!("Cannot refresh {}: {e} Use /login again.", slot.name))?;
@@ -603,6 +608,15 @@ impl Client {
         let chatgpt_base = headroom.as_ref().map_or_else(|| self.chatgpt_base.clone(), |url| format!("{url}/backend-api"));
         let proxy_token = headroom.as_ref().map(|_| headroom_token).filter(|token| !token.is_empty());
         let custom = self.custom_provider(&account.provider);
+        let without_google_thoughts;
+        let has_google_thoughts = || request["messages"].as_array().into_iter().flatten().filter_map(|m| m["content"].as_array()).flatten().any(google::is_google_thought);
+        let request = if matches!(account.provider.as_str(), google::GEMINI_CLI | google::ANTIGRAVITY) || !has_google_thoughts() {
+            request
+        } else {
+            without_google_thoughts = drop_google_thoughts(request);
+            &without_google_thoughts
+        };
+        let mut fallback = None;
         let (call, body) = match (account.provider.as_str(), &account.secret) {
             (_, Secret::ApiKey(key)) if let Some(custom) = &custom => {
                 let id = request["model"].as_str().unwrap_or_default();
@@ -688,6 +702,19 @@ impl Client {
                 }
                 (call, body)
             }
+            (provider @ (google::GEMINI_CLI | google::ANTIGRAVITY), Secret::OAuth(tokens)) => {
+                let app = google::app(provider);
+                let call_to = |base: &str| {
+                    let mut call =
+                        self.http.post(format!("{base}/v1internal:streamGenerateContent?alt=sse")).header("authorization", format!("Bearer {}", tokens.access)).header("accept", "text/event-stream");
+                    for (name, value) in google::headers(app, google::wire_model(request)) {
+                        call = call.header(name, value);
+                    }
+                    call
+                };
+                fallback = app.fallback.map(call_to);
+                (call_to(app.base), google::request(app, request, tokens.account_id.as_deref().unwrap_or_default(), &self.cache_key))
+            }
             ("openai-codex", Secret::OAuth(tokens)) => {
                 let call = with_proxy_token(self.http.post(format!("{chatgpt_base}/codex/responses")), proxy_token.as_deref())
                     .header("authorization", format!("Bearer {}", tokens.access))
@@ -702,7 +729,14 @@ impl Client {
             (provider, Secret::OAuth(_)) => return Err(ApiError::fatal(format!("{provider} accounts need an API key, not /login."))),
         };
         let hint = headroom.map(|url| format!(" Is `headroom proxy` running on {url}?")).unwrap_or_default();
-        let response = call.header("content-type", "application/json").send(body.to_string()).map_err(|e| ApiError::retryable(format!("Request failed: {e}.{hint}")))?;
+        let body = body.to_string();
+        let send = |call: ureq::RequestBuilder<ureq::typestate::WithBody>| call.header("content-type", "application/json").send(body.as_str());
+        let mut sent = send(call);
+        let failed = sent.as_ref().map_or(true, |response| response.status() == 429 || response.status().is_server_error());
+        if failed && let Some(fallback) = fallback {
+            sent = send(fallback);
+        }
+        let response = sent.map_err(|e| ApiError::retryable(format!("Request failed: {e}.{hint}")))?;
         let status = response.status().as_u16();
         let mut reader = watched_body(response.into_body().into_reader(), abort, STREAM_IDLE);
         if status != 200 {
@@ -718,6 +752,7 @@ impl Client {
             _ if custom.as_ref().is_some_and(|custom| custom.api == CustomApi::OpenAi) => openai_chat::parse_stream(&mut reader, abort, on_delta),
             copilot::PROVIDER => openai_chat::parse_stream(&mut reader, abort, on_delta),
             "openai-codex" => codex::parse_stream(&mut reader, abort, on_delta),
+            provider @ (google::GEMINI_CLI | google::ANTIGRAVITY) => google::parse_stream(&mut reader, &google::signature_owner(provider, google::wire_model(request)), abort, on_delta),
             _ => parse_stream(&mut reader, abort, on_delta),
         }
     }
@@ -849,9 +884,11 @@ impl Client {
         }
         let base = if account.provider == "anthropic" { &self.anthropic_base } else { &self.chatgpt_base };
         let usage = match accounts::fetch_usage(&account, base) {
-            Ok(usage) => match usage.five_hour {
-                Some(five_hour) => format!("5h {five_hour:.0}%, 7d {:.0}%", usage.seven_day),
-                None => format!("7d {:.0}%", usage.seven_day),
+            Ok(usage) => match (usage.for_model(request["model"].as_str().unwrap_or_default()), usage.five_hour) {
+                (Some(model), _) if !usage.models.is_empty() => format!("quota {:.0}%", model.seven_day),
+                (None, _) => "no quota for this model".into(),
+                (_, Some(five_hour)) => format!("5h {five_hour:.0}%, 7d {:.0}%", usage.seven_day),
+                (_, None) => format!("7d {:.0}%", usage.seven_day),
             },
             Err(error) => error,
         };
@@ -1223,6 +1260,17 @@ fn parse_stream(reader: &mut dyn BufRead, abort: &AtomicBool, on_delta: &mut dyn
         }
     }
     Ok(Reply { message: json!({"role": "assistant", "content": blocks}), stop_reason, context_tokens: prompt_tokens + usage.output, usage, cache_write_1h, id, bad_tool_inputs, ..Reply::default() })
+}
+
+/// The request without Google's signed thoughts, which other providers reject or cannot use.
+fn drop_google_thoughts(request: &Value) -> Value {
+    let mut request = request.clone();
+    for message in request["messages"].as_array_mut().into_iter().flatten() {
+        if let Some(content) = message["content"].as_array_mut() {
+            content.retain(|block| !google::is_google_thought(block));
+        }
+    }
+    request
 }
 
 fn append(field: &mut Value, text: &str) {

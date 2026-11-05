@@ -572,7 +572,7 @@ impl Agent {
         let catalog = self.client.catalog();
         let provider = catalog.iter().find(|m| m.id == self.model).map(|m| m.provider.as_str());
         let (account_name, account_id) = provider.and_then(|provider| self.client.account(provider)).unzip();
-        let usage = provider.zip(account_name.as_deref()).and_then(|(provider, name)| self.client.account_usage(provider, name));
+        let usage = provider.zip(account_name.as_deref()).and_then(|(provider, name)| self.client.account_usage(provider, name)?.for_model(&self.model));
         json!({
             "provider": provider,
             "model": self.model,

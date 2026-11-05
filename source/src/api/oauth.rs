@@ -41,10 +41,11 @@ impl std::fmt::Debug for Tokens {
 }
 
 /// A started login: the URL to open and what the code exchange needs.
+#[derive(Clone)]
 pub struct Pending {
     pub url: String,
-    verifier: String,
-    state: String,
+    pub(crate) verifier: String,
+    pub(crate) state: String,
 }
 
 pub fn start_claude() -> Pending {
@@ -284,7 +285,7 @@ pub fn percent_encode(text: &str) -> String {
     out
 }
 
-fn parse_query(query: &str) -> Vec<(String, String)> {
+pub(crate) fn parse_query(query: &str) -> Vec<(String, String)> {
     query.split('&').filter_map(|pair| pair.split_once('=')).map(|(k, v)| (form_decode(k), form_decode(v))).collect()
 }
 

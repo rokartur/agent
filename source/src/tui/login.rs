@@ -7,11 +7,12 @@ use super::panel;
 use super::render::{BRIGHT, Line, MUTED, span, wrap};
 use crate::api::AccountView;
 use crate::api::accounts::{Account, Secret};
-use crate::api::copilot;
 use crate::api::oauth::{self, Pending, Tokens};
+use crate::api::{copilot, google};
 
 const KINDS: [&str; 2] = ["Account (subscription)", "API key"];
-const METHODS: [Method; 5] = [Method::ClaudeMax, Method::AnthropicKey, Method::OpenRouterKey, Method::Codex, Method::Copilot];
+const METHODS: [Method; 7] = [Method::ClaudeMax, Method::AnthropicKey, Method::OpenRouterKey, Method::Codex, Method::Copilot, Method::GeminiCli, Method::Antigravity];
+const ANTIGRAVITY_RISK: &str = "Google has banned accounts that use the Antigravity sign-in outside Antigravity. Go on only if you accept that risk for this Google account.";
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Method {
@@ -20,6 +21,8 @@ enum Method {
     OpenRouterKey,
     Codex,
     Copilot,
+    GeminiCli,
+    Antigravity,
 }
 
 impl Method {
@@ -30,6 +33,8 @@ impl Method {
             Method::OpenRouterKey => "OpenRouter API key",
             Method::Codex => "ChatGPT Plus/Pro (Codex)",
             Method::Copilot => "GitHub Copilot",
+            Method::GeminiCli => "Google Gemini (Gemini CLI)",
+            Method::Antigravity => "Google Antigravity (ban risk)",
         }
     }
 
@@ -48,8 +53,11 @@ pub enum Login {
         query: Editor,
         index: usize,
     },
-    /// Anthropic shows `code#state` after sign-in; the user pastes it here.
-    ClaudeCode {
+    /// The user pastes what sign-in ends on: Anthropic's `code#state`, or the `localhost` address Google redirects to.
+    /// For Google a local listener runs meanwhile, stopped by `cancel`, and catches the redirect on its own.
+    PasteCode {
+        provider: &'static str,
+        cancel: Arc<AtomicBool>,
         pending: Pending,
         input: Editor,
     },
@@ -96,7 +104,7 @@ pub enum Action {
 impl Login {
     /// Stops a running exchange, so the Codex callback frees 127.0.0.1:1455 for the next /login.
     pub fn cancel(&self) {
-        if let Login::Waiting { cancel, .. } = self {
+        if let Login::Waiting { cancel, .. } | Login::PasteCode { cancel, .. } = self {
             cancel.store(true, Ordering::Relaxed);
         }
     }
@@ -140,7 +148,7 @@ impl Login {
                     *overwrite &= input.text() == before;
                 }
             },
-            Login::ClaudeCode { input, .. } | Login::ApiKey { input, .. } => match code {
+            Login::PasteCode { input, .. } | Login::ApiKey { input, .. } => match code {
                 KeyCode::Enter if !input.text().trim().is_empty() => return self.submit(),
                 _ => _ = input.edit_key(key),
             },
@@ -155,19 +163,21 @@ impl Login {
         } else if let Login::Name { input, overwrite, .. } = self {
             input.insert(text.trim());
             *overwrite = false;
-        } else if let Login::ClaudeCode { input, .. } | Login::ApiKey { input, .. } = self {
+        } else if let Login::PasteCode { input, .. } | Login::ApiKey { input, .. } = self {
             input.insert(text.trim());
         }
     }
 
     /// An exchange ended. Tokens move on to naming the account; after Esc, or from an older /login, the result is dropped.
     pub fn finished(&mut self, provider: &'static str, exchange_cancel: &Arc<AtomicBool>, result: Result<Tokens, String>) -> Result<(), String> {
-        if !matches!(self, Login::Waiting { cancel, .. } if Arc::ptr_eq(cancel, exchange_cancel)) {
+        if !matches!(self, Login::Waiting { cancel, .. } | Login::PasteCode { cancel, .. } if Arc::ptr_eq(cancel, exchange_cancel)) {
             return Ok(());
         }
         let name = match provider {
             "anthropic" => "claude",
             copilot::PROVIDER => "copilot",
+            google::GEMINI_CLI => "gemini",
+            google::ANTIGRAVITY => "antigravity",
             _ => "codex",
         };
         *self = Login::Name { provider, secret: Secret::OAuth(result?), input: Editor::from_text(name), overwrite: false };
@@ -207,8 +217,17 @@ impl Login {
                 let pending = oauth::start_claude();
                 let url = pending.url.clone();
                 oauth::open_browser(&url);
-                *self = Login::ClaudeCode { pending, input: Editor::new() };
+                *self = Login::PasteCode { provider: "anthropic", cancel: Arc::default(), pending, input: Editor::new() };
                 Action::None
+            }
+            Method::GeminiCli | Method::Antigravity => {
+                let app = google::app(if method == Method::Antigravity { google::ANTIGRAVITY } else { google::GEMINI_CLI });
+                let pending = google::start(app);
+                oauth::open_browser(&pending.url);
+                let cancel = Arc::new(AtomicBool::new(false));
+                let listening = pending.clone();
+                *self = Login::PasteCode { provider: app.provider, cancel: cancel.clone(), pending, input: Editor::new() };
+                Action::Exchange { provider: app.provider, cancel, exchange: Box::new(move |cancel| google::listen(app, &listening, cancel)) }
             }
             Method::AnthropicKey => {
                 *self = Login::ApiKey { provider: "anthropic", title: method.label(), input: Editor::new() };
@@ -237,9 +256,12 @@ impl Login {
     fn submit(&mut self) -> Action {
         let cancel = Arc::new(AtomicBool::new(false));
         match std::mem::replace(self, Login::Waiting { cancel: cancel.clone(), url: None, code: None }) {
-            Login::ClaudeCode { pending, input } => {
+            Login::PasteCode { provider, cancel: listener, pending, input } => {
+                listener.store(true, Ordering::Relaxed);
                 let code = input.text();
-                Action::Exchange { provider: "anthropic", cancel, exchange: Box::new(move |_| oauth::finish_claude(&pending, &code)) }
+                let exchange: Exchange =
+                    if provider == "anthropic" { Box::new(move |_| oauth::finish_claude(&pending, &code)) } else { Box::new(move |_| google::finish(google::app(provider), &pending, &code)) };
+                Action::Exchange { provider, cancel, exchange }
             }
             Login::ApiKey { provider, input, .. } => {
                 let name = if provider == "anthropic" { "api" } else { provider };
@@ -264,9 +286,14 @@ impl Login {
                 let rows = methods(*api, query).iter().map(|method| panel::Row { left: method.label().to_string(), right: Vec::new() }).collect();
                 (KINDS[*api as usize].into(), rows, "type to search     ↑↓ navigate     enter choose     esc back")
             }
-            Login::ClaudeCode { input, .. } => {
+            Login::PasteCode { provider: "anthropic", input, .. } => {
                 ("Claude login".into(), vec![field("Code", input.field(Some('•')))], "paste the code#state shown after sign-in     enter continue     ctrl+y copy link     esc cancel")
             }
+            Login::PasteCode { provider, input, .. } => (
+                if *provider == google::ANTIGRAVITY { "Google Antigravity login" } else { "Google Gemini login" }.into(),
+                vec![field("Address", input.field(Some('•')))],
+                "waits for the browser, or paste its localhost address     enter continue     ctrl+y copy link     esc cancel",
+            ),
             Login::ApiKey { title, input, .. } => ((*title).into(), vec![field("Key", input.field(Some('•')))], "paste the key     enter continue     esc cancel"),
             Login::Waiting { url, code, .. } => (
                 "Login".into(),
@@ -291,13 +318,17 @@ impl Login {
             let hint = lines.len().saturating_sub(1);
             lines.splice(hint..hint, link);
         }
+        if let Login::PasteCode { provider: google::ANTIGRAVITY, .. } = self {
+            let hint = lines.len().saturating_sub(1);
+            lines.splice(hint..hint, wrap(&[span(ANTIGRAVITY_RISK, super::WARN)], width, &Vec::new()));
+        }
         lines
     }
 
     /// The sign-in page of the current step, if it has one.
     fn url(&self) -> Option<&str> {
         match self {
-            Login::ClaudeCode { pending, .. } => Some(&pending.url),
+            Login::PasteCode { pending, .. } => Some(&pending.url),
             Login::Waiting { url, .. } => url.as_deref(),
             _ => None,
         }
@@ -368,7 +399,7 @@ mod tests {
         let mut login = Login::Kind { index: 0 };
         login.key(KeyCode::Enter.into());
         let Login::Choose { api, query, .. } = &login else { panic!("expected the method list") };
-        assert_eq!(methods(*api, query), [Method::ClaudeMax, Method::Codex, Method::Copilot]);
+        assert_eq!(methods(*api, query), [Method::ClaudeMax, Method::Codex, Method::Copilot, Method::GeminiCli, Method::Antigravity]);
         login.paste("codex");
         let Login::Choose { api, query, .. } = &login else { panic!("expected the method list") };
         assert_eq!(methods(*api, query), [Method::Codex]);
@@ -384,6 +415,32 @@ mod tests {
         assert!(shown.contains(&url) && shown.contains("AB12-CD34"));
         let ctrl_y = KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL);
         assert!(matches!(login.key(ctrl_y), Action::Copy(copied) if copied == url));
+    }
+
+    #[test]
+    fn a_google_login_finishes_from_its_listener_or_a_paste_and_warns_only_for_antigravity() {
+        let pasting = |provider| Login::PasteCode { provider, cancel: Arc::default(), pending: google::start(google::app(provider)), input: Editor::new() };
+        let shown = |login: &Login| login.render(200, 12).iter().flatten().map(|s| s.text.clone()).collect::<String>();
+        assert!(shown(&pasting(google::ANTIGRAVITY)).contains(ANTIGRAVITY_RISK));
+        assert!(!shown(&pasting(google::GEMINI_CLI)).contains(ANTIGRAVITY_RISK));
+
+        let mut login = pasting(google::GEMINI_CLI);
+        let Login::PasteCode { cancel: listener, .. } = &login else { unreachable!() };
+        let listener = listener.clone();
+        login.paste("4/abc");
+        let Action::Exchange { cancel, .. } = login.key(KeyCode::Enter.into()) else { panic!("expected an exchange") };
+        assert!(listener.load(Ordering::Relaxed), "a paste stops the listener");
+        assert_eq!(login.finished(google::GEMINI_CLI, &listener, Err("Login cancelled.".into())), Ok(()));
+        assert!(matches!(login, Login::Waiting { .. }));
+        let tokens = Tokens { access: "a".into(), refresh: "r".into(), expires: 0, account_id: Some("p".into()) };
+        assert_eq!(login.finished(google::GEMINI_CLI, &cancel, Ok(tokens.clone())), Ok(()));
+        assert!(matches!(&login, Login::Name { input, .. } if input.text() == "gemini"));
+
+        let mut login = pasting(google::ANTIGRAVITY);
+        let Login::PasteCode { cancel: listener, .. } = &login else { unreachable!() };
+        let listener = listener.clone();
+        assert_eq!(login.finished(google::ANTIGRAVITY, &listener, Ok(tokens)), Ok(()));
+        assert!(matches!(&login, Login::Name { provider: google::ANTIGRAVITY, .. }));
     }
 
     #[test]

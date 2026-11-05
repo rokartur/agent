@@ -54,7 +54,7 @@ Every message has a `context`:
 
 `accountId` is the Claude account uuid or the ChatGPT account id. It is `null` for API keys. `accountName` is the name the user gave the account at `/login`. It is `null` when the provider has no account.
 
-`accountUsage` is the agent's last reading of the account's subscription windows in percent. `fiveHourPct` is `null` on plans without a 5h window, like Claude Ultra. `accountUsage` is `null` for API keys and until the agent first reads the windows.
+`accountUsage` is the agent's last reading of the account's subscription windows in percent. `fiveHourPct` is `null` on plans without a 5h window, like Claude Ultra. Google accounts have a quota per model and no 5h or 7d window: `fiveHourPct` is `null` and `sevenDayPct` is the quota of `model`. `accountUsage` is `null` for API keys and until the agent first reads the windows.
 
 `provider`, `accountId` and `accountName` are `null` when every model list failed at startup.
 
