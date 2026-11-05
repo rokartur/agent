@@ -5319,14 +5319,21 @@ fn account_rows(accounts: &[AccountView], labels: &[(String, HashMap<String, Str
             (false, _) => String::new(),
         };
         let mark = if a.current { "✓ " } else { "  " };
+        let quotas = a.usage.as_ref().map_or(&[][..], |u| u.models.as_slice());
         let no_five_hour = a.usage.as_ref().is_some_and(|u| u.five_hour.is_none());
         let five_hour = if no_five_hour { "-".to_string() } else { percent(a.usage.as_ref().and_then(|u| u.five_hour)) };
-        let mut cells = vec![a.provider.clone(), five_hour, percent(a.usage.as_ref().map(|u| u.seven_day)), if a.pinned { "pinned" } else { "" }.to_string()];
+        let seven_day = if quotas.is_empty() { percent(a.usage.as_ref().map(|u| u.seven_day)) } else { "-".to_string() };
+        let mut cells = vec![a.provider.clone(), five_hour, seven_day, if a.pinned { "pinned" } else { "" }.to_string()];
         for (_, by_account) in labels {
             cells.push(a.account_id.as_ref().and_then(|id| by_account.get(id)).cloned().unwrap_or_default());
         }
         account_rows.push(table.len());
         table.push((format!("{mark}{}", a.name), cells));
+        // Google's quotas are per model, with their own resets, so each gets a line under its account.
+        for quota in quotas {
+            let reset = quota.resets_at.map(|at| format!(", resets {}", crate::api::accounts::resets_in(at))).unwrap_or_default();
+            table.push((format!("      {} {:.0}%{reset}", quota.model, quota.used), Vec::new()));
+        }
     }
     let columns = table.iter().map(|(_, cells)| cells.len()).max().unwrap_or(0);
     let widths: Vec<usize> = (0..columns).map(|c| table.iter().filter_map(|(_, cells)| cells.get(c)).map(|cell| width(cell)).max().unwrap_or(0)).collect();
@@ -7034,14 +7041,21 @@ mod tests {
             name: name.into(),
             oauth,
             account_id: id.map(String::from),
-            usage: usage.map(|(five_hour, seven_day)| crate::api::accounts::Usage { five_hour, seven_day, resets_at: None }),
+            usage: usage.map(|(five_hour, seven_day)| crate::api::accounts::Usage { five_hour, seven_day, resets_at: None, models: Vec::new() }),
             current: name == "claudescom",
             pinned: name == "rokartur",
+        };
+        let quota = |model: &str, used| crate::api::accounts::ModelQuota { model: model.into(), used, resets_at: None };
+        let gemini = AccountView {
+            provider: "google-gemini-cli".into(),
+            usage: Some(crate::api::accounts::Usage { five_hour: None, seven_day: 80.0, resets_at: None, models: vec![quota("gemini-2.5-flash", 10.0), quota("gemini-2.5-pro", 80.0)] }),
+            ..account("gemini", true, Some("proj-1"), None)
         };
         let accounts = [
             account("claudescom", true, Some("uuid-1"), Some((Some(21.0), 73.0))),
             account("rokartur", true, Some("uuid-2"), None),
             account("ultra", true, Some("uuid-3"), Some((None, 41.0))),
+            gemini,
             account("claudescom-api", false, None, None),
         ];
         let labels = [("usagefleet".to_string(), HashMap::from([("uuid-1".to_string(), "uf_tVdC…".to_string())]))];
@@ -7050,16 +7064,19 @@ mod tests {
         assert_eq!(
             table,
             [
-                ("  Subscription", "Provider    5h   7d  Pinned  usagefleet".to_string()),
-                ("✓ claudescom", "anthropic  21%  73%          uf_tVdC…".to_string()),
-                ("  rokartur", "anthropic    ?    ?  pinned".to_string()),
-                ("  ultra", "anthropic    -  41%".to_string()),
+                ("  Subscription", "Provider            5h   7d  Pinned  usagefleet".to_string()),
+                ("✓ claudescom", "anthropic          21%  73%          uf_tVdC…".to_string()),
+                ("  rokartur", "anthropic            ?    ?  pinned".to_string()),
+                ("  ultra", "anthropic            -  41%".to_string()),
+                ("  gemini", "google-gemini-cli    -    -".to_string()),
+                ("      gemini-2.5-flash 10%", String::new()),
+                ("      gemini-2.5-pro 80%", String::new()),
                 ("", String::new()),
-                ("  API key", "Provider             Pinned".to_string()),
+                ("  API key", "Provider                     Pinned".to_string()),
                 ("  claudescom-api", "anthropic".to_string()),
             ]
         );
-        assert_eq!(account_rows, [1, 2, 3, 6]);
+        assert_eq!(account_rows, [1, 2, 3, 4, 9]);
         let names = |query| matching_accounts(accounts.to_vec(), query).into_iter().map(|a| a.name).collect::<Vec<_>>();
         assert_eq!(names("API"), ["claudescom-api", "claudescom", "rokartur", "ultra"]);
         assert_eq!(names("anthropic").len(), 4);

@@ -32,7 +32,7 @@ impl Account {
         matches!(self.secret, Secret::OAuth(_))
     }
 
-    /// The Claude account uuid or ChatGPT account id; API keys have none.
+    /// The Claude account uuid, ChatGPT account id or Google's Cloud Code Assist project; API keys have none.
     pub fn account_id(&self) -> Option<&str> {
         match &self.secret {
             Secret::OAuth(tokens) => tokens.account_id.as_deref(),
@@ -135,11 +135,34 @@ pub struct Usage {
     pub seven_day: f64,
     /// Unix milliseconds.
     pub resets_at: Option<u64>,
+    /// Google's quotas, one per model; Google has no 5h or 7d window, so the two fields above hold the fullest model.
+    pub models: Vec<ModelQuota>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ModelQuota {
+    /// The model id without its provider, like `gemini-2.5-pro`.
+    pub model: String,
+    /// Percent used.
+    pub used: f64,
+    /// Unix milliseconds.
+    pub resets_at: Option<u64>,
 }
 
 impl Usage {
     pub fn peak(&self) -> f64 {
         self.five_hour.unwrap_or(0.0).max(self.seven_day)
+    }
+
+    /// The window that limits requests to `model` (a catalog id): the account's, or the model's own quota.
+    /// None when the account has per-model quotas but none for this model, which counts as unknown.
+    pub fn for_model(&self, model: &str) -> Option<Usage> {
+        if self.models.is_empty() {
+            return Some(self.clone());
+        }
+        let id = model.split_once('/').map_or(model, |(_, id)| id);
+        let quota = self.models.iter().find(|q| q.model == id)?;
+        Some(Usage { five_hour: None, seven_day: quota.used, resets_at: quota.resets_at, models: Vec::new() })
     }
 }
 
@@ -151,7 +174,7 @@ fn parse_claude_usage(data: &Value) -> Option<Usage> {
         return None;
     }
     let seven_day = seven_day.unwrap_or(0.0);
-    Some(Usage { five_hour, seven_day, resets_at: if five_hour.unwrap_or(0.0) >= seven_day { five_reset } else { seven_reset } })
+    Some(Usage { five_hour, seven_day, resets_at: if five_hour.unwrap_or(0.0) >= seven_day { five_reset } else { seven_reset }, models: Vec::new() })
 }
 
 /// `GET /wham/usage`: `rate_limit.primary_window` (5h) and `secondary_window` (7d) with `used_percent` and unix `reset_at`.
@@ -163,12 +186,15 @@ fn parse_codex_usage(data: &Value) -> Option<Usage> {
     let ((five_hour, five_reset), (seven_day, seven_reset)) = (window("primary_window"), window("secondary_window"));
     let five_hour = five_hour?;
     let seven_day = seven_day.unwrap_or(0.0);
-    Some(Usage { five_hour: Some(five_hour), seven_day, resets_at: if five_hour >= seven_day { five_reset } else { seven_reset } })
+    Some(Usage { five_hour: Some(five_hour), seven_day, resets_at: if five_hour >= seven_day { five_reset } else { seven_reset }, models: Vec::new() })
 }
 
 /// Fetches an OAuth account's windows; `base` is the provider's API root.
 pub fn fetch_usage(account: &Account, base: &str) -> Result<Usage, String> {
     let Secret::OAuth(tokens) = &account.secret else { return Err("API keys have no usage windows.".into()) };
+    if let provider @ (super::google::GEMINI_CLI | super::google::ANTIGRAVITY) = account.provider.as_str() {
+        return super::google::usage(super::google::app(provider), tokens);
+    }
     let agent = super::models_agent();
     let request = match account.provider.as_str() {
         "anthropic" => agent.get(format!("{base}/api/oauth/usage")).header("anthropic-beta", "oauth-2025-04-20,claude-code-20250219").header("user-agent", crate::api::CLAUDE_CODE_USER_AGENT),
@@ -260,7 +286,7 @@ pub fn resets_in(resets_at: u64) -> String {
 }
 
 /// Unix milliseconds of an ISO 8601 UTC time like `2026-09-27T05:30:00.000Z` or `+00:00`.
-fn iso_ms(text: &str) -> Option<u64> {
+pub(crate) fn iso_ms(text: &str) -> Option<u64> {
     let (date, time) = text.split_once('T')?;
     let mut date = date.split('-').map(|p| p.parse::<i64>().ok());
     let (year, month, day) = (date.next()??, date.next()??, date.next()??);
@@ -283,7 +309,7 @@ mod tests {
     use super::*;
 
     fn usage(five_hour: f64, seven_day: f64) -> Option<Usage> {
-        Some(Usage { five_hour: Some(five_hour), seven_day, resets_at: Some(five_hour as u64) })
+        Some(Usage { five_hour: Some(five_hour), seven_day, resets_at: Some(five_hour as u64), models: Vec::new() })
     }
 
     #[test]
@@ -303,14 +329,26 @@ mod tests {
     }
 
     #[test]
+    fn a_spent_google_model_blocks_only_itself() {
+        let quota = |model: &str, used| ModelQuota { model: model.into(), used, resets_at: Some(used as u64) };
+        let google = Usage { five_hour: None, seven_day: 100.0, resets_at: Some(100), models: vec![quota("gemini-2.5-flash", 10.0), quota("gemini-2.5-pro", 100.0)] };
+        let candidates = |model: &str| [Candidate { usage: google.for_model(model), limited: false }];
+        assert_eq!(pick(&candidates("google-gemini-cli/gemini-2.5-flash"), 90.0, Policy::Block, None), Pick::Account(0));
+        assert_eq!(pick(&candidates("google-gemini-cli/gemini-2.5-pro"), 90.0, Policy::Block, None), Pick::Blocked { resets_at: Some(100) });
+        assert_eq!(pick(&candidates("google-gemini-cli/gemini-3-pro-preview"), 90.0, Policy::Block, None), Pick::Account(0), "an unknown quota does not block");
+        let claude = usage(95.0, 10.0).unwrap();
+        assert_eq!(claude.for_model("anthropic/claude-opus-4-5"), Some(claude));
+    }
+
+    #[test]
     fn parses_both_usage_endpoints() {
         let claude = json!({"five_hour": {"utilization": 26.0, "resets_at": "2026-09-27T05:30:00.000Z"}, "seven_day": {"utilization": 40.5, "resets_at": "2026-10-01T00:00:00+00:00"}});
-        assert_eq!(parse_claude_usage(&claude), Some(Usage { five_hour: Some(26.0), seven_day: 40.5, resets_at: Some(1_790_812_800_000) }));
+        assert_eq!(parse_claude_usage(&claude), Some(Usage { five_hour: Some(26.0), seven_day: 40.5, resets_at: Some(1_790_812_800_000), models: Vec::new() }));
         let ultra = json!({"five_hour": null, "seven_day": {"utilization": 41.0, "resets_at": "2026-10-01T00:00:00Z"}});
-        assert_eq!(parse_claude_usage(&ultra), Some(Usage { five_hour: None, seven_day: 41.0, resets_at: Some(1_790_812_800_000) }));
+        assert_eq!(parse_claude_usage(&ultra), Some(Usage { five_hour: None, seven_day: 41.0, resets_at: Some(1_790_812_800_000), models: Vec::new() }));
         assert_eq!(iso_ms("1970-01-02T00:00:01Z"), Some(86_401_000));
         let codex = json!({"rate_limit": {"allowed": true, "primary_window": {"used_percent": 93, "reset_at": 1790000000, "limit_window_seconds": 18000}, "secondary_window": null}});
-        assert_eq!(parse_codex_usage(&codex), Some(Usage { five_hour: Some(93.0), seven_day: 0.0, resets_at: Some(1_790_000_000_000) }));
+        assert_eq!(parse_codex_usage(&codex), Some(Usage { five_hour: Some(93.0), seven_day: 0.0, resets_at: Some(1_790_000_000_000), models: Vec::new() }));
         assert_eq!(parse_codex_usage(&json!({"plan_type": "free"})), None);
     }
 
