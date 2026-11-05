@@ -16,34 +16,52 @@ env:
   CARGO_PROFILE_DEV_DEBUG: 0
 
 jobs:
+  pick:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    outputs:
+      runner: ${{ steps.pick.outputs.runner }}
+    steps:
+      - id: pick
+        env:
+          BEAT: ${{ vars.STUDIO_HEARTBEAT }}
+          FORK: ${{ github.event.pull_request.head.repo.fork || false }}
+        run: |
+          runner=ubuntu-latest
+          if [ "$FORK" != true ] && [ $(( $(date +%s) - ${BEAT:-0} )) -lt 180 ]; then runner=runner-up-studio; fi
+          echo "runner=$runner" | tee -a "$GITHUB_OUTPUT"
+
   test:
+    needs: pick
     strategy:
       matrix:
         runner: [ubuntu-latest, macos-latest]
-    runs-on: ${{ matrix.runner }}
+    runs-on: ${{ matrix.runner == 'ubuntu-latest' && needs.pick.outputs.runner || matrix.runner }}
     defaults:
       run:
         working-directory: source
     steps:
       - uses: actions/checkout@v7
-      # Tests run rg, fd and ImageMagick's convert; Ubuntu ships fd as fdfind.
+      # Tests run rg, fd and ImageMagick's convert; Ubuntu ships fd as fdfind. The Studio container also lacks gcc.
       - if: runner.os == 'Linux'
         id: image
-        run: echo "version=$ImageOS-$ImageVersion" >> "$GITHUB_OUTPUT"
-      # The Azure apt mirror sometimes serves these 3.5 MB at 40 kB/s; the cache follows the image so dpkg finds its dependencies.
+        run: . /etc/os-release && echo "version=$ID-$VERSION_ID-$(dpkg --print-architecture)-$(dpkg-query -W | sha256sum | cut -c1-12)" >> "$GITHUB_OUTPUT"
+      # The Azure apt mirror sometimes serves these 3.5 MB at 40 kB/s; the cache follows the installed packages so dpkg finds its dependencies.
       - if: runner.os == 'Linux'
         id: debs
         uses: actions/cache@v6
         with:
           path: ~/debs
-          key: debs-${{ steps.image.outputs.version }}-ripgrep-fd-find-imagemagick
+          key: debs-${{ steps.image.outputs.version }}-ripgrep-fd-find-imagemagick-gcc
       - if: runner.os == 'Linux' && steps.debs.outputs.cache-hit != 'true'
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends --download-only ripgrep fd-find imagemagick && mkdir -p ~/debs && cp /var/cache/apt/archives/*.deb ~/debs
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends --download-only ripgrep fd-find imagemagick gcc libc6-dev && mkdir -p ~/debs && cp /var/cache/apt/archives/*.deb ~/debs
       - if: runner.os == 'Linux'
         run: sudo dpkg -i ~/debs/*.deb && sudo ln -s "$(command -v fdfind)" /usr/local/bin/fd
       - if: runner.os == 'macOS'
         run: brew install ripgrep fd
-      - run: rustup component add clippy rustfmt
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: source
