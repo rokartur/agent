@@ -60,8 +60,14 @@ jobs:
           key: debs-${{ steps.image.outputs.version }}-ripgrep-fd-find-imagemagick
       - if: runner.os == 'Linux' && steps.debs.outputs.cache-hit != 'true'
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends --download-only ripgrep fd-find imagemagick && mkdir -p ~/debs && cp /var/cache/apt/archives/*.deb ~/debs
+      # Debs cached on another image can miss a dependency this one lacks; apt then fetches what is missing.
       - if: runner.os == 'Linux'
-        run: sudo dpkg -i ~/debs/*.deb && sudo ln -s "$(command -v fdfind)" /usr/local/bin/fd
+        run: |
+          if ! sudo dpkg -i ~/debs/*.deb; then
+            echo "::warning::cached debs did not install, installing from apt"
+            sudo apt-get update && sudo apt-get install -y --no-install-recommends --fix-broken
+          fi
+          sudo ln -s "$(command -v fdfind)" /usr/local/bin/fd
       # Release tarballs, as brew install took 7-11 s; macos-latest is arm64.
       - if: runner.os == 'macOS'
         working-directory: ${{ runner.temp }}
@@ -82,8 +88,12 @@ jobs:
           workspaces: source
       - run: cargo test --locked --no-run
       # cargo test runs its binaries one after another, and both mostly wait on child processes: run them side by side.
-      # The crate has no lib, so --bins and --test '*' are every target cargo test runs.
       - run: |
+          kinds=$(cargo metadata --no-deps --format-version 1 | jq -r '[.packages[].targets[].kind[]] | unique | join(" ")')
+          if [ "$kinds" != "bin test" ]; then
+            echo "::error::--bins and --test '*' miss targets of kind: $kinds"
+            exit 1
+          fi
           cargo test --locked --test '*' > "$RUNNER_TEMP/integration.log" 2>&1 &
           integration=$!
           units=0; cargo test --locked --bins || units=$?
