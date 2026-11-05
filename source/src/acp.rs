@@ -118,6 +118,7 @@ fn read_stdin(abort: Arc<AtomicBool>, cancelled: Arc<AtomicBool>, permission_mod
                 // A new turn: a cancel that came before it was for an earlier one.
                 Some("session/prompt") => {
                     cancelled.store(false, Ordering::Relaxed);
+                    abort.store(false, Ordering::Relaxed);
                     requests.send(message).map_err(|_| ())
                 }
                 // Now and not after the running turn, as check_permission reads the mode before each call.
@@ -267,7 +268,6 @@ fn handle(agent: &mut Agent, connection: &mut Connection, message: &Value) -> Re
             send(&json!({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": session_id, "update": commands.update()}}));
             let text = commands.expand(&prompt_text(&params["prompt"])).map_err(|error| (INTERNAL_ERROR, error))?;
             let images: Vec<Value> = image_blocks(&params["prompt"]).map(crate::image::from_base64).collect::<Result<_, _>>().map_err(|error| (INVALID_PARAMS, error))?;
-            // A cancel during the work above, which agent.prompt would forget as it clears the abort flag.
             if cancelled.load(Ordering::Relaxed) {
                 return Ok(json!({"stopReason": "cancelled"}));
             }
@@ -333,7 +333,9 @@ fn handle(agent: &mut Agent, connection: &mut Connection, message: &Value) -> Re
                 let implement = approve_plan(&replies.lock().unwrap(), session_id, &plan);
                 *agent.plan.lock().unwrap() = if implement { Plan::Off } else { Plan::Drafting };
                 agent.save_plan().map_err(|error| (INTERNAL_ERROR, error))?;
-                if implement {
+                if implement && !cancelled.load(Ordering::Relaxed) {
+                    // A denied call during planning left the abort flag set.
+                    agent.abort.store(false, Ordering::Relaxed);
                     result = agent.prompt(&format!("Implement this plan:\n\n{plan}"), &mut on_event);
                 }
             }

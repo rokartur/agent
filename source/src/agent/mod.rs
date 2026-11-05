@@ -505,9 +505,9 @@ impl Agent {
     }
 
     /// Runs the model and its tool calls until it ends the turn; returns the last assistant text.
+    /// Leaves the abort flag to the caller, so a cancel that came while the caller set up this turn still stops it.
     pub fn prompt(&mut self, text: &str, emit: &mut dyn FnMut(Event)) -> Result<String, String> {
         let text = &self.plugins.input(text, &self.plugin_context())?;
-        self.abort.store(false, Ordering::Relaxed);
         self.describe_to_peers(true);
         if self.interactive && self.messages.is_empty() {
             self.start_naming(text);
@@ -1325,6 +1325,7 @@ impl Agent {
 
     /// Runs `text`, then keeps prompting while an active goal is not complete; Esc or a spent budget pause it.
     pub fn pursue(&mut self, text: &str, emit: &mut dyn FnMut(Event)) -> Result<String, String> {
+        self.abort.store(false, Ordering::Relaxed);
         let mut answer = self.prompt(text, emit)?;
         loop {
             let next = match self.goal.lock().unwrap().as_mut() {
