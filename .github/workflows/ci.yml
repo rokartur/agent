@@ -80,4 +80,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: source
-      - run: cargo test --locked
+      - run: cargo test --locked --no-run
+      # cargo test runs its binaries one after another, and both mostly wait on child processes: run them side by side.
+      # The crate has no lib, so --bins and --test '*' are every target cargo test runs.
+      - run: |
+          cargo test --locked --test '*' > "$RUNNER_TEMP/integration.log" 2>&1 &
+          integration=$!
+          units=0; cargo test --locked --bins || units=$?
+          status=0; wait "$integration" || status=$?
+          cat "$RUNNER_TEMP/integration.log"
+          exit $((units || status))
