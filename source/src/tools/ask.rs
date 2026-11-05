@@ -126,16 +126,16 @@ pub fn response(questions: &[Question], answers: &[Option<Answer>]) -> String {
     format!("User has answered your questions: {} You can now continue with the user's answers in mind.", segments.join(" "))
 }
 
-/// Reads `response`'s envelope back as `header: answer` for the transcript row; None when declined.
-pub fn answered(input: &Value, output: &str) -> Option<String> {
+/// Reads `response`'s envelope back as (question, answer) pairs for the transcript; None when declined.
+pub fn answered(input: &Value, output: &str) -> Option<Vec<(String, String)>> {
     let mut shown = Vec::new();
     for question in input["questions"].as_array()? {
-        let key = format!("\"{}\"=\"", question["question"].as_str().unwrap_or_default());
-        let Some((_, rest)) = output.split_once(&key) else { continue };
+        let text = question["question"].as_str().unwrap_or_default();
+        let Some((_, rest)) = output.split_once(&format!("\"{text}\"=\"")) else { continue };
         let value = rest.split_once("\".").map_or(rest, |(value, _)| value);
-        shown.push(format!("{}: {value}", question["header"].as_str().unwrap_or_default()));
+        shown.push((text.to_string(), value.to_string()));
     }
-    (!shown.is_empty()).then(|| shown.join(" · "))
+    (!shown.is_empty()).then_some(shown)
 }
 
 #[cfg(test)]
@@ -175,9 +175,10 @@ mod tests {
             "User has answered your questions: \"Which db?\"=\"mysql\". unanswered: \"Which parts?\". You can now continue with the user's answers in mind."
         );
         let both = response(&questions, &answers);
-        assert_eq!(answered(&input(["pg", "sqlite"]), &both).unwrap(), "DB: sqlite · Parts: a, b, c");
+        let pair = |question: &str, answer: &str| (question.to_string(), answer.to_string());
+        assert_eq!(answered(&input(["pg", "sqlite"]), &both).unwrap(), [pair("Which db?", "sqlite"), pair("Which parts?", "a, b, c")]);
         let one = response(&questions, &[Some(Answer::Typed("mysql".into())), None]);
-        assert_eq!(answered(&input(["pg", "sqlite"]), &one).unwrap(), "DB: mysql");
+        assert_eq!(answered(&input(["pg", "sqlite"]), &one).unwrap(), [pair("Which db?", "mysql")]);
         assert_eq!(answered(&input(["pg", "sqlite"]), DECLINED), None);
     }
 }
