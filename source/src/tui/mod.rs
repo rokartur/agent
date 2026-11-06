@@ -5414,7 +5414,7 @@ fn progress_due(busy: bool, sent: Option<Instant>, now: Instant) -> Option<bool>
 
 fn unnamed_title(cwd: &Path) -> String {
     let project = cwd.file_name().map(|name| name.to_string_lossy()).unwrap_or_default();
-    format!("agent | {project}")
+    format!("{project} | agent")
 }
 
 const TODO_ROWS: usize = 5;
