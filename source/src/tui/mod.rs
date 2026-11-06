@@ -6060,7 +6060,7 @@ struct RunView {
 impl RunView {
     /// The run's session as transcript lines, reread when its file grows.
     fn lines(&mut self, width: usize, cwd: &Path) -> &[Line] {
-        let session = self.run.state.lock().unwrap().session.clone();
+        let session = self.run.state.lock().unwrap().session.clone().filter(|_| self.run.environment().is_none());
         let size = session.as_ref().and_then(|path| std::fs::metadata(path).ok()).map_or(0, |meta| meta.len());
         if self.loaded != Some((size, width)) {
             self.loaded = Some((size, width));
@@ -6629,6 +6629,17 @@ mod tests {
         *run.state.lock().unwrap() = crate::agent::subagent::RunState { tool_calls: 31, elapsed: Some(Duration::from_secs(8)), result: Some(Err("Operation aborted".into())), ..Default::default() };
         let rows: Vec<String> = subagent_done_lines(&run, 30).iter().map(text).collect();
         assert_eq!(rows, ["✗ sa-1 scan · 31 tools · 8s ", "  · Operation aborted"]);
+    }
+
+    #[test]
+    fn a_subagent_on_another_computer_shows_its_task_not_its_session_file_path_there() {
+        let shown = |run: crate::agent::subagent::Run| {
+            run.state.lock().unwrap().session = Some("/nonexistent/agent-remote-session.jsonl".into());
+            let mut view = RunView { run: Arc::new(run), loaded: None, lines: Vec::new() };
+            view.lines(80, Path::new("/")).iter().map(text).collect::<Vec<_>>().join("\n")
+        };
+        assert!(shown(crate::agent::subagent::scan_run()).starts_with("✗"));
+        assert_eq!(shown(crate::agent::subagent::scan_run_on("arturs-mac-studio")), "⚙ task scan");
     }
 
     #[test]

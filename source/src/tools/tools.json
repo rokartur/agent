@@ -316,6 +316,7 @@
           }
         },
         "cwd": { "type": "string", "description": "Default: current directory" },
+        "on": { "type": "string", "description": "Another of the user's computers to run on, by tailnet name, or 'auto' for the least loaded; an unknown name lists them. Where cwd is missing there, a git project is copied over with rsync, without what .gitignore names, and the child's changes stay on that copy; any other missing cwd leaves the child in that computer's home" },
         "run_in_background": { "type": "boolean" }
       }
     }

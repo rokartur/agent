@@ -1058,6 +1058,15 @@ impl Agent {
             Some(dir) => self.cwd.join(dir),
             None => self.cwd.clone(),
         };
+        let on = match input["on"].as_str().filter(|on| *on != tailnet::LOCAL) {
+            None => None,
+            Some(on) => {
+                let settings = crate::settings::load(&self.home)?;
+                tailnet::check(&settings, on)?;
+                let on = if on == tailnet::AUTO { tailnet::place(&settings, &cwd).0 } else { on.to_string() };
+                Some((on, settings)).filter(|(on, _)| on != tailnet::LOCAL)
+            }
+        };
         let background = input["run_in_background"].as_bool() == Some(true);
         let batch = if background { tasks.len() } else { self.subagent_concurrency.max(1) };
         let mode = *self.permission_mode.lock().unwrap();
@@ -1084,6 +1093,7 @@ impl Agent {
                     trusted: prompt::is_trusted(&self.trusted_projects, &cwd),
                     web: false,
                     client_mcp: self.mcp.client_list(),
+                    on: on.clone(),
                 };
                 // The tool reports failure, so this chunk's runs must not keep going; earlier chunks have finished.
                 match subagent::spawn(&self.subagents, launch, background, None, &self.follow_ups) {
@@ -1151,6 +1161,7 @@ impl Agent {
             trusted: prompt::is_trusted(&self.trusted_projects, &self.cwd),
             web: true,
             client_mcp: self.mcp.client_list(),
+            on: None,
         };
         let host = workflow::Host { runs: self.subagents.clone(), follow_ups: self.follow_ups.clone(), base, models };
         let runs_dir = self.workflow_runs_dir();
