@@ -2821,7 +2821,7 @@ mod tests {
 
     #[test]
     fn resumed_session_remembers_the_last_account_per_provider() {
-        let dir = std::env::temp_dir().join(format!("agent-accounts-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("agent-session-accounts-{}", std::process::id()));
         let session = Session::start(&dir, true, Path::new("/w"), "m").unwrap();
         session.append(&json!({"type": "usage", "provider": "anthropic", "account": "uuid-home"})).unwrap();
         session.append(&json!({"type": "usage", "provider": "openai-codex", "account": "chatgpt-1"})).unwrap();
