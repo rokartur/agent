@@ -277,12 +277,13 @@ enum Panel {
         data: Value,
         index: usize,
     },
-    /// The rows under the footer: `row` 0 is main, 1 the shells pill while shells run, then each running subagent.
+    /// The rows under the footer: `row` 0 is main, then the shells pill and the agents pill while they run, then each workflow.
     Agents {
         row: usize,
     },
-    /// /tasks: `index` counts the shells, then the subagent runs.
+    /// /tasks: the shells tab, or the subagent runs tab when `agents`; `index` selects in that tab.
     Tasks {
+        agents: bool,
         index: usize,
     },
     /// /workflows with more than one run.
@@ -580,7 +581,7 @@ const HOTKEYS: [(&str, &[(&str, &str)]); 4] = [
             ("Ctrl+P", "cycle the models pinned with Tab in /model"),
             ("PageUp, PageDown", "scroll the transcript"),
             (if cfg!(target_os = "macos") { "Option+Down" } else { "Alt+Down" }, "jump to the latest message"),
-            ("Down", "walk the shells pill and running subagents, Enter opens one (empty editor)"),
+            ("Down", "walk the shells and agents pills and workflows, Enter opens one (empty editor)"),
         ],
     ),
     (
@@ -2518,7 +2519,10 @@ impl App {
             "tasks" if self.terminals.lock().unwrap().list.is_empty() && self.subagents.lock().unwrap().list.is_empty() => {
                 self.system("tasks", "No background tasks yet. The agent starts them with Bash run_in_background or Agent.");
             }
-            "tasks" => self.open_tasks(),
+            "tasks" => {
+                let agents = self.terminals.lock().unwrap().running() == 0 && !self.subagents.lock().unwrap().list.is_empty();
+                self.open_tasks(agents);
+            }
             "workflows" => self.open_workflows(),
             "login" => self.panel = Some(Panel::Login(login::Login::Kind { index: 0 })),
             "voice" => match voice::start(&self.home) {
@@ -2950,10 +2954,11 @@ impl App {
             }
             Some(Panel::Agents { row }) => {
                 let workflows = footer_workflows(&self.workflows);
-                let pill = self.terminals.lock().unwrap().running() + footer_agents(&self.subagents.lock().unwrap()) > 0;
-                let last = usize::from(pill) + workflows.len();
+                let agents = footer_agents(&self.subagents.lock().unwrap());
+                let pills = usize::from(self.terminals.lock().unwrap().running() > 0) + usize::from(agents > 0);
+                let last = pills + workflows.len();
                 let selected = (*row).min(last);
-                let workflow = selected.checked_sub(1 + usize::from(pill)).map(|offset| workflows[offset].clone());
+                let workflow = selected.checked_sub(1 + pills).map(|offset| workflows[offset].clone());
                 match code {
                     KeyCode::Up if selected > 0 => *row = selected - 1,
                     KeyCode::Down => *row = (selected + 1).min(last),
@@ -2962,27 +2967,28 @@ impl App {
                             workflow.stop();
                         }
                     }
-                    KeyCode::Enter if pill && selected == 1 => self.open_tasks(),
+                    KeyCode::Enter if (1..=pills).contains(&selected) => self.open_tasks(selected == pills && agents > 0),
                     KeyCode::Enter => self.panel = workflow.map(|workflow| Panel::WorkflowRun { id: workflow.id.clone(), phase: None, index: 0 }),
                     KeyCode::Up | KeyCode::Esc => self.panel = None,
                     _ => {}
                 }
             }
-            Some(Panel::Tasks { index }) => {
+            Some(Panel::Tasks { agents, index }) => {
                 let terminals = self.terminals.lock().unwrap().list.clone();
                 let runs = self.subagents.lock().unwrap().list.clone();
-                let last = terminals.len() + runs.len() - 1;
-                let shell = *index < terminals.len();
+                let len = if *agents { runs.len() } else { terminals.len() };
                 match code {
                     KeyCode::Up => *index = index.saturating_sub(1),
-                    KeyCode::Down => *index = (*index + 1).min(last),
-                    KeyCode::Char('x') if shell => _ = terminals[*index].stop(),
-                    KeyCode::Char('x') => runs[*index - terminals.len()].stop(),
-                    KeyCode::Enter if shell => self.panel = Some(Panel::Terminal { index: *index, scroll: 0, loaded: None, lines: Vec::new() }),
-                    KeyCode::Enter => {
-                        let run = runs[*index - terminals.len()].clone();
+                    KeyCode::Down => *index = (*index + 1).min(len.saturating_sub(1)),
+                    KeyCode::Tab | KeyCode::BackTab | KeyCode::Left | KeyCode::Right => (*agents, *index) = (!*agents, 0),
+                    _ if *index >= len => {}
+                    KeyCode::Char('x') if *agents => runs[*index].stop(),
+                    KeyCode::Char('x') => _ = terminals[*index].stop(),
+                    KeyCode::Enter if *agents => {
+                        let run = runs[*index].clone();
                         self.view_run(Some(run));
                     }
+                    KeyCode::Enter => self.panel = Some(Panel::Terminal { index: *index, scroll: 0, loaded: None, lines: Vec::new() }),
                     _ => {}
                 }
             }
@@ -4061,7 +4067,7 @@ impl App {
             Panel::Ask(ask) => ask.render(width),
             Panel::Agents { .. } => Vec::new(),
             Panel::Workflows { .. } | Panel::WorkflowRun { .. } | Panel::WorkflowSave { .. } => self.workflow_panel(width),
-            Panel::Tasks { index } => tasks_panel(&self.terminals.lock().unwrap().list, &self.subagents.lock().unwrap().list, &self.client.catalog(), *index, width),
+            Panel::Tasks { agents, index } => tasks_panel(&self.terminals.lock().unwrap().list, &self.subagents.lock().unwrap().list, &self.client.catalog(), *agents, *index, width),
             Panel::Todos { index } => {
                 let todos = self.todos.lock().unwrap();
                 let rows: Vec<panel::Row> = todos.visible().map(|t| panel::Row { left: format!("#{} {}", t.id, t.subject), right: vec![span(t.status.as_str(), todo_style(t.status))] }).collect();
@@ -4338,10 +4344,10 @@ impl App {
     }
 
     /// Sorts only on open, so a task that finishes does not move under the cursor while the panel is up.
-    fn open_tasks(&mut self) {
+    fn open_tasks(&mut self, agents: bool) {
         self.terminals.lock().unwrap().running_first();
         self.subagents.lock().unwrap().running_first();
-        self.panel = Some(Panel::Tasks { index: 0 });
+        self.panel = Some(Panel::Tasks { agents, index: 0 });
     }
 
     /// A single run opens its progress view directly, as in Claude Code.
@@ -4914,8 +4920,8 @@ impl App {
         let shells = self.terminals.lock().unwrap().running();
         let agents = footer_agents(&self.subagents.lock().unwrap());
         let workflows = footer_workflows(&self.workflows);
-        let pill = shells + agents > 0;
-        if !pill && workflows.is_empty() && matches!(self.panel, Some(Panel::Agents { .. })) {
+        let pills = usize::from(shells > 0) + usize::from(agents > 0);
+        if pills == 0 && workflows.is_empty() && matches!(self.panel, Some(Panel::Agents { .. })) {
             self.panel = None;
         }
         let mut panel_cursor = None;
@@ -4955,11 +4961,12 @@ impl App {
         bottom.push(Vec::new());
         bottom.extend(self.footer(width));
         let focus = match self.panel {
-            Some(Panel::Agents { row }) => Some(row.min(usize::from(pill) + workflows.len())),
+            Some(Panel::Agents { row }) => Some(row.min(pills + workflows.len())),
             _ => None,
         };
-        bottom.extend(background_rows(shells, agents, self.viewed.as_ref().map(|view| view.run.label.as_str()), focus == Some(1) && pill, width));
-        let workflow_focus = focus.and_then(|row| row.checked_sub(1 + usize::from(pill)));
+        let pill_focus = focus.filter(|row| (1..=pills).contains(row)).map(|row| row - 1);
+        bottom.extend(background_rows(shells, agents, self.viewed.as_ref().map(|view| view.run.label.as_str()), pill_focus, width));
+        let workflow_focus = focus.and_then(|row| row.checked_sub(1 + pills));
         bottom.extend(workflow_rows(&workflows, workflow_focus, width));
 
         let room = height.saturating_sub(bottom.len());
@@ -5083,7 +5090,7 @@ impl App {
             KeyCode::Esc => {
                 let index = *index;
                 drop(terminals);
-                self.panel = Some(Panel::Tasks { index });
+                self.panel = Some(Panel::Tasks { agents: false, index });
             }
             _ => {}
         }
@@ -6234,9 +6241,9 @@ fn thinking_style(level: &str) -> Style {
     Style::rgb(gray * 0x010101)
 }
 
-/// The rows under the footer, as in Claude Code: one pill counting shells and agents, whose list is /tasks,
-/// then the subagent viewed in place of the transcript. `focused` is the pill walked to with ↓.
-fn background_rows(shells: usize, agents: usize, viewed: Option<&str>, focused: bool, columns: usize) -> Vec<Line> {
+/// The rows under the footer, as in Claude Code: a shells pill and an agents pill, each opening its /tasks tab,
+/// then the subagent viewed in place of the transcript. `focus` indexes the pills shown, walked to with ↓.
+fn background_rows(shells: usize, agents: usize, viewed: Option<&str>, focus: Option<usize>, columns: usize) -> Vec<Line> {
     let mut rows = Vec::new();
     let mut counts = Vec::new();
     if shells > 0 {
@@ -6246,8 +6253,15 @@ fn background_rows(shells: usize, agents: usize, viewed: Option<&str>, focused: 
         counts.push(format!("{agents} {}", if agents == 1 { "agent" } else { "agents" }));
     }
     if !counts.is_empty() {
-        let (style, hint) = if focused { (Style::fg(16).on(80), " · Enter to view tasks") } else { (Style::fg(80), " · ↓ to view tasks") };
-        rows.push(vec![span(counts.join(" · "), style), span(hint, DIM)]);
+        let mut row = Vec::new();
+        for (index, count) in counts.into_iter().enumerate() {
+            if index > 0 {
+                row.push(span(" · ", DIM));
+            }
+            row.push(span(count, if focus == Some(index) { Style::fg(16).on(80) } else { Style::fg(80) }));
+        }
+        row.push(span(if focus.is_some() { " · Enter to view" } else { " · ↓ to view" }, DIM));
+        rows.push(row);
     }
     if let Some(label) = viewed {
         rows.push(truncate(&vec![span("viewing ", MUTED), span(label, BRIGHT.bold()), span(" · Esc back", DIM)], columns));
@@ -6305,8 +6319,8 @@ fn step_row(step: &workflow::Step) -> (String, String) {
     (step.label.clone(), right)
 }
 
-/// /tasks, as in Claude Code: a "Shells" and a "Local agents" section, each row with its status.
-fn tasks_panel(terminals: &[Arc<Terminal>], runs: &[Arc<Run>], catalog: &[Model], selected: usize, columns: usize) -> Vec<Line> {
+/// /tasks, as in Claude Code, with shells and local agents on separate tabs, each row with its status.
+fn tasks_panel(terminals: &[Arc<Terminal>], runs: &[Arc<Run>], catalog: &[Model], agents: bool, selected: usize, columns: usize) -> Vec<Line> {
     let active_shells = terminals.iter().filter(|t| t.status() == TerminalStatus::Running).count();
     let active_agents = runs.iter().filter(|run| run.is_running()).count();
     let mut counts = Vec::new();
@@ -6317,7 +6331,10 @@ fn tasks_panel(terminals: &[Arc<Terminal>], runs: &[Arc<Run>], catalog: &[Model]
         counts.push(format!("{active_agents} active {}", if active_agents == 1 { "agent" } else { "agents" }));
     }
     let summary = if counts.is_empty() { "nothing running".to_string() } else { counts.join(" · ") };
-    let name_width = terminals.iter().map(|t| width(&t.title)).chain(runs.iter().map(|run| width(&run.label))).max().unwrap_or(0).min(TASK_NAME_WIDTH);
+    let tab = |label: String, active: bool| if active { span(format!("[{label}]"), BRIGHT.bold()) } else { span(label, MUTED) };
+    let header = vec![span("Background", SYSTEM.bold()), span("  ", PLAIN), tab(format!("Shells {}", terminals.len()), !agents), span("  ", PLAIN), tab(format!("Agents {}", runs.len()), agents)];
+    let names: Vec<&str> = if agents { runs.iter().map(|run| run.label.as_str()).collect() } else { terminals.iter().map(|t| t.title.as_str()).collect() };
+    let name_width = names.iter().map(|name| width(name)).max().unwrap_or(0).min(TASK_NAME_WIDTH);
     let name = |text: &str, index: usize, running: bool| {
         let style = if index == selected {
             SYSTEM
@@ -6330,60 +6347,51 @@ fn tasks_panel(terminals: &[Arc<Terminal>], runs: &[Arc<Run>], catalog: &[Model]
         let gap = name_width - line_width(&cell) + 3;
         [cell, vec![span(" ".repeat(gap), PLAIN)]].concat()
     };
-    let mut rows: Vec<(Option<usize>, Line)> = Vec::new();
-    if !terminals.is_empty() {
-        rows.push((None, vec![span("Shells", MUTED.bold()), span(format!(" ({})", terminals.len()), DIM)]));
-    }
-    for (index, terminal) in terminals.iter().enumerate() {
-        let status = terminal.status();
-        let dot = match status {
-            TerminalStatus::Running | TerminalStatus::Killed => MUTED,
-            TerminalStatus::Done => OK,
-            TerminalStatus::Failed => ERROR,
-        };
-        let mut row = vec![span("● ", dot)];
-        row.extend(name(&terminal.title, index, status == TerminalStatus::Running));
-        row.push(span(status.as_str(), DIM));
-        rows.push((Some(index), row));
-    }
-    if !runs.is_empty() {
-        if !rows.is_empty() {
-            rows.push((None, Vec::new()));
+    let mut rows: Vec<Line> = Vec::new();
+    if !agents {
+        for (index, terminal) in terminals.iter().enumerate() {
+            let status = terminal.status();
+            let dot = match status {
+                TerminalStatus::Running | TerminalStatus::Killed => MUTED,
+                TerminalStatus::Done => OK,
+                TerminalStatus::Failed => ERROR,
+            };
+            let mut row = vec![span("● ", dot)];
+            row.extend(name(&terminal.title, index, status == TerminalStatus::Running));
+            row.push(span(status.as_str(), DIM));
+            rows.push(row);
         }
-        rows.push((None, vec![span("Local agents", MUTED.bold()), span(format!(" ({})", runs.len()), DIM)]));
+    } else {
+        for (index, run) in runs.iter().enumerate() {
+            let state = run.state.lock().unwrap();
+            let (status, dot) = match state.result {
+                None if state.last_tool.is_empty() => ("running".to_string(), MUTED),
+                None => (format!("running {}", state.last_tool), MUTED),
+                Some(Ok(_)) => ("done".to_string(), OK),
+                Some(Err(_)) => ("failed".to_string(), ERROR),
+            };
+            let mut row = vec![span("● ", dot)];
+            row.extend(name(&run.label, index, state.result.is_none()));
+            row.push(span(format!("{status} · {} tools · {} {}", state.tool_calls, model_name(catalog, &run.model), run.thinking), DIM));
+            rows.push(row);
+        }
     }
-    for (offset, run) in runs.iter().enumerate() {
-        let index = terminals.len() + offset;
-        let state = run.state.lock().unwrap();
-        let (status, dot) = match state.result {
-            None if state.last_tool.is_empty() => ("running".to_string(), MUTED),
-            None => (format!("running {}", state.last_tool), MUTED),
-            Some(Ok(_)) => ("done".to_string(), OK),
-            Some(Err(_)) => ("failed".to_string(), ERROR),
-        };
-        let mut row = vec![span("● ", dot)];
-        row.extend(name(&run.label, index, state.result.is_none()));
-        row.push(span(format!("{status} · {} tools · {} {}", state.tool_calls, model_name(catalog, &run.model), run.thinking), DIM));
-        rows.push((Some(index), row));
+    let mut lines = vec![Vec::new(), header, vec![span(summary, MUTED)], Vec::new()];
+    if rows.is_empty() {
+        lines.push(vec![span(if agents { "  No agents yet." } else { "  No shells yet." }, MUTED)]);
     }
     let shown = PANEL_ROWS + 3;
-    let selected_row = rows.iter().position(|(index, _)| *index == Some(selected)).unwrap_or(0);
-    let first = (selected_row + 1).saturating_sub(shown);
-    let mut lines = vec![Vec::new(), vec![span("Background", SYSTEM.bold())], vec![span(summary, MUTED)], Vec::new()];
-    for (index, row) in rows.iter().skip(first).take(shown) {
-        let marker = match index {
-            Some(index) if *index == selected => span("❯ ", SYSTEM),
-            _ => span("  ", PLAIN),
-        };
+    let first = (selected + 1).saturating_sub(shown);
+    for (index, row) in rows.iter().enumerate().skip(first).take(shown) {
+        let marker = if index == selected { span("❯ ", SYSTEM) } else { span("  ", PLAIN) };
         let mut line = vec![marker];
         line.extend(row.iter().cloned());
         lines.push(truncate(&line, columns));
     }
-    let len = terminals.len() + runs.len();
     if rows.len() > shown {
-        lines.extend([Vec::new(), vec![span(format!("  {}/{len}", selected + 1), DIM)]]);
+        lines.extend([Vec::new(), vec![span(format!("  {}/{}", selected + 1, rows.len()), DIM)]]);
     }
-    lines.extend([Vec::new(), vec![span("↑/↓ to select · Enter to view · x to stop · Esc to close", MUTED.italic())]]);
+    lines.extend([Vec::new(), vec![span("↑/↓ to select · Tab to switch · Enter to view · x to stop · Esc to close", MUTED.italic())]]);
     lines
 }
 
@@ -6643,29 +6651,35 @@ mod tests {
     }
 
     #[test]
-    fn tasks_list_agents_under_a_section_with_status_and_model() {
+    fn tasks_list_shells_and_agents_on_separate_tabs() {
         use crate::agent::subagent::{RunState, scan_run};
         let done = scan_run();
         *done.state.lock().unwrap() = RunState { elapsed: Some(Duration::from_secs(165)), result: Some(Ok("found".into())), usage: Usage { output: 11_000, ..Usage::default() }, ..Default::default() };
         let mut running = scan_run();
         (running.label, running.model, running.thinking) = ("recon 1a".into(), "claude-sonnet-5".into(), "medium".into());
         let sonnet = Model { provider: "anthropic".into(), id: "claude-sonnet-5".into(), name: "Claude Sonnet 5".into(), context_window: 1, max_tokens: 1, accounts: Vec::new(), price: None };
-        let rows: Vec<String> = tasks_panel(&[], &[Arc::new(done), Arc::new(running)], &[sonnet], 1, 80).iter().map(text).collect();
-        assert_eq!(rows[1..3], ["Background", "1 active agent"]);
-        assert_eq!(rows[4], "  Local agents (2)");
-        assert_eq!(rows[5], "  ● scan       done · 0 tools · opus high");
-        assert_eq!(rows[6], "❯ ● recon 1a   running · 0 tools · sonnet 5 medium");
-        assert_eq!(rows.last().unwrap(), "↑/↓ to select · Enter to view · x to stop · Esc to close");
+        let runs = [Arc::new(done), Arc::new(running)];
+        let rows: Vec<String> = tasks_panel(&[], &runs, &[sonnet], true, 1, 80).iter().map(text).collect();
+        assert_eq!(rows[1..3], ["Background  Shells 0  [Agents 2]", "1 active agent"]);
+        assert_eq!(rows[4], "  ● scan       done · 0 tools · opus high");
+        assert_eq!(rows[5], "❯ ● recon 1a   running · 0 tools · sonnet 5 medium");
+        assert_eq!(rows.last().unwrap(), "↑/↓ to select · Tab to switch · Enter to view · x to stop · Esc to close");
+        let shells: Vec<String> = tasks_panel(&[], &runs, &[], false, 0, 80).iter().map(text).collect();
+        assert_eq!(shells[1], "Background  [Shells 0]  Agents 2");
+        assert_eq!(shells[4], "  No shells yet.");
     }
 
     #[test]
-    fn background_rows_fold_shells_and_agents_into_one_pill() {
-        let rows = |shells, agents, viewed, focused| background_rows(shells, agents, viewed, focused, 40).iter().map(text).collect::<Vec<_>>();
-        assert_eq!(rows(2, 13, None, false), ["2 shells · 13 agents · ↓ to view tasks"]);
-        assert_eq!(rows(0, 1, None, true), ["1 agent · Enter to view tasks"]);
-        assert_eq!(rows(1, 0, Some("scan"), false), ["1 shell · ↓ to view tasks", "viewing scan · Esc back"]);
-        assert_eq!(rows(0, 0, Some("scan"), false), ["viewing scan · Esc back"]);
-        assert!(rows(0, 0, None, false).is_empty());
+    fn background_rows_show_a_shells_pill_and_an_agents_pill() {
+        let rows = |shells, agents, viewed, focus| background_rows(shells, agents, viewed, focus, 40).iter().map(text).collect::<Vec<_>>();
+        assert_eq!(rows(2, 13, None, None), ["2 shells · 13 agents · ↓ to view"]);
+        assert_eq!(rows(0, 1, None, Some(0)), ["1 agent · Enter to view"]);
+        assert_eq!(rows(1, 0, Some("scan"), None), ["1 shell · ↓ to view", "viewing scan · Esc back"]);
+        assert_eq!(rows(0, 0, Some("scan"), None), ["viewing scan · Esc back"]);
+        assert!(rows(0, 0, None, None).is_empty());
+        let focused = background_rows(2, 13, None, Some(1), 40);
+        assert_eq!(focused[0][0].style, Style::fg(80));
+        assert_eq!(focused[0][2].style, Style::fg(16).on(80));
     }
 
     #[test]
