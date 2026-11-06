@@ -1,19 +1,21 @@
 //! Environments on the other computers of one tailnet (ADR 0002). `agent serve --tailnet` accepts this user's other
 //! devices on this computer's Tailscale addresses, then lists, attaches to or starts the session servers here, or
 //! delivers a message to one, and relays the wire between the TCP connection and the session's socket. `--on`, /env,
-//! `agent attach`, SendMessage and ListAgents are its clients.
+//! `agent attach`, SendMessage, ListAgents and Agent's `on` are its clients.
 //!
 //! Each connection sends one request line, `{"list": true}` (with `"cwd"` for `--on auto`), `{"attach": id}`,
-//! `{"start": {"cwd", "args"}}`, `{"reattach": pid}` for the session server a dropped connection showed, or
-//! `{"message": {"to", "from", "from_cwd", "text"}}` for a SendMessage, with `protocol` and `version`. It gets one
-//! reply line carrying the listener's own `protocol` and `version`: the sessions with this computer's `load` (and
-//! `has_cwd` when asked), `{"ok": true}`, `{"ok": true, "sent": ..}` for a message, or `{"error": ..}`. After a bare
-//! ok the connection carries the session's wire unchanged.
+//! `{"start": {"cwd", "args"}}`, `{"reattach": pid}` for the session server a dropped connection showed,
+//! `{"message": {"to", "from", "from_cwd", "text"}}` for a SendMessage, or `{"subagent": {"cwd", "args"}}`, with
+//! `protocol` and `version`. It gets one reply line carrying the listener's own `protocol` and `version`: the
+//! sessions with this computer's `load` (and `has_cwd` when asked), `{"ok": true}`, `{"ok": true, "sent": ..}` for a
+//! message, or `{"error": ..}`. After a bare ok the connection carries the session's wire unchanged, or for a
+//! subagent its stdin and stdout.
 
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
+use std::net::{IpAddr, Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
+use std::process::{Child, Stdio};
 use std::time::Duration;
 
 use serde_json::{Value, json};
@@ -37,6 +39,8 @@ const MESSAGE_REPLY_TIMEOUT: Duration = Duration::from_secs(15);
 const START_REPLY_TIMEOUT: Duration = Duration::from_secs(75);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_REQUEST_BYTES: u64 = 1 << 20;
+/// The answer to a request this listener does not know; a release older than remote subagents sends it for `subagent`.
+const UNKNOWN_REQUEST: &str = "This computer's agent does not know that request.";
 /// A relay that cannot write to its peer for this long gives up, so the session server sees the terminal detach.
 const RELAY_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 /// A peer that went away without closing, asleep or off the network, is dropped after about 30 + 3 * 10 s.
@@ -123,6 +127,25 @@ pub fn message(settings: &Settings, environment: &str, to: &str, from: &str, fro
     let (_, _, reply) = request(settings, environment, body, MESSAGE_REPLY_TIMEOUT)?;
     let sent = reply["sent"].as_str().ok_or_else(|| format!("{environment} sent no answer to the message."))?;
     Ok(format!("{sent} (on {environment})"))
+}
+
+/// A subagent on `environment`: `agent` there with `args` in `cwd`. A git project missing there is copied over first,
+/// as an interactive start's copy does; any other missing `cwd` leaves the child in that computer's home. The
+/// connection carries the child's stdin and stdout; closing it stops the child.
+pub fn subagent(settings: &Settings, environment: &str, cwd: &Path, args: &[&str]) -> Result<(BufReader<TcpStream>, TcpStream), String> {
+    let (_, _, listed) = request(settings, environment, json!({"list": true, "cwd": cwd}), LIST_TIMEOUT)?;
+    // Only a project: its .gitignore leaves build output behind, where a plain directory such as Downloads goes whole.
+    if listed["has_cwd"] == false && crate::agent::prompt::project_root(cwd).join(".git").exists() {
+        copy_to(environment, cwd).map_err(|e| format!("{} is not on {environment}, and copying it there failed: {e}", cwd.display()))?;
+    }
+    let body = json!({"subagent": {"cwd": cwd, "args": args}});
+    let (reader, stream, _) = request(settings, environment, body, LIST_TIMEOUT).map_err(|refusal| match refusal.as_str() {
+        UNKNOWN_REQUEST => format!("{environment} runs an agent too old for subagents from other computers; run `agent update` there."),
+        _ => refusal,
+    })?;
+    // A child can think or run one tool for minutes without a line; keepalive still notices a host that vanished.
+    stream.set_read_timeout(None).map_err(|e| format!("Cannot reach {environment}: {e}"))?;
+    Ok((reader, stream))
 }
 
 /// Where `--on auto` starts a session in `cwd`, and why: of `local` and the environments that answer and have `cwd`,
@@ -384,6 +407,10 @@ fn handle(stream: TcpStream, home: &Path, device: &str) {
             reply(&stream, json!({"ok": true}));
             relay(reader, stream, socket);
         }
+        Ok(Answer::Subagent(child)) => {
+            reply(&stream, json!({"ok": true}));
+            relay_subagent(reader, stream, child);
+        }
         Err(error) => reply(&stream, json!({"error": error})),
     }
 }
@@ -391,6 +418,7 @@ fn handle(stream: TcpStream, home: &Path, device: &str) {
 enum Answer {
     Reply(Value),
     Session(UnixStream),
+    Subagent(Child),
 }
 
 fn answer(home: &Path, device: &str, request: &Value) -> Result<Answer, String> {
@@ -420,7 +448,10 @@ fn answer(home: &Path, device: &str, request: &Value) -> Result<Answer, String> 
     if request["message"].is_object() {
         return deliver_here(home, device, &request["message"]).map(|sent| Answer::Reply(json!({"ok": true, "sent": sent})));
     }
-    Err("This computer's agent does not know that request.".into())
+    if request["subagent"].is_object() {
+        return subagent_here(home, device, &request["subagent"]).map(Answer::Subagent);
+    }
+    Err(UNKNOWN_REQUEST.into())
 }
 
 /// A SendMessage from a session on `device` to a session here. The sender is named `<device>:<session>`, the address
@@ -451,6 +482,29 @@ fn start_here(home: &Path, device: &str, start: &Value) -> Result<UnixStream, St
     crate::local_session(home, &options, &args, &cwd, false, Some(device))
 }
 
+/// A subagent of a parent on `device`: `agent` with the parent's arguments, in the directory it asked for or in home
+/// when that is not on this computer.
+fn subagent_here(home: &Path, device: &str, subagent: &Value) -> Result<Child, String> {
+    let args: Vec<&str> = subagent["args"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+    // A first word such as `plugin` or `serve` would run that command instead of an agent.
+    if args.first() != Some(&"--headless") {
+        return Err("A remote subagent's arguments start with --headless.".into());
+    }
+    let (cwd, _) = start_dir(home, subagent["cwd"].as_str());
+    let exe = std::env::current_exe().map_err(|e| format!("Cannot find the agent binary: {e}"))?;
+    crate::process::command(exe)
+        .args(args)
+        .current_dir(cwd)
+        // shortcut: takes the parent's computer for the user's, wrong when the parent is itself a remote session;
+        // forward the parent's own AGENT_USER_DEVICE once that case matters.
+        .env(serve::USER_DEVICE, device)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| format!("Cannot start subagent: {e}"))
+}
+
 /// Where a remote start runs: the directory it asked for, or home and the asked one when that is not on this computer.
 fn start_dir(home: &Path, asked: Option<&str>) -> (PathBuf, Option<PathBuf>) {
     match asked.map(PathBuf::from).filter(|cwd| cwd.is_absolute()) {
@@ -477,6 +531,30 @@ fn relay(mut from_peer: BufReader<TcpStream>, peer: TcpStream, session: UnixStre
     let _ = std::io::copy(&mut from_peer, &mut to_session);
     let _ = to_session.shutdown(std::net::Shutdown::Both);
     let _ = frames.join();
+}
+
+/// Copies the connection to the child's stdin and its stdout back. The child exiting ends the connection, and the
+/// parent ending it, as its stop does, stops the child.
+fn relay_subagent(mut from_parent: BufReader<TcpStream>, parent: TcpStream, mut child: Child) {
+    let mut to_child = child.stdin.take().expect("stdin is piped");
+    let mut from_child = child.stdout.take().expect("stdout is piped");
+    if let Ok(mut to_parent) = parent.try_clone() {
+        let _ = to_parent.set_write_timeout(Some(RELAY_WRITE_TIMEOUT));
+        // Not joined: a process the child started can keep its stdout open after the child exits.
+        std::thread::spawn(move || {
+            let _ = std::io::copy(&mut from_child, &mut to_parent);
+            let _ = to_parent.shutdown(Shutdown::Both);
+        });
+        let _ = std::io::copy(&mut from_parent, &mut to_child);
+    }
+    if let Ok(None) = child.try_wait() {
+        // SIGTERM, as a local stop sends: the child's handler then ends its own commands.
+        crate::process::signal_group(child.id(), crate::process::SIGTERM);
+        // On macOS a process forked as the signal goes out can miss it; the unreaped child keeps the group id ours.
+        let _ = crate::process::wait_unreaped(child.id());
+        crate::process::signal_group(child.id(), crate::process::SIGTERM);
+    }
+    let _ = child.wait();
 }
 
 fn own_user() -> Result<u64, String> {
@@ -654,6 +732,31 @@ mod tests {
         assert!(discovered(&json!({})).is_empty());
     }
 
+    #[test]
+    fn a_remote_subagent_ends_the_connection_when_it_exits_and_stops_when_the_parent_closes_it() {
+        let relayed = |script: &str| {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let parent = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+            let host = listener.accept().unwrap().0;
+            let child = crate::process::command("sh").args(["-c", script]).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
+            let (relay_ended, ended) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                relay_subagent(BufReader::new(host.try_clone().unwrap()), host, child);
+                relay_ended.send(()).unwrap();
+            });
+            writeln!(&parent, "task").unwrap();
+            let mut lines = BufReader::new(parent.try_clone().unwrap()).lines();
+            assert_eq!(lines.next().unwrap().unwrap(), "got task");
+            (lines, parent, ended)
+        };
+        let (mut lines, _parent, ended) = relayed("read task; echo \"got $task\"");
+        assert!(lines.next().is_none());
+        ended.recv_timeout(Duration::from_secs(10)).unwrap();
+        let (_, parent, ended) = relayed("read task; echo \"got $task\"; sleep 60");
+        parent.shutdown(Shutdown::Both).unwrap();
+        ended.recv_timeout(Duration::from_secs(10)).expect("closing the connection stops the child");
+    }
+
     /// The listener's side of a connection, over loopback with the Tailscale check left out.
     fn serve_one(home: &Path) -> u16 {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -672,6 +775,8 @@ mod tests {
         assert_eq!(reply["sessions"], json!([]));
         let (_, _, reply) = ask(json!({"attach": "abc"})).unwrap();
         assert_eq!(refusal("studio", &reply), Some("No session abc runs here.".into()));
+        let (_, _, reply) = ask(json!({"subagent": {"cwd": "/", "args": ["plugin", "list"]}})).unwrap();
+        assert_eq!(refusal("studio", &reply), Some("A remote subagent's arguments start with --headless.".into()));
         let stream = connect("127.0.0.1", serve_one(&home)).unwrap();
         writeln!(&stream, "{}", json!({"protocol": PROTOCOL - 1, "version": "0.0.1", "list": true})).unwrap();
         let reply: Value = serde_json::from_str(&BufReader::new(stream).lines().next().unwrap().unwrap()).unwrap();

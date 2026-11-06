@@ -1,7 +1,8 @@
 use serde_json::Value;
 use std::io::{BufRead, BufReader, Write};
+use std::net::{Shutdown, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Stdio};
+use std::process::{Child, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -9,6 +10,7 @@ use std::time::{Duration, Instant};
 use super::permissions::Mode;
 use super::{FollowUp, prompt, usage};
 use crate::api::Usage;
+use crate::settings::Settings;
 
 const DEFAULT_SWARM_PROMPT: &str = include_str!("swarm-prompt.md");
 const MAX_RUNNING: usize = 64;
@@ -49,9 +51,9 @@ pub struct Run {
     /// The Workflow run this agent belongs to; its answer goes to the script, not to the model.
     pub workflow: Option<String>,
     started: Instant,
-    child: Mutex<Option<Child>>,
+    worker: Mutex<Option<Worker>>,
     /// One JSON string per line: the task, then what the user types to the run.
-    stdin: Mutex<Option<ChildStdin>>,
+    stdin: Mutex<Option<Box<dyn Write + Send>>>,
     pub state: Mutex<RunState>,
     launch: Launch,
     /// SendMessage resumed the finished run, so its next answer arrives as a message.
@@ -102,18 +104,24 @@ impl Run {
     }
 
     fn signal(&self, signal: i32) {
-        if let Some(child) = self.child.lock().unwrap().as_mut() {
-            crate::process::signal_group(child.id(), signal);
+        if let Some(worker) = self.worker.lock().unwrap().as_ref() {
+            worker.signal(signal);
         }
     }
 
-    /// The row /tasks and the transcript show: label, last tool, call count, time, tokens.
+    /// The other computer the run is on; its session file is there too.
+    pub fn environment(&self) -> Option<&str> {
+        self.launch.on.as_ref().map(|(environment, _)| environment.as_str())
+    }
+
+    /// The row /tasks and the transcript show: label, computer, last tool, call count, time, tokens.
     pub fn summary(&self) -> String {
         let (status, elapsed) = (self.status(), self.elapsed().as_secs());
+        let on = self.environment().map(|environment| format!(" on {environment}")).unwrap_or_default();
         let state = self.state.lock().unwrap();
         let tool = if state.last_tool.is_empty() { String::new() } else { format!(", last {}", state.last_tool) };
         let tokens = if state.usage == Usage::default() { String::new() } else { format!(", {}", usage::brief(state.usage)) };
-        format!("{} {} {status}: {} tool calls{tool}, {elapsed}s{tokens}", self.id, self.label, state.tool_calls)
+        format!("{} {}{on} {status}: {} tool calls{tool}, {elapsed}s{tokens}", self.id, self.label, state.tool_calls)
     }
 
     pub fn result_text(&self) -> String {
@@ -122,6 +130,28 @@ impl Run {
             Some(Ok(answer)) => answer.clone(),
             Some(Err(error)) => format!("Error: {error}"),
             None => "Error: still running".into(),
+        }
+    }
+}
+
+/// What runs a subagent: its process here, or the connection to the process another computer runs for it.
+enum Worker {
+    Here(Child),
+    There(TcpStream),
+}
+
+impl Worker {
+    fn signal(&self, signal: i32) {
+        match self {
+            Worker::Here(child) => crate::process::signal_group(child.id(), signal),
+            // The host stops the process once the connection ends.
+            Worker::There(stream) => _ = stream.shutdown(Shutdown::Both),
+        }
+    }
+
+    fn wait(self) {
+        if let Worker::Here(mut child) = self {
+            let _ = child.wait();
         }
     }
 }
@@ -148,6 +178,8 @@ pub struct Launch {
     pub web: bool,
     /// The editor's MCP servers of an `agent acp` parent; null when it passed no list.
     pub client_mcp: Value,
+    /// The other computer the child runs on, with the settings that reach it; None runs it here.
+    pub on: Option<(String, Settings)>,
 }
 
 #[derive(Default)]
@@ -203,7 +235,7 @@ pub fn spawn(runs: &Arc<Mutex<Runs>>, launch: Launch, background: bool, workflow
             background,
             workflow,
             started: Instant::now(),
-            child: Mutex::default(),
+            worker: Mutex::default(),
             stdin: Mutex::default(),
             state: Mutex::default(),
             launch,
@@ -243,7 +275,7 @@ pub fn send(runs: &Arc<Mutex<Runs>>, to: &str, text: &str, from: Option<&str>, f
 
 /// Restarts a finished child on its own session, so it keeps its whole conversation.
 pub fn resume(run: &Arc<Run>, text: &str, reply_to: Option<&str>, runs: &Arc<Mutex<Runs>>, follow_ups: &Arc<Mutex<Vec<FollowUp>>>) -> Result<(), String> {
-    if run.child.lock().unwrap().is_some() {
+    if run.worker.lock().unwrap().is_some() {
         return Err(format!("{} was stopped and has not exited yet. Send again in a moment.", run.id));
     }
     let session = run.state.lock().unwrap().session.clone().ok_or_else(|| format!("{} kept no session, so it cannot be resumed.", run.id))?;
@@ -262,19 +294,16 @@ pub fn resume(run: &Arc<Run>, text: &str, reply_to: Option<&str>, runs: &Arc<Mut
     Ok(())
 }
 
-/// Runs the child process for `run`, sends `message` as its task, and follows its JSONL on a thread.
+/// Runs the child for `run`, here or on the computer it is on, sends `message` as its task, and follows its JSONL on
+/// a thread.
 fn start(run: &Arc<Run>, message: &str, resume: Option<&str>, runs: &Arc<Mutex<Runs>>, follow_ups: &Arc<Mutex<Vec<FollowUp>>>) -> Result<(), String> {
     let launch = &run.launch;
-    let exe = std::env::current_exe().map_err(|e| format!("Cannot find the agent binary: {e}"))?;
     // A child has no UI to ask in, so ask becomes auto.
     let mode = match launch.mode {
         Mode::FullAccess => "--full-access",
         Mode::Ask | Mode::Auto => "--auto",
     };
     let mut args = vec!["--headless", "--model", &launch.model, "--thinking", &launch.thinking, mode, "--parent", &launch.parent_session];
-    if let Some(account) = &launch.account {
-        args.extend(["--account", account]);
-    }
     if launch.explore {
         args.push("--explore");
     }
@@ -286,6 +315,52 @@ fn start(run: &Arc<Run>, message: &str, resume: Option<&str>, runs: &Arc<Mutex<R
     }
     if let Some(session) = resume {
         args.extend(["--resume", session]);
+    }
+    let (worker, mut stdin, stdout): Pipes = match &launch.on {
+        Some((environment, settings)) => {
+            let (reader, stream) = crate::tailnet::subagent(settings, environment, &launch.cwd, &args)?;
+            let writer = stream.try_clone().map_err(|e| format!("Cannot reach {environment}: {e}"))?;
+            (Worker::There(stream), Box::new(writer), Box::new(reader))
+        }
+        None => here(launch, args)?,
+    };
+    if let Err(e) = writeln!(stdin, "{}", Value::from(message)) {
+        // A child here leads its own process group, out of reach of stop_all once dropped.
+        worker.signal(crate::process::SIGTERM);
+        worker.wait();
+        return Err(format!("Cannot send the task: {e}"));
+    }
+    *run.worker.lock().unwrap() = Some(worker);
+    *run.stdin.lock().unwrap() = Some(stdin);
+    let (watched, runs, follow_ups) = (run.clone(), runs.clone(), follow_ups.clone());
+    std::thread::spawn(move || {
+        let result = read_events(stdout, &watched, &mut |to, text| route(&watched, to, text, &runs, &follow_ups));
+        // Taken out first: holding the lock through `wait` would block `Run::stop` until the child exits.
+        let worker = watched.worker.lock().unwrap().take();
+        if let Some(worker) = worker {
+            worker.wait();
+        }
+        finish(&watched, result, &follow_ups);
+        if let Some(sender) = watched.reply_to.lock().unwrap().take() {
+            let answer = format!("Answer from {} ({}) to your message:\n\n{}", watched.id, watched.label, watched.result_text());
+            let delivered = runs.lock().unwrap().named(&sender).filter(|run| run.is_running()).is_some_and(|run| run.message(&answer).is_ok());
+            if !delivered {
+                follow_ups.lock().unwrap().push(FollowUp { source: format!("{}:message", watched.id), text: answer });
+            }
+        }
+    });
+    Ok(())
+}
+
+/// A child's runner, its stdin and its stdout.
+type Pipes = (Worker, Box<dyn Write + Send>, Box<dyn BufRead + Send>);
+
+/// The child as a process here. Only it gets the parent's account, --add-dir list and editor MCP servers: a child on
+/// another computer uses that computer's own.
+fn here<'a>(launch: &'a Launch, mut args: Vec<&'a str>) -> Result<Pipes, String> {
+    let exe = std::env::current_exe().map_err(|e| format!("Cannot find the agent binary: {e}"))?;
+    if let Some(account) = &launch.account {
+        args.extend(["--account", account]);
     }
     let mut command = crate::process::command(exe);
     if !launch.client_mcp.is_null() {
@@ -300,34 +375,9 @@ fn start(run: &Arc<Run>, message: &str, resume: Option<&str>, runs: &Arc<Mutex<R
         .stderr(Stdio::null())
         .spawn()
         .map_err(|e| format!("Cannot start subagent: {e}"))?;
-    let mut stdin = child.stdin.take().expect("stdin is piped");
-    if let Err(e) = writeln!(stdin, "{}", Value::from(message)) {
-        // The child leads its own process group, out of reach of stop_all once dropped.
-        crate::process::signal_group(child.id(), crate::process::SIGTERM);
-        let _ = child.wait();
-        return Err(format!("Cannot send the task: {e}"));
-    }
+    let stdin = child.stdin.take().expect("stdin is piped");
     let stdout = child.stdout.take().expect("stdout is piped");
-    *run.child.lock().unwrap() = Some(child);
-    *run.stdin.lock().unwrap() = Some(stdin);
-    let (watched, runs, follow_ups) = (run.clone(), runs.clone(), follow_ups.clone());
-    std::thread::spawn(move || {
-        let result = read_events(BufReader::new(stdout), &watched, &mut |to, text| route(&watched, to, text, &runs, &follow_ups));
-        // Taken out first: holding the lock through `wait` would block `Run::stop` until the child exits.
-        let child = watched.child.lock().unwrap().take();
-        if let Some(mut child) = child {
-            let _ = child.wait();
-        }
-        finish(&watched, result, &follow_ups);
-        if let Some(sender) = watched.reply_to.lock().unwrap().take() {
-            let answer = format!("Answer from {} ({}) to your message:\n\n{}", watched.id, watched.label, watched.result_text());
-            let delivered = runs.lock().unwrap().named(&sender).filter(|run| run.is_running()).is_some_and(|run| run.message(&answer).is_ok());
-            if !delivered {
-                follow_ups.lock().unwrap().push(FollowUp { source: format!("{}:message", watched.id), text: answer });
-            }
-        }
-    });
-    Ok(())
+    Ok((Worker::Here(child), Box::new(stdin), Box::new(BufReader::new(stdout))))
 }
 
 /// A child's SendMessage: `main` gets it as a message, a sibling through `send`.
@@ -462,13 +512,20 @@ pub(crate) fn scan_run() -> Run {
         background: true,
         workflow: None,
         started: Instant::now(),
-        child: Mutex::new(None),
+        worker: Mutex::new(None),
         stdin: Mutex::new(None),
         state: Mutex::default(),
         launch: test_launch(),
         resumed: AtomicBool::new(false),
         reply_to: Mutex::default(),
     }
+}
+
+#[cfg(test)]
+pub(crate) fn scan_run_on(environment: &str) -> Run {
+    let mut run = scan_run();
+    run.launch.on = Some((environment.into(), crate::settings::load(Path::new("/nonexistent/agent-subagent-test")).unwrap()));
+    run
 }
 
 #[cfg(test)]
@@ -487,6 +544,7 @@ pub fn test_launch() -> Launch {
         trusted: false,
         web: false,
         client_mcp: Value::Null,
+        on: None,
     }
 }
 
@@ -545,6 +603,11 @@ mod tests {
         let stdout: String = [json!({"type": "tool", "name": "Read"}), usage::entry("opus", usage, 0), json!({"type": "done", "answer": "ok"})].iter().map(|event| format!("{event}\n")).collect();
         assert_eq!(read_events(stdout.as_bytes(), &run, &mut |_, _| {}), Ok("ok".into()));
         assert_eq!(run.summary(), "sa-1 scan running: 1 tool calls, last Read, 0s, ↑1k ↓300 cache 40k");
+    }
+
+    #[test]
+    fn a_run_on_another_computer_names_it_in_the_summary() {
+        assert_eq!(scan_run_on("arturs-mac-studio").summary(), "sa-1 scan on arturs-mac-studio running: 0 tool calls, 0s");
     }
 
     #[test]
