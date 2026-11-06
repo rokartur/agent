@@ -24,8 +24,11 @@ pub struct Settings {
     /// Anthropic turns send only the new messages and the API keeps the rest (the message threads beta).
     pub message_threads: bool,
     pub permission_mode: Mode,
-    /// The auto-mode reviewer; empty means the provider's small model.
+    /// The auto-mode reviewer; empty means `small_model`.
     pub reviewer_model: String,
+    /// Session titles, long Video descriptions and compaction, and the reviewer and condense when theirs is empty;
+    /// empty means the provider's small model.
+    pub small_model: String,
     pub auto_compact: bool,
     pub reserve_tokens: u64,
     pub keep_recent_tokens: u64,
@@ -35,7 +38,7 @@ pub struct Settings {
     /// The name of the account the current model's provider uses, before the model in the footer.
     pub footer_account: bool,
     pub condense: bool,
-    /// Empty means the default summarizer for the provider.
+    /// Empty means `small_model`.
     pub condense_model: String,
     pub condense_min_batch_chars: u64,
     pub subagent_concurrency: usize,
@@ -381,6 +384,7 @@ fn from_json(own: &Value) -> Settings {
         message_threads: own["message_threads"].as_bool().unwrap_or(true),
         permission_mode: own["permission_mode"].as_str().and_then(Mode::parse).unwrap_or(Mode::Ask),
         reviewer_model: own["reviewer_model"].as_str().unwrap_or_default().to_string(),
+        small_model: own["small_model"].as_str().unwrap_or_default().to_string(),
         auto_compact: own["auto_compact"].as_bool().unwrap_or(true),
         // Compaction asks for 4/5 of it as max_tokens; 0 is an API error and a few hundred cut the summary off.
         reserve_tokens: own["reserve_tokens"].as_u64().unwrap_or(16_384).max(4_096),
@@ -522,6 +526,7 @@ fn to_json(settings: &Settings) -> Value {
         "message_threads": settings.message_threads,
         "permission_mode": settings.permission_mode.label(),
         "reviewer_model": settings.reviewer_model,
+        "small_model": settings.small_model,
         "auto_compact": settings.auto_compact,
         "reserve_tokens": settings.reserve_tokens,
         "keep_recent_tokens": settings.keep_recent_tokens,
@@ -736,6 +741,7 @@ mod tests {
         settings.subagent_effort = "low".into();
         settings.subagent_model = "claude-sonnet-5-5".into();
         settings.reviewer_model = "claude-haiku-5-5".into();
+        settings.small_model = "claude-haiku-4-5".into();
         settings.speed = "ultrafast".into();
         settings.custom_providers = vec![CustomProvider {
             name: "local".into(),

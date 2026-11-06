@@ -20,6 +20,7 @@ pub mod hashline;
 pub mod plan;
 pub mod rtk;
 pub mod todo;
+pub mod video;
 pub mod web;
 
 use crate::process;

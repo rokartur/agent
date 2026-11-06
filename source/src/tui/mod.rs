@@ -492,7 +492,7 @@ const PLAN_OPTIONS: [&str; 3] = ["Start fresh and implement", "Export to a _PLAN
 const PLAN_FRESH_ROWS: [&str; 3] = ["Model", "Effort", "Start"];
 const EDITOR_ROWS: usize = 10;
 const SCROLL_LINES: [usize; 5] = [1, 2, 3, 5, 10];
-const SETTING_NAMES: [&str; 38] = [
+const SETTING_NAMES: [&str; 39] = [
     "Model",
     "Thinking level",
     "Permission mode",
@@ -531,10 +531,11 @@ const SETTING_NAMES: [&str; 38] = [
     "Headroom token",
     "Messages while working",
     "Message threads",
+    "Small model",
 ];
 /// The settings panel's tabs with their rows of `SETTING_NAMES`, in the order it lists them.
 const SETTING_SECTIONS: [(&str, &[usize]); 5] = [
-    ("Model", &[0, 1, 27, 13, 2, 18, 30, 29]),
+    ("Model", &[0, 1, 27, 13, 2, 18, 30, 29, 38]),
     ("Context", &[3, 4, 5, 7, 8, 9, 28, 37]),
     ("Accounts", &[10, 11, 12, 25]),
     ("Modes", &[14, 15, 16, 17, 34, 35, 26]),
@@ -542,7 +543,7 @@ const SETTING_SECTIONS: [(&str, &[usize]); 5] = [
 ];
 /// The settings tab after `SETTING_SECTIONS`, drawn by `Panel::Profiles`.
 const PROFILES_TAB: usize = SETTING_SECTIONS.len();
-const MODEL_ROWS: [usize; 5] = [0, 8, 12, 29, 30];
+const MODEL_ROWS: [usize; 6] = [0, 8, 12, 29, 30, 38];
 const CONTEXT_WINDOW_ROW: usize = 13;
 const PROVIDER_ORDER_ROW: usize = 25;
 const HEADROOM_URL_ROW: usize = 34;
@@ -616,6 +617,8 @@ enum Item {
         name: String,
         input: Value,
         result: Option<(String, bool)>,
+        /// The running call's last ToolProgress, drawn under its row.
+        progress: Option<String>,
     },
     /// Claude Code's `Update Todos`: the whole list after a Todo call.
     Todos(Vec<Task>),
@@ -3736,16 +3739,17 @@ impl App {
             33 => s.progress_bar = !s.progress_bar,
             36 => s.mid_turn = step(&MID_TURN, &s.mid_turn.as_str(), forward).to_string(),
             37 => s.message_threads = !s.message_threads,
-            _ => unreachable!("rows 0, 8, 12, 13, 29 and 30 open their own panels"),
+            _ => unreachable!("rows 0, 8, 12, 13, 29, 30 and 38 open their own panels"),
         });
     }
 
-    fn setting_values(&self) -> [Line; 38] {
+    fn setting_values(&self) -> [Line; 39] {
         let s = &self.settings;
         let condense_model = if s.condense_model.is_empty() { "auto" } else { &s.condense_model };
         let fallback_model = if s.fallback_model.is_empty() { "auto" } else { &s.fallback_model };
         let reviewer_model = if s.reviewer_model.is_empty() { "auto" } else { &s.reviewer_model };
         let subagent_model = if s.subagent_model.is_empty() { "auto" } else { &s.subagent_model };
+        let small_model = if s.small_model.is_empty() { "auto" } else { &s.small_model };
         let model = self.model();
         let model = model.as_ref();
         [
@@ -3797,6 +3801,7 @@ impl App {
             } else {
                 on_off_choices(s.message_threads)
             },
+            vec![span(small_model, BRIGHT.bold())],
         ]
     }
 
@@ -4678,7 +4683,13 @@ impl App {
                 self.system(source, text);
             }
             Event::SubagentDone(run) => self.push(Item::Subagent(run)),
-            Event::ToolStart { id, name, input } => self.push(Item::Tool { id, name, input, result: None }),
+            Event::ToolStart { id, name, input } => self.push(Item::Tool { id, name, input, result: None, progress: None }),
+            Event::ToolProgress { id, text } => {
+                let Some(entry) = self.entries.iter_mut().rev().find(|e| matches!(&e.item, Item::Tool { id: tool_id, .. } if *tool_id == id)) else { return };
+                let Item::Tool { progress, .. } = &mut entry.item else { return };
+                *progress = Some(text);
+                entry.cache = None;
+            }
             Event::ToolEnd { id, output, is_error } => {
                 let Some(index) = self.entries.iter().rposition(|e| matches!(&e.item, Item::Tool { id: tool_id, .. } if *tool_id == id)) else { return };
                 let entry = &mut self.entries[index];
@@ -5519,7 +5530,13 @@ fn render_item(item: &Item, width: usize, expanded: bool, cwd: &Path) -> Vec<Lin
             }
             lines
         }
-        Item::Tool { name, input, result, .. } => render_tool(name, input, result.as_ref(), width, expanded, cwd),
+        Item::Tool { name, input, result, progress, .. } => {
+            let mut lines = render_tool(name, input, result.as_ref(), width, expanded, cwd);
+            if let Some(progress) = progress.as_ref().filter(|_| result.is_none()) {
+                lines.push(truncate(&vec![span("└ ", MUTED), span(progress, MUTED)], width));
+            }
+            lines
+        }
         Item::Todos(tasks) => update_todos_lines(tasks, width),
         Item::Done { took, usage, total } => {
             let stats = format!(" (↑{} ↓{}) total {}", tokens(usage.input), tokens(usage.output), duration(*total));
@@ -6103,10 +6120,11 @@ fn history_items(messages: &[Value]) -> Vec<Item> {
                     name: block["name"].as_str().unwrap_or_default().to_string(),
                     input: block["input"].clone(),
                     result: None,
+                    progress: None,
                 }),
                 (Some("user"), Some("tool_result")) => {
                     let id = block["tool_use_id"].as_str().unwrap_or_default();
-                    let result = (block["content"].as_str().unwrap_or_default().to_string(), block["is_error"].as_bool().unwrap_or(false));
+                    let result = (crate::acp::result_text(&block["content"]), block["is_error"].as_bool().unwrap_or(false));
                     for item in items.iter_mut().rev() {
                         if let Item::Tool { id: tool_id, result: slot, .. } = item
                             && tool_id == id
@@ -6444,13 +6462,14 @@ fn model_owners(model: &Model) -> String {
     format!("{} · {}", model.provider, model.accounts.join(", "))
 }
 
-/// The model id settings `row` edits: 0 model, 8 condense, 12 fallback, 29 reviewer, 30 subagent.
+/// The model id settings `row` edits: 0 model, 8 condense, 12 fallback, 29 reviewer, 30 subagent, 38 small.
 fn model_setting(settings: &mut Settings, row: usize) -> &mut String {
     match row {
         0 => &mut settings.model,
         8 => &mut settings.condense_model,
         12 => &mut settings.fallback_model,
         29 => &mut settings.reviewer_model,
+        38 => &mut settings.small_model,
         _ => &mut settings.subagent_model,
     }
 }
@@ -6779,6 +6798,14 @@ mod tests {
     }
 
     #[test]
+    fn a_running_tool_shows_its_progress_under_its_row_until_it_ends() {
+        let tool = |result: Option<(String, bool)>| Item::Tool { id: "t1".into(), name: "Video".into(), input: json!({"source": "a.mp4"}), result, progress: Some("transcribing 0:10 / 1:00".into()) };
+        let rows = |item: &Item| render_item(item, 80, false, Path::new("/repo")).iter().map(text).collect::<Vec<_>>();
+        assert_eq!(rows(&tool(None)), ["• Video source: a.mp4", "└ transcribing 0:10 / 1:00"]);
+        assert_eq!(rows(&tool(Some(("done".into(), false)))), ["✓ Video source: a.mp4"]);
+    }
+
+    #[test]
     fn reading_a_skill_file_shows_the_skill_name() {
         let result = ("body".to_string(), false);
         let lines = render_tool("Read", &json!({"file_path": "/x/skills/verify-web-app/SKILL.md"}), Some(&result), 80, false, Path::new("/repo"));
@@ -6968,9 +6995,12 @@ mod tests {
         let messages = [
             json!({"role": "assistant", "content": [{"type": "tool_use", "id": "t1", "name": "Read", "input": {"file_path": "a"}}]}),
             json!({"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "x", "is_error": true}]}),
+            json!({"role": "assistant", "content": [{"type": "tool_use", "id": "t2", "name": "Video", "input": {"source": "a.mp4"}}]}),
+            json!({"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t2", "content": [{"type": "text", "text": "frames"}, {"type": "image", "source": {}}]}]}),
         ];
         let items = history_items(&messages);
         assert!(matches!(&items[0], Item::Tool { result: Some((out, true)), .. } if out == "x"));
+        assert!(matches!(&items[1], Item::Tool { result: Some((out, false)), .. } if out == "frames"));
     }
 
     #[test]

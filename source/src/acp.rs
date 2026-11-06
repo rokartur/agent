@@ -606,7 +606,7 @@ fn replay(messages: &[Value], agent: &Agent, session_id: &str) {
 }
 
 /// A tool result's text, whether the API got a string or blocks.
-fn result_text(content: &Value) -> String {
+pub(crate) fn result_text(content: &Value) -> String {
     match content {
         Value::String(text) => text.clone(),
         blocks => blocks.as_array().into_iter().flatten().filter_map(|block| block["text"].as_str()).collect::<Vec<_>>().join("\n"),
@@ -807,7 +807,7 @@ fn plan(todos: &Todos) -> Value {
 
 fn tool_kind(name: &str) -> &'static str {
     match name {
-        "Read" => "read",
+        "Read" | "Video" => "read",
         "Grep" => "search",
         "Bash" => "execute",
         "Write" | "ReplaceLines" | "Edit" | "InsertLines" => "edit",

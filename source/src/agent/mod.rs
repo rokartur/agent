@@ -109,6 +109,11 @@ pub enum Event {
         name: String,
         input: Value,
     },
+    /// What a long call is doing now, such as Video's `transcribing 2:10 / 14:32`.
+    ToolProgress {
+        id: String,
+        text: String,
+    },
     ToolEnd {
         id: String,
         output: String,
@@ -214,7 +219,7 @@ pub struct Agent {
     pub sessions_dir: PathBuf,
     pub context_window: u64,
     pub max_tokens: u64,
-    /// The provider's cheapest model: titles and, by default, condense summaries.
+    /// `small_model` from settings, else the provider's cheapest: titles, Video descriptions, and by default condense summaries.
     pub cheap_model: String,
     /// Auto-mode reviews: `reviewer_model` from settings, else `cheap_model`.
     pub reviewer_model: String,
@@ -241,8 +246,8 @@ pub struct Agent {
     pub abort: Arc<AtomicBool>,
     /// Messages typed while the agent works; delivered with the next tool results.
     pub steering: Steering,
-    /// Images pasted into AskUserQuestion answers; they join that call's tool result.
-    answer_images: Vec<Value>,
+    /// Blocks the running call returns after its text: AskUserQuestion's pasted images, or Video's frames and the speech between them.
+    result_blocks: Vec<Value>,
     /// Shared with the UI so a mode change applies to the next tool call.
     pub permission_mode: Arc<Mutex<Mode>>,
     pub grants: Grants,
@@ -447,7 +452,7 @@ impl Agent {
             message_thread: api::MessageThread::default(),
             abort: Arc::default(),
             steering: Arc::new(Mutex::new(Vec::new())),
-            answer_images: Vec::new(),
+            result_blocks: Vec::new(),
             permission_mode: Arc::new(Mutex::new(settings.permission_mode)),
             grants: Grants::default(),
             todos: Arc::default(),
@@ -679,7 +684,7 @@ impl Agent {
                 self.plugins.event(json!({"type": "tool_call", "name": name, "input": input, "context": self.plugin_context()}));
                 let started = Instant::now();
                 let bad_input = reply.bad_tool_inputs.iter().find(|bad| bad.id == id);
-                let (mut output, is_error, images) = if let Some(bad) = bad_input {
+                let (mut output, is_error, extra_blocks) = if let Some(bad) = bad_input {
                     (format!("{} The call did not run; send it again with valid JSON.", bad.error), true, Vec::new())
                 } else if let Some(error) = tools::undeclared_params(&self.tools, &name, &input) {
                     (format!("{error} The call did not run; send it again with only the parameters its schema lists."), true, Vec::new())
@@ -690,7 +695,7 @@ impl Agent {
                     }
                 } else {
                     let (output, is_error) = self.run_tool_with_checkpoint(&id, &name, &input, &targets, text, emit)?;
-                    (output, is_error, std::mem::take(&mut self.answer_images))
+                    (output, is_error, std::mem::take(&mut self.result_blocks))
                 };
                 if !is_error {
                     for file in &targets {
@@ -705,15 +710,17 @@ impl Agent {
                 self.tool_calls += 1;
                 // Includes the LSP check after an edit: the whole wait before the next tool.
                 self.session.append(&json!({"type": "tool_time", "id": id, "name": name, "ms": started.elapsed().as_millis() as u64}))?;
-                self.plugins.event(json!({"type": "tool_result", "name": name, "output": output, "isError": is_error, "context": self.plugin_context()}));
-                emit(Event::ToolEnd { id: id.clone(), output: output.clone(), is_error });
-                let content = if images.is_empty() {
+                let content = if extra_blocks.is_empty() {
                     json!(output)
                 } else {
                     let mut blocks = vec![json!({"type": "text", "text": output})];
-                    blocks.extend(images);
+                    blocks.extend(extra_blocks);
                     json!(blocks)
                 };
+                // Video puts its transcript in text blocks between the frames; the UI, plugins and condense read it too.
+                let output = crate::acp::result_text(&content);
+                self.plugins.event(json!({"type": "tool_result", "name": name, "output": output, "isError": is_error, "context": self.plugin_context()}));
+                emit(Event::ToolEnd { id: id.clone(), output: output.clone(), is_error });
                 results.push(json!({"type": "tool_result", "tool_use_id": id, "content": content, "is_error": is_error}));
                 finished.push(condense::Call { id, name, input, output, is_error });
             }
@@ -818,6 +825,7 @@ impl Agent {
             "PushNotification" => self.push_notification(input, emit),
             "WebSearch" | "WebFetch" | "GetSearchContent" => self.web.run(name, input),
             "AskUserQuestion" => self.ask_user(input, emit),
+            "Video" => self.video(id, input, emit),
             _ => return self.plugins.tool(name, input, &self.plugin_context(), &self.abort).or_else(|| self.mcp.tool(name, input, &self.abort)).unwrap_or_else(|| self.run_file_tool(id, name, input)),
         };
         match result {
@@ -1386,8 +1394,33 @@ impl Agent {
         let (reply, answers) = mpsc::channel();
         emit(Event::Ask { questions: questions.clone(), reply });
         let (answers, images) = answers.recv().unwrap_or_default();
-        self.answer_images = images;
+        self.result_blocks = images;
         Ok(ask::response(&questions, &answers))
+    }
+
+    fn video(&mut self, id: &str, input: &Value, emit: &mut dyn FnMut(Event)) -> Result<String, String> {
+        let mut progress = |text| emit(Event::ToolProgress { id: id.into(), text });
+        let spent = Arc::new(Mutex::new(None));
+        let (client, model, abort, slot) = (self.client.clone(), self.cheap_model.clone(), self.abort.clone(), spent.clone());
+        let summarize = move |description: &str| {
+            let request = api::plain_request(&model, tools::video::SUMMARY_SYSTEM, description, tools::video::SUMMARY_MAX_TOKENS);
+            let reply = client.send_quiet(&request, &abort)?;
+            let summary = text_of(&reply.message);
+            let stop_reason = reply.stop_reason.clone();
+            *slot.lock().unwrap() = Some(reply);
+            if stop_reason != "end_turn" || summary.trim().is_empty() {
+                return Err(format!("{model} stopped with {stop_reason}"));
+            }
+            Ok(summary)
+        };
+        let watched = tools::video::watch(input, &self.cwd, &self.agent_dir, &self.abort, &mut progress, summarize);
+        if let Some(reply) = spent.lock().unwrap().take() {
+            self.usage.add(reply.usage);
+            self.session.append(&usage::reply_entry(&reply, now_ms()))?;
+        }
+        let (text, blocks) = watched?;
+        self.result_blocks = blocks;
+        Ok(text)
     }
 
     /// Names a fresh session from its first prompt on a background thread; `prompt` emits the title once it is ready.
@@ -1648,7 +1681,7 @@ impl Agent {
         Ok(summary)
     }
 
-    /// Applies settings changed in /settings; `model` is the catalog entry for `settings.model`, `cheap_model` its provider's cheapest.
+    /// Applies settings changed in /settings; `model` is the catalog entry for `settings.model`, `cheap_model` the `small_model` setting or its provider's cheapest.
     fn apply(&mut self, settings: &Settings, model: &Model, cheap_model: &str) {
         self.trusted_projects = settings.trusted_projects.clone();
         self.model = settings.model.clone();
@@ -1683,7 +1716,7 @@ impl Agent {
         };
         let notice = (model.id != settings.model).then(|| format!("{} is not on any account's model list; using {}.", settings.model, model.id));
         settings.model = model.id.clone();
-        let cheap_model = api::models::small_model(&catalog, &model).id.clone();
+        let cheap_model = if settings.small_model.is_empty() { api::models::small_model(&catalog, &model).id.clone() } else { settings.small_model.clone() };
         self.apply(settings, &model, &cheap_model);
         Ok(notice)
     }
