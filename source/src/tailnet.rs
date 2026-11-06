@@ -542,10 +542,12 @@ fn relay_subagent(mut from_parent: BufReader<TcpStream>, parent: TcpStream, mut 
         let _ = to_parent.set_write_timeout(Some(RELAY_WRITE_TIMEOUT));
         // Not joined: a process the child started can keep its stdout open after the child exits.
         std::thread::spawn(move || {
-            let _ = std::io::copy(&mut from_child, &mut to_parent);
+            // `dyn Read` keeps std off splice, which on Linux holds the pipe's lock while it waits on the other end,
+            // leaving the child stuck uninterruptibly in its read or write.
+            let _ = std::io::copy(&mut from_child as &mut dyn Read, &mut to_parent);
             let _ = to_parent.shutdown(Shutdown::Both);
         });
-        let _ = std::io::copy(&mut from_parent, &mut to_child);
+        let _ = std::io::copy(&mut from_parent as &mut dyn Read, &mut to_child);
     }
     if let Ok(None) = child.try_wait() {
         // SIGTERM, as a local stop sends: the child's handler then ends its own commands.
@@ -745,6 +747,8 @@ mod tests {
                 relay_ended.send(()).unwrap();
             });
             writeln!(&parent, "task").unwrap();
+            // A child that never answers then fails the test instead of hanging the suite.
+            parent.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
             let mut lines = BufReader::new(parent.try_clone().unwrap()).lines();
             assert_eq!(lines.next().unwrap().unwrap(), "got task");
             (lines, parent, ended)
