@@ -316,7 +316,7 @@ fn handle(agent: &mut Agent, connection: &mut Connection, message: &Value) -> Re
                     let message = questions.iter().map(|question| question.question.as_str()).collect::<Vec<_>>().join("\n");
                     let content = elicit(&replies.lock().unwrap(), session_id, &message, question_form(&questions));
                     // No answers at all is how the TUI declines.
-                    let _ = reply.send(content.map_or_else(Vec::new, |content| form_answers(&questions, &content)));
+                    let _ = reply.send((content.map_or_else(Vec::new, |content| form_answers(&questions, &content)), Vec::new()));
                 }
                 event => {
                     for update in turn.session_updates(&event) {

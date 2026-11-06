@@ -1,4 +1,5 @@
 use crossterm::event::{KeyCode, KeyEvent};
+use serde_json::Value;
 use std::sync::mpsc::Sender;
 
 use super::OK;
@@ -11,10 +12,12 @@ const PREVIEW_LINES: usize = 8;
 /// The ask_user_question panel: one question at a time, the agent thread waits on `reply`.
 pub struct AskPanel {
     questions: Vec<Question>,
-    reply: Sender<Vec<Option<Answer>>>,
+    reply: Sender<(Vec<Option<Answer>>, Vec<Value>)>,
     answers: Vec<Option<Answer>>,
     current: usize,
     drafts: Vec<Draft>,
+    /// Images pasted into any question's typed answer; `[Image #n]` refers to `images[n - 1]`.
+    images: Vec<Value>,
 }
 
 /// Per-question input, kept while moving between questions.
@@ -26,9 +29,9 @@ struct Draft {
 }
 
 impl AskPanel {
-    pub fn new(questions: Vec<Question>, reply: Sender<Vec<Option<Answer>>>) -> AskPanel {
+    pub fn new(questions: Vec<Question>, reply: Sender<(Vec<Option<Answer>>, Vec<Value>)>) -> AskPanel {
         let drafts = questions.iter().map(|_| Draft { row: 0, picked: Vec::new(), typed: Editor::new() }).collect();
-        AskPanel { answers: vec![None; questions.len()], questions, reply, current: 0, drafts }
+        AskPanel { answers: vec![None; questions.len()], questions, reply, current: 0, drafts, images: Vec::new() }
     }
 
     pub fn first_question(&self) -> &str {
@@ -42,6 +45,11 @@ impl AskPanel {
         draft.typed.insert(text);
     }
 
+    pub fn attach(&mut self, image: Value) {
+        self.images.push(image);
+        self.paste(&format!("[Image #{}] ", self.images.len()));
+    }
+
     /// Returns true once the answers (or the cancel) went back to the agent.
     pub fn key(&mut self, key: KeyEvent) -> bool {
         let question = &self.questions[self.current];
@@ -50,7 +58,7 @@ impl AskPanel {
         let editing = draft.row == custom_row && !draft.typed.is_empty();
         match key.code {
             KeyCode::Esc => {
-                let _ = self.reply.send(vec![None; self.questions.len()]);
+                let _ = self.reply.send((vec![None; self.questions.len()], Vec::new()));
                 return true;
             }
             KeyCode::Left if !editing => self.current = self.current.saturating_sub(1),
@@ -77,7 +85,8 @@ impl AskPanel {
                 match (1..=count).map(|step| (self.current + step) % count).find(|&i| self.answers[i].is_none()) {
                     Some(unanswered) => self.current = unanswered,
                     None => {
-                        let _ = self.reply.send(std::mem::take(&mut self.answers));
+                        let images = referenced_images(std::mem::take(&mut self.images), &self.answers);
+                        let _ = self.reply.send((std::mem::take(&mut self.answers), images));
                         return true;
                     }
                 }
@@ -141,6 +150,27 @@ impl AskPanel {
     }
 }
 
+/// The images whose `[Image #n]` is still in a typed answer, without the dropped file's path the API rejects.
+fn referenced_images(images: Vec<Value>, answers: &[Option<Answer>]) -> Vec<Value> {
+    let typed: Vec<&str> = answers
+        .iter()
+        .flatten()
+        .filter_map(|answer| match answer {
+            Answer::Typed(text) | Answer::Multi { typed: text, .. } => Some(text.as_str()),
+            Answer::Picked(_) => None,
+        })
+        .collect();
+    let mut kept = Vec::new();
+    for (index, mut image) in images.into_iter().enumerate() {
+        let tag = format!("[Image #{}]", index + 1);
+        if typed.iter().any(|text| text.contains(&tag)) {
+            image.as_object_mut().unwrap().remove(super::DROPPED_PATH);
+            kept.push(image);
+        }
+    }
+    kept
+}
+
 fn lead(focused: usize, row: usize) -> Line {
     vec![span("  ", PLAIN), span(if row == focused { "→ " } else { "  " }, OK), span(format!("{}. ", row + 1), MUTED)]
 }
@@ -188,7 +218,23 @@ mod tests {
         let keys = [KeyCode::Down, KeyCode::Down, KeyCode::Char('x'), KeyCode::Enter, KeyCode::Down, KeyCode::Char(' '), KeyCode::Up, KeyCode::Char(' ')];
         assert!(keys.into_iter().all(|code| !panel.key(code.into())));
         assert!(panel.key(KeyCode::Enter.into()));
-        assert_eq!(answers.recv().unwrap(), [Some(Answer::Typed("x".into())), Some(Answer::Multi { picked: vec![0, 1], typed: String::new() })]);
+        assert_eq!(answers.recv().unwrap().0, [Some(Answer::Typed("x".into())), Some(Answer::Multi { picked: vec![0, 1], typed: String::new() })]);
+    }
+
+    #[test]
+    fn a_pasted_image_goes_back_with_the_answer_that_still_names_it() {
+        let input = json!({"questions": [{"question": "Q?", "header": "H", "options": [{"label": "a", "description": ""}, {"label": "b", "description": ""}]}]});
+        let (reply, answers) = mpsc::channel();
+        let mut panel = AskPanel::new(crate::tools::ask::parse(&input).unwrap(), reply);
+        panel.attach(json!({"type": "image", "n": 1, super::super::DROPPED_PATH: "/a.png"}));
+        panel.attach(json!({"type": "image", "n": 2}));
+        // The space, then the whole `[Image #2]` tag.
+        panel.key(KeyCode::Backspace.into());
+        panel.key(KeyCode::Backspace.into());
+        assert!(panel.key(KeyCode::Enter.into()));
+        let (answers, images) = answers.recv().unwrap();
+        assert_eq!(answers, [Some(Answer::Typed("[Image #1] ".into()))]);
+        assert_eq!(images, [json!({"type": "image", "n": 1})]);
     }
 
     #[test]
@@ -202,7 +248,7 @@ mod tests {
         let keys = [KeyCode::Enter, KeyCode::Char(' '), KeyCode::Left, KeyCode::Down, KeyCode::Enter];
         assert!(keys.into_iter().all(|code| !panel.key(code.into())));
         assert!(panel.key(KeyCode::Enter.into()));
-        assert_eq!(answers.recv().unwrap(), [Some(Answer::Picked(1)), Some(Answer::Multi { picked: vec![0], typed: String::new() })]);
+        assert_eq!(answers.recv().unwrap().0, [Some(Answer::Picked(1)), Some(Answer::Multi { picked: vec![0], typed: String::new() })]);
     }
 
     #[test]

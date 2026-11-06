@@ -160,10 +160,10 @@ pub enum Event {
         detail: String,
         reason: String,
     },
-    /// ask_user_question: the agent waits for one answer slot per question; all None means declined.
+    /// ask_user_question: the agent waits for one answer slot per question, plus the images the typed answers name; all None means declined.
     Ask {
         questions: Vec<Question>,
-        reply: Sender<Vec<Option<Answer>>>,
+        reply: Sender<(Vec<Option<Answer>>, Vec<Value>)>,
     },
 }
 
@@ -241,6 +241,8 @@ pub struct Agent {
     pub abort: Arc<AtomicBool>,
     /// Messages typed while the agent works; delivered with the next tool results.
     pub steering: Steering,
+    /// Images pasted into AskUserQuestion answers; they join that call's tool result.
+    answer_images: Vec<Value>,
     /// Shared with the UI so a mode change applies to the next tool call.
     pub permission_mode: Arc<Mutex<Mode>>,
     pub grants: Grants,
@@ -445,6 +447,7 @@ impl Agent {
             message_thread: api::MessageThread::default(),
             abort: Arc::default(),
             steering: Arc::new(Mutex::new(Vec::new())),
+            answer_images: Vec::new(),
             permission_mode: Arc::new(Mutex::new(settings.permission_mode)),
             grants: Grants::default(),
             todos: Arc::default(),
@@ -676,18 +679,18 @@ impl Agent {
                 self.plugins.event(json!({"type": "tool_call", "name": name, "input": input, "context": self.plugin_context()}));
                 let started = Instant::now();
                 let bad_input = reply.bad_tool_inputs.iter().find(|bad| bad.id == id);
-                let (mut output, is_error, image) = if let Some(bad) = bad_input {
-                    (format!("{} The call did not run; send it again with valid JSON.", bad.error), true, None)
+                let (mut output, is_error, images) = if let Some(bad) = bad_input {
+                    (format!("{} The call did not run; send it again with valid JSON.", bad.error), true, Vec::new())
                 } else if let Some(error) = tools::undeclared_params(&self.tools, &name, &input) {
-                    (format!("{error} The call did not run; send it again with only the parameters its schema lists."), true, None)
+                    (format!("{error} The call did not run; send it again with only the parameters its schema lists."), true, Vec::new())
                 } else if let Some(path) = self.requested_image(&name, &input) {
                     match crate::image::block(&path) {
-                        Ok(block) => (format!("[{} is attached as an image.]", path.display()), false, Some(block)),
-                        Err(error) => (error, true, None),
+                        Ok(block) => (format!("[{} is attached as an image.]", path.display()), false, vec![block]),
+                        Err(error) => (error, true, Vec::new()),
                     }
                 } else {
                     let (output, is_error) = self.run_tool_with_checkpoint(&id, &name, &input, &targets, text, emit)?;
-                    (output, is_error, None)
+                    (output, is_error, std::mem::take(&mut self.answer_images))
                 };
                 if !is_error {
                     for file in &targets {
@@ -704,9 +707,12 @@ impl Agent {
                 self.session.append(&json!({"type": "tool_time", "id": id, "name": name, "ms": started.elapsed().as_millis() as u64}))?;
                 self.plugins.event(json!({"type": "tool_result", "name": name, "output": output, "isError": is_error, "context": self.plugin_context()}));
                 emit(Event::ToolEnd { id: id.clone(), output: output.clone(), is_error });
-                let content = match image {
-                    Some(block) => json!([{"type": "text", "text": output}, block]),
-                    None => json!(output),
+                let content = if images.is_empty() {
+                    json!(output)
+                } else {
+                    let mut blocks = vec![json!({"type": "text", "text": output})];
+                    blocks.extend(images);
+                    json!(blocks)
                 };
                 results.push(json!({"type": "tool_result", "tool_use_id": id, "content": content, "is_error": is_error}));
                 finished.push(condense::Call { id, name, input, output, is_error });
@@ -1201,7 +1207,7 @@ impl Agent {
         }]}))?;
         let (reply, answers) = mpsc::channel();
         emit(Event::Ask { questions, reply });
-        match answers.recv().unwrap_or_default().first() {
+        match answers.recv().unwrap_or_default().0.first() {
             Some(Some(ask::Answer::Picked(0))) => {}
             Some(Some(ask::Answer::Typed(text))) => return Err(format!("User declined to enter plan mode and said: {text}")),
             _ => return Err("User declined to enter plan mode. Continue with the task without planning.".into()),
@@ -1379,7 +1385,9 @@ impl Agent {
         let questions = ask::parse(input)?;
         let (reply, answers) = mpsc::channel();
         emit(Event::Ask { questions: questions.clone(), reply });
-        Ok(ask::response(&questions, &answers.recv().unwrap_or_default()))
+        let (answers, images) = answers.recv().unwrap_or_default();
+        self.answer_images = images;
+        Ok(ask::response(&questions, &answers))
     }
 
     /// Names a fresh session from its first prompt on a background thread; `prompt` emits the title once it is ready.

@@ -1664,8 +1664,8 @@ impl App {
             Msg::Image { id, paste, image } => {
                 self.typing_client = Some(id);
                 match paste {
-                    // A dropped path is plain text to a panel's field.
-                    Some(text) if self.panel.is_some() => self.paste(&text),
+                    // A dropped path is plain text to a panel's field; a question's typed answer takes the image.
+                    Some(text) if self.panel.is_some() && !matches!(self.panel, Some(Panel::Ask(_))) => self.paste(&text),
                     _ => self.attach(image),
                 }
             }
@@ -1984,12 +1984,13 @@ impl App {
     }
 
     fn attach(&mut self, image: Result<Value, String>) {
-        match image {
-            Ok(block) => {
+        match (image, self.panel.as_mut()) {
+            (Ok(block), Some(Panel::Ask(ask))) => ask.attach(block),
+            (Ok(block), _) => {
                 self.images.push(block);
                 self.editor.insert(&format!("[Image #{}] ", self.images.len()));
             }
-            Err(error) => self.hint = Some((error, Instant::now())),
+            (Err(error), _) => self.hint = Some((error, Instant::now())),
         }
     }
 
@@ -2692,7 +2693,9 @@ impl App {
             return;
         }
         if let Some(Panel::Ask(ask)) = self.panel.as_mut() {
-            if ask.key(key) {
+            if key.code == KeyCode::Char('v') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                self.ask_terminal(json!({"paste_image": true}));
+            } else if ask.key(key) {
                 self.panel = None;
             }
             return;
