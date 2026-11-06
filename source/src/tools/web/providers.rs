@@ -716,6 +716,9 @@ pub(crate) fn iso_from_ms(ms: u64) -> String {
 mod tests {
     use super::*;
 
+    /// Held by tests that set or read `<PROVIDER>_API_KEY`: a key set mid-search sends a real request.
+    static PROVIDER_KEYS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn credentials_follow_pi_syntax() {
         unsafe { std::env::set_var("WEB_TEST_KEY", "from-env") };
@@ -765,6 +768,7 @@ mod tests {
 
     #[test]
     fn auto_without_keys_names_the_missing_credentials() {
+        let _keys = PROVIDER_KEYS.lock().unwrap();
         let query = Query { text: "q", num_results: 5, recency: None, domains: &[], include_content: false, category: None };
         for provider in PROVIDERS {
             if std::env::var(env_name(provider)).is_ok() {
@@ -782,9 +786,12 @@ mod tests {
         let log = dir.join("runs");
         let settings = json!({"exaApiKey": format!("!echo run >> {}; echo k1", log.display()), "tavilyApiKey": " "});
         std::fs::write(dir.join("web-search.json"), settings.to_string()).unwrap();
+        let keys_lock = PROVIDER_KEYS.lock().unwrap();
         unsafe { std::env::set_var("TAVILY_API_KEY", "!from-env") };
         let config = load_config(&dir.join("web-search.json"), PROVIDERS.to_vec()).unwrap();
         let keys = [api_key(&config, "exa"), api_key(&config, "exa"), api_key(&config, "tavily")];
+        unsafe { std::env::remove_var("TAVILY_API_KEY") };
+        drop(keys_lock);
         let runs = std::fs::read_to_string(&log).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
         assert_eq!(keys, [Ok(Some("k1".into())), Ok(Some("k1".into())), Ok(Some("!from-env".into()))]);
