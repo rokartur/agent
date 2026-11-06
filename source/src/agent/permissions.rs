@@ -136,6 +136,11 @@ pub fn request_for(tool: &str, input: &Value, files: &[PathBuf]) -> Option<Reque
             let urls = if urls.is_empty() { input.to_string() } else { urls.join(" ") };
             Some(Request { kind: Kind::Web, question: "Would you like to fetch the following URLs?", grant: format!("web:{urls}"), detail: urls })
         }
+        // Same leak as WebFetch: the URL reaches the site that serves the video.
+        "Video" => {
+            let source = input["source"].as_str().filter(|source| crate::tools::video::is_url(source))?;
+            Some(Request { kind: Kind::Web, question: "Would you like to download the following video?", grant: format!("web:{source}"), detail: source.to_string() })
+        }
         // Fetched result pages are chosen by the search engine from a model-written query, so they can leak the same way.
         "WebSearch" if input["includeContent"] == true => {
             let queries: Vec<&str> = input["queries"].as_array().into_iter().flatten().chain([&input["query"]]).filter_map(Value::as_str).collect();
@@ -254,6 +259,13 @@ mod tests {
         let request = request_for("WebFetch", &json!({"urls": ["https://a.example/x", "https://b.example/?k=v"]}), &[]).unwrap();
         assert_eq!((request.kind, request.detail.as_str()), (Kind::Web, "https://a.example/x https://b.example/?k=v"));
         assert_eq!(request_for("WebFetch", &json!({"url": "https://a.example"}), &[]).unwrap().detail, "https://a.example");
+    }
+
+    #[test]
+    fn a_video_url_needs_permission_and_a_video_file_does_not() {
+        let request = request_for("Video", &json!({"source": "https://youtu.be/x?k=v", "frames": 4}), &[]).unwrap();
+        assert_eq!((request.kind, request.detail.as_str(), request.grant.as_str()), (Kind::Web, "https://youtu.be/x?k=v", "web:https://youtu.be/x?k=v"));
+        assert!(request_for("Video", &json!({"source": "talk.mp4"}), &[]).is_none());
     }
 
     #[test]

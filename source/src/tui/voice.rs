@@ -4,9 +4,6 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Stdio};
 use std::time::Instant;
 
-const MODEL: &str = ".agents/models/ggml-large-v3-turbo-q5_0.bin";
-const MODEL_URL: &str = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin";
-
 pub struct Recording {
     ffmpeg: Child,
     wav: PathBuf,
@@ -15,10 +12,7 @@ pub struct Recording {
 }
 
 pub fn start(home: &Path) -> Result<Recording, String> {
-    let model = home.join(MODEL);
-    if !model.exists() {
-        return Err(format!("No whisper model at {}. Download it: curl -L --create-dirs -o {} {MODEL_URL}", model.display(), model.display()));
-    }
+    let model = crate::tools::video::whisper_model(&home.join(".agents"))?;
     // Unique per recording, and created here so ffmpeg -y overwrites our own file, never a planted link.
     let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).expect("clock is after 1970").as_nanos();
     let wav = std::env::temp_dir().join(format!("agent-voice-{}-{nonce}.wav", std::process::id()));

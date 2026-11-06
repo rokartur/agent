@@ -634,5 +634,20 @@
       "required": ["responseId"],
       "additionalProperties": false
     }
+  },
+  {
+    "name": "Video",
+    "description": "Watch a video: a local file (mp4, mov, webm, mkv, an audio file too) or a URL yt-dlp downloads (YouTube and most video sites). Returns the title, description and chapters the video carries, then frames over the span as images, one per scene where it can, each after the timestamped lines spoken around it. The lines come from the creator's subtitles in the spoken language, else from whisper.cpp on this machine. Look at a long video whole first, then pass `start` and `end` to look closer at a part; a closer look reuses the transcript.",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "source": { "type": "string", "description": "File path or URL." },
+        "start": { "type": "number", "minimum": 0, "description": "Seconds, default 0." },
+        "end": { "type": "number", "minimum": 0, "description": "Seconds, default the end of the video." },
+        "frames": { "type": "integer", "minimum": 0, "maximum": 20, "description": "Default 8; 0 for the transcript only." }
+      },
+      "required": ["source"],
+      "additionalProperties": false
+    }
   }
 ]

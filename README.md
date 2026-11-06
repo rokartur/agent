@@ -46,6 +46,7 @@ Run a session on another of your computers over Tailscale: its files, its shell,
 - **Subagents**: it splits big work into parallel child agents. You tune how in a plain Markdown prompt, `.agents/swarm-prompt.md`.
 - **MCP and skills**: connect MCP servers, OAuth included. Drop in skills and see which ones you never use with `/skill-usage`.
 - **Web built in**: search through Exa, Brave, Tavily or Perplexity. Fetch pages as Markdown. Give it a GitHub URL and it clones the repo to read.
+- **It watches videos**: give it an mp4 or a YouTube link and it reads the title, description and chapters, sees a frame per scene, and reads what is said around each frame: the creator's subtitles, else a transcript made on your machine. Needs `ffmpeg`, `whisper-cpp`, the `/voice` model and the Silero VAD model (the first transcript names the download); links also need `yt-dlp`, and the last 2 GB of downloads stay in `~/.agents/cache/videos`.
 - **You choose how much it does alone**: ask before every change, let a reviewer model approve, or `--yolo`.
 - **Sessions outlive the terminal**: close it mid-turn and the turn finishes anyway. `agent attach` picks the session up again in any terminal, and two terminals on one session see the same screen.
 

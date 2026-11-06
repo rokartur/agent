@@ -14,7 +14,8 @@
     "cache_ttl": { "enum": ["5m", "1h"], "default": "5m", "description": "Anthropic prompt cache lifetime; 1h writes cost more." },
     "message_threads": { "type": "boolean", "default": true, "description": "Anthropic turns send only the new messages, and the API keeps the conversation between them (message threads beta). Off behind headroom or ANTHROPIC_BASE_URL." },
     "permission_mode": { "enum": ["ask", "auto", "full access"], "default": "ask" },
-    "reviewer_model": { "type": "string", "default": "", "description": "Model for the auto-mode reviewer; empty means the provider's small model." },
+    "reviewer_model": { "type": "string", "default": "", "description": "Model for the auto-mode reviewer; empty means small_model." },
+    "small_model": { "type": "string", "default": "", "description": "Model for small jobs: session titles, long Video descriptions and compaction, and the reviewer and condense when theirs is empty. Empty means the provider's small model (Haiku, Luna)." },
     "auto_compact": { "type": "boolean", "default": true },
     "reserve_tokens": { "type": "integer", "minimum": 4096, "default": 16384, "description": "Context tokens kept free for the answer; compaction starts before they run out." },
     "keep_recent_tokens": { "type": "integer", "minimum": 0, "default": 20000, "description": "Recent tokens compaction keeps verbatim." },
@@ -114,7 +115,7 @@
       "additionalProperties": false,
       "properties": {
         "enabled": { "type": "boolean", "default": true },
-        "model": { "type": "string", "default": "", "description": "Empty means the default summarizer for the provider." },
+        "model": { "type": "string", "default": "", "description": "Empty means small_model." },
         "min_batch_chars": { "type": "integer", "minimum": 10000, "default": 10000 }
       }
     },
