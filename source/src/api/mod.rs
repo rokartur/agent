@@ -1061,14 +1061,19 @@ fn defer_rare_tools(body: &mut Value) {
     }
     // A deferred tool cannot carry cache_control, so the breakpoint moves to the last tool still loaded.
     let cache_control = tools.last_mut().and_then(|tool| tool.as_object_mut()?.remove("cache_control"));
+    let mut deferred = Vec::new();
     for tool in tools.iter_mut().filter(|tool| !CORE_TOOLS.contains(&tool["name"].as_str().unwrap_or_default())) {
         tool["defer_loading"] = json!(true);
+        deferred.push(tool["name"].as_str().unwrap_or_default().to_string());
     }
     tools.insert(0, json!({"type": "tool_search_tool_bm25_20251119", "name": "tool_search_tool_bm25"}));
     if let Some(cache_control) = cache_control {
         let loaded = tools.iter_mut().rev().find(|tool| tool.get("defer_loading").is_none()).expect("the tool search tool is loaded");
         loaded["cache_control"] = cache_control;
     }
+    // The model sees nothing of a deferred tool, not even its name, so without this list it never searches for one.
+    let names = format!("Load these tools with tool_search_tool_bm25, searching by name, before their first call: {}.", deferred.join(", "));
+    body["system"].as_array_mut().expect("a request with tools has a system array").push(json!({"type": "text", "text": names}));
 }
 
 /// Builds a Messages request with cache breakpoints on the system prompt, the last tool, and the last message.
@@ -1512,6 +1517,8 @@ mod tests {
         for deferred in &body["tools"].as_array().unwrap()[3..] {
             assert_eq!((deferred["defer_loading"].as_bool(), deferred.get("cache_control")), (Some(true), None));
         }
+        let names_deferred = body["system"].as_array().unwrap().last().unwrap()["text"].as_str().unwrap();
+        assert!(names_deferred.ends_with(": Agent, WebSearch."), "{names_deferred}");
         let core_only = json!([{"name": "Read"}, {"name": "Grep"}]);
         let mut body = request("m", 1000, "high", "5m", "sys", "", &core_only, &[]);
         let before = body.clone();
