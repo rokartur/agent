@@ -309,8 +309,9 @@ impl Client {
     }
 
     /// Like `send`, inside `thread` when `message_threads` is on and the request goes straight to Anthropic.
-    pub fn send_in_thread(&self, request: &Value, thread: &mut MessageThread, abort: &AtomicBool, on_delta: &mut dyn FnMut(Delta)) -> Result<Reply, String> {
-        self.send_on_account(request, Some(thread), abort, on_delta, true)
+    /// `shown` false: streamed text went nowhere it cannot be taken back (stdout), so a reply cut off partway is retried.
+    pub fn send_in_thread(&self, request: &Value, thread: &mut MessageThread, abort: &AtomicBool, shown: bool, on_delta: &mut dyn FnMut(Delta)) -> Result<Reply, String> {
+        self.send_on_account(request, Some(thread), abort, on_delta, shown)
     }
 
     /// Like `send` for callers that only read the `Reply`, so a stream that breaks off partway can still be retried.
@@ -1847,15 +1848,33 @@ mod tests {
     }
 
     #[test]
+    fn a_reply_cut_off_after_its_text_streamed_is_retried_when_that_text_can_be_taken_back() {
+        let home = std::env::temp_dir().join(format!("agent-cut-retry-{}", std::process::id()));
+        let started = [
+            json!({"type": "message_start", "message": {"id": "msg_1", "usage": {}}}),
+            json!({"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}),
+            json!({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "Hel"}}),
+        ];
+        let cut: String = started.iter().map(|event| format!("data: {event}\n\n")).collect();
+        let (client, requests) = threaded_client(&home, &[(200, &cut), (200, &ended_turn("msg_2"))]);
+
+        let sent = client.send_in_thread(&turn(&[user("hi")]), &mut MessageThread::default(), &AtomicBool::new(false), false, &mut |_| {});
+        std::fs::remove_dir_all(&home).ok();
+
+        assert_eq!(sent.unwrap().id, "msg_2");
+        assert_eq!(requests.try_iter().count(), 2);
+    }
+
+    #[test]
     fn a_turn_in_a_thread_sends_only_the_messages_after_the_last_reply() {
         let home = std::env::temp_dir().join(format!("agent-thread-continue-{}", std::process::id()));
         let (client, requests) = threaded_client(&home, &[(200, &ended_turn("msg_1")), (200, &ended_turn("msg_2"))]);
         let mut thread = MessageThread::default();
 
         let mut history = vec![user("ls")];
-        let first = client.send_in_thread(&turn(&history), &mut thread, &AtomicBool::new(false), &mut |_| {}).unwrap();
+        let first = client.send_in_thread(&turn(&history), &mut thread, &AtomicBool::new(false), true, &mut |_| {}).unwrap();
         history.extend([first.message, user("and pwd")]);
-        let second = client.send_in_thread(&turn(&history), &mut thread, &AtomicBool::new(false), &mut |_| {});
+        let second = client.send_in_thread(&turn(&history), &mut thread, &AtomicBool::new(false), true, &mut |_| {});
         std::fs::remove_dir_all(&home).ok();
 
         assert!(second.is_ok(), "{:?}", second.err());
@@ -1880,9 +1899,9 @@ mod tests {
         let mut thread = MessageThread::default();
 
         let mut history = vec![user("ls")];
-        let first = client.send_in_thread(&turn(&history), &mut thread, &AtomicBool::new(false), &mut |_| {}).unwrap();
+        let first = client.send_in_thread(&turn(&history), &mut thread, &AtomicBool::new(false), true, &mut |_| {}).unwrap();
         history.extend([first.message, user("and pwd")]);
-        let second = client.send_in_thread(&turn(&history), &mut thread, &AtomicBool::new(false), &mut |_| {});
+        let second = client.send_in_thread(&turn(&history), &mut thread, &AtomicBool::new(false), true, &mut |_| {});
         std::fs::remove_dir_all(&home).ok();
 
         assert!(second.is_ok(), "{:?}", second.err());
@@ -1933,10 +1952,10 @@ mod tests {
 
         let mut history = vec![user("ls")];
         for text in ["and pwd", "and date", "and whoami"] {
-            let reply = client.send_in_thread(&turn(&history), &mut thread, &AtomicBool::new(false), &mut |_| {}).unwrap();
+            let reply = client.send_in_thread(&turn(&history), &mut thread, &AtomicBool::new(false), true, &mut |_| {}).unwrap();
             history.extend([reply.message, user(text)]);
         }
-        let last = client.send_in_thread(&turn(&history), &mut thread, &AtomicBool::new(false), &mut |_| {});
+        let last = client.send_in_thread(&turn(&history), &mut thread, &AtomicBool::new(false), true, &mut |_| {});
         std::fs::remove_dir_all(&home).ok();
 
         assert!(last.is_ok(), "{:?}", last.err());
@@ -1958,9 +1977,9 @@ mod tests {
         let mut thread = MessageThread::default();
 
         let mut history = vec![user("ls")];
-        let first = client.send_in_thread(&turn(&history), &mut thread, &AtomicBool::new(false), &mut |_| {}).unwrap();
+        let first = client.send_in_thread(&turn(&history), &mut thread, &AtomicBool::new(false), true, &mut |_| {}).unwrap();
         history.extend([first.message, user("and pwd")]);
-        let second = client.send_in_thread(&turn(&history), &mut thread, &AtomicBool::new(false), &mut |_| {});
+        let second = client.send_in_thread(&turn(&history), &mut thread, &AtomicBool::new(false), true, &mut |_| {});
         std::fs::remove_dir_all(&home).ok();
 
         assert!(second.is_ok(), "{:?}", second.err());
@@ -1977,9 +1996,9 @@ mod tests {
         let mut thread = MessageThread::default();
 
         let mut history = vec![user("ls")];
-        let first = client.send_in_thread(&turn(&history), &mut thread, &AtomicBool::new(false), &mut |_| {}).unwrap();
+        let first = client.send_in_thread(&turn(&history), &mut thread, &AtomicBool::new(false), true, &mut |_| {}).unwrap();
         history.extend([first.message, user("and pwd")]);
-        let second = client.send_in_thread(&turn(&history), &mut thread, &AtomicBool::new(false), &mut |_| {});
+        let second = client.send_in_thread(&turn(&history), &mut thread, &AtomicBool::new(false), true, &mut |_| {});
         std::fs::remove_dir_all(&home).ok();
 
         assert!(second.is_ok(), "{:?}", second.err());
@@ -1996,12 +2015,12 @@ mod tests {
         let mut thread = MessageThread::default();
 
         let mut history = vec![user("ls")];
-        let first = client.send_in_thread(&turn(&history), &mut thread, &AtomicBool::new(false), &mut |_| {}).unwrap();
+        let first = client.send_in_thread(&turn(&history), &mut thread, &AtomicBool::new(false), true, &mut |_| {}).unwrap();
         history.extend([first.message, user("and pwd")]);
-        client.send_in_thread(&turn(&history), &mut thread, &AtomicBool::new(false), &mut |_| {}).unwrap();
+        client.send_in_thread(&turn(&history), &mut thread, &AtomicBool::new(false), true, &mut |_| {}).unwrap();
         let mut other_model = turn(&history);
         other_model["model"] = json!("other");
-        client.send_in_thread(&other_model, &mut thread, &AtomicBool::new(false), &mut |_| {}).unwrap();
+        client.send_in_thread(&other_model, &mut thread, &AtomicBool::new(false), true, &mut |_| {}).unwrap();
         std::fs::remove_dir_all(&home).ok();
 
         let threads: Vec<Value> = requests.try_iter().map(|request| request["thread"].clone()).collect();
@@ -2015,8 +2034,8 @@ mod tests {
         let mut thread = MessageThread::default();
 
         let history = vec![user("ls")];
-        let refused = client.send_in_thread(&turn(&history), &mut thread, &AtomicBool::new(false), &mut |_| {});
-        let retried = client.send_in_thread(&turn(&history), &mut thread, &AtomicBool::new(false), &mut |_| {});
+        let refused = client.send_in_thread(&turn(&history), &mut thread, &AtomicBool::new(false), true, &mut |_| {});
+        let retried = client.send_in_thread(&turn(&history), &mut thread, &AtomicBool::new(false), true, &mut |_| {});
         std::fs::remove_dir_all(&home).ok();
 
         assert!(refused.is_err() && retried.is_ok());

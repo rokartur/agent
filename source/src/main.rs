@@ -715,6 +715,7 @@ const PRINT_BACKGROUND_CEILING: std::time::Duration = std::time::Duration::from_
 
 /// Non-interactive run: streams text to stdout (or nothing with --json) and progress to stderr.
 fn print_mode(agent: &mut Agent, prompt: &str, json: bool) -> Result<(), String> {
+    agent.text_to_stdout = !json;
     let mut on_event = |event| match event {
         Event::Text(text) if !json => {
             print!("{}", terminal_safe(&text));

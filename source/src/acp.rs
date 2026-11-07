@@ -36,6 +36,7 @@ const REQUEST_CANCELLED: i64 = -32800;
 pub const MCP_WAIT: Duration = Duration::from_secs(5);
 
 pub fn serve(agent: &mut Agent) -> Result<(), String> {
+    agent.text_to_stdout = true;
     let cancelled = Arc::new(AtomicBool::new(false));
     let (requests, replies) = read_stdin(agent.abort.clone(), cancelled.clone(), agent.permission_mode.clone());
     let replies = Arc::new(Mutex::new(replies));

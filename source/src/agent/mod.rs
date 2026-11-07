@@ -193,6 +193,8 @@ pub struct Agent {
     pub client: Client,
     pub model: String,
     pub effort: String,
+    /// Streamed text goes to stdout (--print, ACP), where a retried reply would print twice, so a cut-off reply fails instead.
+    pub text_to_stdout: bool,
     pub system: String,
     /// The ponytail and caveman section, sent after `system` and rebuilt when /settings changes them.
     pub modes: String,
@@ -415,6 +417,7 @@ impl Agent {
         let agent_dir = home.join(".agents");
         Agent {
             client,
+            text_to_stdout: false,
             system: prompt::system_prompt(&agent_dir, &cwd, settings.trusts(&cwd), |skill| settings.skill_enabled(skill), settings.prefer_global()),
             trusted_projects: settings.trusted_projects.clone(),
             modes: modes::prompt(&home, &settings.ponytail, &settings.caveman),
@@ -609,7 +612,7 @@ impl Agent {
             if self.speed != "standard" {
                 request["speed"] = json!(self.speed);
             }
-            let mut reply = self.client.send_in_thread(&request, &mut self.message_thread, &self.abort, &mut |delta| match delta {
+            let mut reply = self.client.send_in_thread(&request, &mut self.message_thread, &self.abort, self.text_to_stdout, &mut |delta| match delta {
                 Delta::Text(text) => emit(Event::Text(text.to_string())),
                 Delta::Thinking(text) => emit(Event::Thinking(text.to_string())),
                 Delta::Notice(text) => emit(Event::Notice(text.to_string())),
