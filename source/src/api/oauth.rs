@@ -191,9 +191,16 @@ pub fn open_browser(url: &str) {
     if !(url.starts_with("https://") || url.starts_with("http://")) {
         return;
     }
-    let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
+    let (opener, args): (&str, &[&str]) = if cfg!(target_os = "macos") {
+        ("open", &[])
+    } else if cfg!(windows) {
+        // Not `cmd /c start`: cmd would read the `&` between query parameters as a command separator.
+        ("rundll32", &["url.dll,FileProtocolHandler"])
+    } else {
+        ("xdg-open", &[])
+    };
     // Reaped on a thread, not waited for: xdg-open runs a browser without a desktop handler in the foreground.
-    if let Ok(mut child) = crate::process::command(opener).arg(url).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn() {
+    if let Ok(mut child) = crate::process::command(opener).args(args).arg(url).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn() {
         std::thread::spawn(move || child.wait());
     }
 }

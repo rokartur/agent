@@ -184,13 +184,25 @@ fn sniffed_media_type(bytes: &[u8]) -> Option<&'static str> {
 
 const CLIPBOARD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// Reads the clipboard image into an API image block: `osascript` on macOS, `wl-paste` on Wayland, `xclip` on X11.
+/// GDI+ cannot write a PNG to the unseekable stdout, so the image goes through a memory stream; exit 1 means no image.
+const WINDOWS_CLIPBOARD_PNG: &str = "Add-Type -AssemblyName System.Windows.Forms, System.Drawing; \
+    $image = [Windows.Forms.Clipboard]::GetImage(); if (-not $image) { exit 1 }; \
+    $png = New-Object IO.MemoryStream; $image.Save($png, [Drawing.Imaging.ImageFormat]::Png); \
+    $out = [Console]::OpenStandardOutput(); $png.WriteTo($out); $out.Flush()";
+
+/// Reads the clipboard image into an API image block: `osascript` on macOS, PowerShell on Windows, `wl-paste` on Wayland,
+/// `xclip` on X11.
 pub fn from_clipboard() -> Result<Value, String> {
     if cfg!(target_os = "macos") {
         return from_macos_clipboard();
     }
-    let (program, args): (&str, &[&str]) =
-        if std::env::var_os("WAYLAND_DISPLAY").is_some() { ("wl-paste", &["--type", "image/png"]) } else { ("xclip", &["-selection", "clipboard", "-target", "image/png", "-out"]) };
+    let (program, args): (&str, &[&str]) = if cfg!(windows) {
+        ("powershell", &["-NoProfile", "-NonInteractive", "-STA", "-Command", WINDOWS_CLIPBOARD_PNG])
+    } else if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+        ("wl-paste", &["--type", "image/png"])
+    } else {
+        ("xclip", &["-selection", "clipboard", "-target", "image/png", "-out"])
+    };
     // Runs on the UI thread; a clipboard owner that never answers would freeze the TUI.
     let output = crate::process::output_within(crate::process::command(program).args(args), CLIPBOARD_TIMEOUT).map_err(|e| format!("Cannot run {program}: {e}"))?.ok_or("Clipboard read timed out.")?;
     if !output.status.success() || sniffed_media_type(&output.stdout).is_none() {

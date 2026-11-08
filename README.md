@@ -24,7 +24,7 @@ Type `/login` and pick Claude, ChatGPT or GitHub Copilot. You already pay for on
 
 macOS and Linux. Updates itself. `agent --help` for the rest.
 
-Windows 10 1803 or later: download `agent-windows-x86_64.exe` from the [latest release](https://github.com/rokartur/agent/releases/latest) and install [Git for Windows](https://git-scm.com/download/win), whose bash runs the shell tools. `agent service` is macOS and Linux only; run `agent serve --tailnet` instead.
+Windows 10 1803 or later: download `agent-windows-x86_64.exe` from the [latest release](https://github.com/rokartur/agent/releases/latest) and install [Git for Windows](https://git-scm.com/download/win), whose bash runs the shell tools. `agent service` is macOS and Linux only; run `agent serve --tailnet` instead. The Windows console reports a paste as typed keys, so each line of pasted text sends on its own; paste one line at a time.
 
 ## Switch computers with /env
 

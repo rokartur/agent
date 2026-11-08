@@ -198,6 +198,9 @@ pub fn ctrl_c_within(wait: Duration) -> bool {
 fn copy_to_clipboard(text: &str) -> Result<(), String> {
     let (program, args): (&str, &[&str]) = if cfg!(target_os = "macos") {
         ("pbcopy", &[])
+    } else if cfg!(windows) {
+        // Not clip.exe: it reads stdin in the console code page and mangles anything past ASCII.
+        ("powershell", &["-NoProfile", "-NonInteractive", "-Command", "[Console]::InputEncoding = [Text.UTF8Encoding]::new($false); Set-Clipboard -Value ([Console]::In.ReadToEnd())"])
     } else if std::env::var_os("WAYLAND_DISPLAY").is_some() {
         ("wl-copy", &[])
     } else {
@@ -221,9 +224,11 @@ fn open_in_browser(url: &str) -> Result<(), String> {
         return Err(format!("Not a web link: {url}"));
     }
     if !cfg!(target_os = "macos") {
+        // Not `cmd /c start`: cmd would read the `&` between query parameters as a command separator.
+        let (program, args): (&str, &[&str]) = if cfg!(windows) { ("rundll32", &["url.dll,FileProtocolHandler"]) } else { ("xdg-open", &[]) };
         // Reaped on a thread: xdg-open runs a browser without a desktop handler in the foreground.
         let mut child =
-            crate::process::command("xdg-open").arg(url).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().map_err(|e| format!("Cannot run xdg-open: {e}"))?;
+            crate::process::command(program).args(args).arg(url).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().map_err(|e| format!("Cannot run {program}: {e}"))?;
         std::thread::spawn(move || child.wait());
         return Ok(());
     }
@@ -270,6 +275,21 @@ mod tests {
         assert!(dropped["image"]["data"].as_str().is_some_and(|data| !data.is_empty()), "{dropped}");
         assert!(input_message(&event::Event::Paste("just text".into())).unwrap().get("image").is_none());
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// One test for both: the clipboard is shared and tests run in parallel.
+    #[cfg(windows)]
+    #[test]
+    fn the_windows_clipboard_takes_text_past_ascii_and_gives_an_image() {
+        let powershell = |script: &str| crate::process::command("powershell").args(["-NoProfile", "-STA", "-Command", script]).output().unwrap();
+        assert_eq!(serve_request(&json!({"copy": "zażółć 🦀"})), Some(json!({"copied": true})));
+        let read = powershell("[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false); Get-Clipboard -Raw");
+        assert_eq!(String::from_utf8(read.stdout).unwrap().trim_end(), "zażółć 🦀");
+
+        let put = powershell("Add-Type -AssemblyName System.Windows.Forms, System.Drawing; [Windows.Forms.Clipboard]::SetImage((New-Object Drawing.Bitmap 3, 2))");
+        assert!(put.status.success(), "{}", String::from_utf8_lossy(&put.stderr));
+        let pasted = serve_request(&json!({"paste_image": true})).unwrap();
+        assert!(pasted["image"]["data"].as_str().is_some_and(|data| !data.is_empty()), "{pasted}");
     }
 
     #[test]
