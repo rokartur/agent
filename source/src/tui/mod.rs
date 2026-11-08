@@ -19,8 +19,10 @@ pub use wire::{PROTOCOL, Place, SILENCE};
 
 use crossterm::event::{
     DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste, EnableFocusChange, EnableMouseCapture, Event as Input, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
-    KeyboardEnhancementFlags, MouseButton, MouseEvent, MouseEventKind, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    MouseButton, MouseEvent, MouseEventKind,
 };
+#[cfg(unix)]
+use crossterm::event::{KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags};
 use crossterm::execute;
 use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
 use serde_json::{Value, json};
@@ -871,11 +873,17 @@ fn enter(out: &mut Stdout) -> std::io::Result<()> {
     unsafe {
         libc::tcflush(libc::STDIN_FILENO, libc::TCIFLUSH)
     };
-    execute!(out, EnterAlternateScreen, EnableBracketedPaste, EnableMouseCapture, EnableFocusChange, PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES))
+    execute!(out, EnterAlternateScreen, EnableBracketedPaste, EnableMouseCapture, EnableFocusChange)?;
+    // crossterm 0.29 answers Unsupported on Windows, whose console API reports keys without escape codes anyway.
+    #[cfg(unix)]
+    execute!(out, PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES))?;
+    Ok(())
 }
 
 pub(crate) fn leave(out: &mut Stdout) {
-    let _ = execute!(out, PopKeyboardEnhancementFlags, DisableMouseCapture, DisableFocusChange, DisableBracketedPaste, LeaveAlternateScreen);
+    #[cfg(unix)]
+    let _ = execute!(out, PopKeyboardEnhancementFlags);
+    let _ = execute!(out, DisableMouseCapture, DisableFocusChange, DisableBracketedPaste, LeaveAlternateScreen);
     let _ = terminal::disable_raw_mode();
 }
 
