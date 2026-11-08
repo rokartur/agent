@@ -218,6 +218,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn replace_puts_the_new_binary_in_place_and_clears_older_leftovers() {
+        let dir = std::env::temp_dir().join(format!("agent-replace-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (exe, staged, leftover) = (dir.join("agent.exe"), dir.join(".agent-update-1.exe"), dir.join(".agent-old-1.exe"));
+        std::fs::write(&exe, "old").unwrap();
+        std::fs::write(&staged, "new").unwrap();
+        std::fs::write(&leftover, "older").unwrap();
+
+        replace(&staged, &exe).unwrap();
+
+        let installed = std::fs::read_to_string(&exe).unwrap();
+        let mut left: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|entry| entry.unwrap().file_name().into_string().unwrap()).collect();
+        left.sort();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(installed, "new");
+        let aside = format!(".agent-old-{}.exe", std::process::id());
+        let expected = if cfg!(windows) { vec![aside.as_str(), "agent.exe"] } else { vec![".agent-old-1.exe", "agent.exe"] };
+        assert_eq!(left, expected);
+    }
+
+    #[test]
     fn only_a_higher_release_counts_as_newer() {
         assert!(is_newer("0.2.0", "0.1.9"));
         assert!(is_newer("0.10.0", "0.9.0"));
