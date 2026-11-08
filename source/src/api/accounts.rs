@@ -189,6 +189,11 @@ fn parse_codex_usage(data: &Value) -> Option<Usage> {
     Some(Usage { five_hour: Some(five_hour), seven_day, resets_at: if five_hour >= seven_day { five_reset } else { seven_reset }, models: Vec::new() })
 }
 
+/// Whether `fetch_usage` knows the account's provider; Copilot subscriptions have no usage endpoint.
+pub fn has_usage(account: &Account) -> bool {
+    account.is_oauth() && matches!(account.provider.as_str(), "anthropic" | "openai-codex" | super::google::GEMINI_CLI | super::google::ANTIGRAVITY)
+}
+
 /// Fetches an OAuth account's windows; `base` is the provider's API root.
 pub fn fetch_usage(account: &Account, base: &str) -> Result<Usage, String> {
     let Secret::OAuth(tokens) = &account.secret else { return Err("API keys have no usage windows.".into()) };

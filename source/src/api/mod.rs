@@ -55,6 +55,10 @@ pub struct Client {
 struct State {
     accounts: Vec<Account>,
     usage: HashMap<String, (Instant, Option<Windows>)>,
+    /// Why the last usage fetch failed, until one succeeds.
+    usage_errors: HashMap<String, String>,
+    /// The outcome of the last /account check, kept until the next one.
+    checks: HashMap<String, AccountStatus>,
     limited: HashMap<String, Instant>,
     pinned: HashMap<String, String>,
     current: HashMap<String, String>,
@@ -136,6 +140,17 @@ pub struct AccountView {
     pub usage: Option<Windows>,
     pub current: bool,
     pub pinned: bool,
+    pub status: AccountStatus,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum AccountStatus {
+    Unchecked,
+    Checking,
+    Working,
+    /// A recent 429 or failed token refresh moved requests off it for a while.
+    Limited,
+    Failed(String),
 }
 
 enum Choice {
@@ -483,7 +498,7 @@ impl Client {
         let stale: Vec<&Account> = accounts
             .iter()
             .filter(|account| {
-                if !account.is_oauth() {
+                if !accounts::has_usage(account) {
                     return false;
                 }
                 let mut state = self.state.lock().unwrap();
@@ -506,8 +521,13 @@ impl Client {
             let (client, account) = (self.clone(), account.clone());
             std::thread::spawn(move || {
                 let base = if account.provider == "anthropic" { &client.anthropic_base } else { &client.chatgpt_base };
-                let usage = client.fresh(account.clone()).ok().and_then(|fresh| accounts::fetch_usage(&fresh, base).ok());
-                client.state.lock().unwrap().usage.insert(key(&account), (Instant::now(), usage));
+                let fetched = client.fresh(account.clone()).and_then(|fresh| accounts::fetch_usage(&fresh, base));
+                let mut state = client.state.lock().unwrap();
+                match &fetched {
+                    Ok(_) => state.usage_errors.remove(&key(&account)),
+                    Err(error) => state.usage_errors.insert(key(&account), error.clone()),
+                };
+                state.usage.insert(key(&account), (Instant::now(), fetched.ok()));
             });
         }
     }
@@ -761,6 +781,7 @@ impl Client {
     /// Subscriptions, then API keys, by provider order, each provider's accounts in the priority order failover tries them.
     pub fn accounts(&self) -> Vec<AccountView> {
         let state = self.state.lock().unwrap();
+        let now = Instant::now();
         let mut views: Vec<AccountView> = state
             .accounts
             .iter()
@@ -772,6 +793,7 @@ impl Client {
                 usage: state.usage.get(&key(a)).and_then(|(_, u)| u.clone()),
                 current: state.current.get(&a.provider) == Some(&a.name),
                 pinned: state.pinned.get(&a.provider) == Some(&a.name),
+                status: status(&state, a, now),
             })
             .collect();
         let rank = |provider: &str| state.provider_order.iter().position(|listed| *listed == provider).unwrap_or(usize::MAX);
@@ -793,7 +815,11 @@ impl Client {
             list.push(account);
             Ok(())
         })?;
-        self.state.lock().unwrap().usage.remove(&usage_key);
+        let mut state = self.state.lock().unwrap();
+        state.usage.remove(&usage_key);
+        state.usage_errors.remove(&usage_key);
+        state.checks.remove(&usage_key);
+        drop(state);
         self.reload(saved);
         Ok(())
     }
@@ -858,6 +884,29 @@ impl Client {
         accounts.iter().map(|a| self.check(a).map(|line| format!("OK   {} {line}", key(a))).map_err(|error| format!("FAIL {} {error}", key(a)))).collect()
     }
 
+    /// Runs `doctor`'s check on every account, each on its own thread, as their /account status; `on_done` runs after each.
+    pub fn check_accounts(&self, on_done: impl Fn() + Clone + Send + 'static) {
+        let accounts = self.state.lock().unwrap().accounts.clone();
+        for account in accounts {
+            self.state.lock().unwrap().checks.insert(key(&account), AccountStatus::Checking);
+            let (client, on_done) = (self.clone(), on_done.clone());
+            std::thread::spawn(move || {
+                let status = match client.check(&account) {
+                    Ok(_) => AccountStatus::Working,
+                    Err(error) => AccountStatus::Failed(error),
+                };
+                let mut state = client.state.lock().unwrap();
+                // A ping that went through outweighs an older 429.
+                if status == AccountStatus::Working {
+                    state.limited.remove(&key(&account));
+                }
+                state.checks.insert(key(&account), status);
+                drop(state);
+                on_done();
+            });
+        }
+    }
+
     /// Refreshes an expired token, lists models and sends a one-token ping on the cheapest one.
     fn check(&self, account: &Account) -> Result<String, String> {
         let account = self.fresh(account.clone())?;
@@ -900,6 +949,28 @@ impl Client {
 fn moved_to(request: &mut Value, model: &Model) {
     request["model"] = json!(model.id);
     request["max_tokens"] = json!(request["max_tokens"].as_u64().unwrap_or(model.max_tokens).min(model.max_tokens));
+}
+
+/// A running check first, then a rate limit, the last check, the last usage fetch.
+fn status(state: &State, account: &Account, now: Instant) -> AccountStatus {
+    let key = key(account);
+    let check = state.checks.get(&key);
+    if check == Some(&AccountStatus::Checking) {
+        return AccountStatus::Checking;
+    }
+    if state.limited.get(&key).is_some_and(|until| *until > now) {
+        return AccountStatus::Limited;
+    }
+    if let Some(check) = check {
+        return check.clone();
+    }
+    if let Some(error) = state.usage_errors.get(&key) {
+        return AccountStatus::Failed(error.clone());
+    }
+    match state.usage.get(&key) {
+        Some((_, Some(_))) => AccountStatus::Working,
+        _ => AccountStatus::Unchecked,
+    }
 }
 
 fn key(account: &Account) -> String {
@@ -1648,6 +1719,22 @@ mod tests {
 
         assert!(matches!(&ok[..], [Ok(line)] if line.contains("anthropic/work")), "{ok:?}");
         assert!(matches!(&rejected[..], [Err(line)] if line.contains("anthropic/work") && line.contains("401") && line.contains("invalid x-api-key")), "{rejected:?}");
+    }
+
+    #[test]
+    fn account_status_puts_a_running_check_over_a_rate_limit_over_the_last_result() {
+        let account = Account { provider: "anthropic".into(), name: "work".into(), secret: Secret::ApiKey("sk".into()) };
+        let now = Instant::now();
+        let mut state = State::default();
+        assert_eq!(status(&state, &account, now), AccountStatus::Unchecked);
+        state.usage_errors.insert(key(&account), "Usage request failed (401).".into());
+        assert_eq!(status(&state, &account, now), AccountStatus::Failed("Usage request failed (401).".into()));
+        state.checks.insert(key(&account), AccountStatus::Working);
+        assert_eq!(status(&state, &account, now), AccountStatus::Working);
+        state.limited.insert(key(&account), now + LIMITED_FOR);
+        assert_eq!(status(&state, &account, now), AccountStatus::Limited);
+        state.checks.insert(key(&account), AccountStatus::Checking);
+        assert_eq!(status(&state, &account, now), AccountStatus::Checking);
     }
 
     #[test]
