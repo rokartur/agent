@@ -371,6 +371,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn a_fresh_token_is_used_without_refreshing() {
         let home = std::env::temp_dir().join(format!("agent-mcp-auth-{}", std::process::id()));
         let mut store = Map::new();

@@ -227,7 +227,7 @@ fn resolve_credential(raw: &str, provider: &str) -> Result<String, String> {
     }
     if let Some(command) = raw.strip_prefix('!') {
         // From `/`, so a relative command never runs out of the project the agent was opened in.
-        let mut shell = crate::process::command("sh");
+        let mut shell = crate::process::command(crate::process::shell("sh")?);
         shell.arg("-c").arg(command).current_dir("/");
         let output = crate::process::output_within(&mut shell, CREDENTIAL_TIMEOUT)
             .map_err(|e| format!("{provider} credential command failed: {e}"))?

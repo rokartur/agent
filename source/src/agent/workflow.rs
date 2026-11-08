@@ -967,6 +967,7 @@ return { audits, prefix: args.prefix, clock }"#;
     }
 
     #[test]
+    #[cfg(unix)]
     fn saving_refuses_names_that_leave_the_directory_and_symlinked_project_dirs() {
         let root = temp_dir("save");
         let personal = root.join("personal");

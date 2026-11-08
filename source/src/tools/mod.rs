@@ -2,8 +2,6 @@ use serde_json::Value;
 use std::collections::BTreeSet;
 use std::fs::File;
 use std::io::{Read, Write};
-use std::os::unix::fs::OpenOptionsExt;
-use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -150,7 +148,7 @@ fn bash(input: &Value, cwd: &Path, rtk: &Rtk, abort: &AtomicBool, terminal: Opti
             (code, killed)
         }
         None => {
-            let child = process::command("bash").arg("-c").arg(script).current_dir(cwd).stdout(Stdio::piped()).spawn().map_err(|e| format!("Cannot start bash: {e}"))?;
+            let child = process::command(process::shell("bash")?).arg("-c").arg(script).current_dir(cwd).stdout(Stdio::piped()).spawn().map_err(|e| format!("Cannot start bash: {e}"))?;
             let (status, killed) = wait_streaming(child, abort, deadline, |chunk| capture.push(chunk))?;
             (exit_code(status), killed)
         }
@@ -168,7 +166,7 @@ fn bash(input: &Value, cwd: &Path, rtk: &Rtk, abort: &AtomicBool, terminal: Opti
 }
 
 fn exit_code(status: ExitStatus) -> i32 {
-    status.code().unwrap_or_else(|| 128 + status.signal().expect("no exit code means a signal ended it"))
+    status.code().unwrap_or_else(|| 128 + process::signal_of(status).expect("no exit code means a signal ended it"))
 }
 
 /// How long output may keep arriving after the command exits, so `server &` cannot hold the call.
@@ -556,7 +554,7 @@ fn private_file(stem: &str, extension: &str) -> Result<(File, PathBuf), String> 
     let dir = spill_dir();
     crate::process::private_dir(&dir)?;
     let path = dir.join(format!("{stem}-{}.{extension}", CREATED.fetch_add(1, Ordering::Relaxed)));
-    let file = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path).map_err(|e| format!("Cannot create {}: {e}", path.display()))?;
+    let file = crate::process::private_file().write(true).create_new(true).open(&path).map_err(|e| format!("Cannot create {}: {e}", path.display()))?;
     Ok((file, path))
 }
 
@@ -700,6 +698,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn spills_get_their_own_owner_only_files() {
         use std::os::unix::fs::PermissionsExt;
         let (first, second) = (spill("one", "test"), spill("two", "test"));
@@ -820,6 +819,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn write_refuses_to_replace_a_file_it_cannot_read() {
         use std::os::unix::fs::PermissionsExt;
         let dir = std::env::temp_dir().join(format!("agent-write-unreadable-{}", std::process::id()));

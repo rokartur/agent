@@ -1,7 +1,6 @@
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::io::Write;
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -593,7 +592,7 @@ pub(super) fn replace_file(path: &Path, new: &[u8]) -> Result<(), String> {
     let name = path.file_name().expect("a canonical file path has a name").to_string_lossy();
     let temp = path.with_file_name(format!(".{name}.{}.tmp", crate::api::oauth::random_hex(4)));
     let write = || -> std::io::Result<()> {
-        let mut file = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&temp)?;
+        let mut file = crate::process::private_file().write(true).create_new(true).open(&temp)?;
         file.set_permissions(std::fs::metadata(&path)?.permissions())?;
         file.write_all(new)?;
         file.sync_all()?;
@@ -658,6 +657,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn replacing_a_file_keeps_its_mode_and_writes_through_a_symlink() {
         use std::os::unix::fs::PermissionsExt;
         let target = temp_file("replace-file", "old");

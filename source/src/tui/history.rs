@@ -1,6 +1,4 @@
-use std::fs::OpenOptions;
 use std::io::Write;
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 /// The file outgrows this many prompts, then drops to `KEEP`; trimming on every append would rewrite it each prompt.
@@ -57,13 +55,13 @@ pub fn append(agent_dir: &Path, entry: Entry) -> Result<(), String> {
         let kept: String = entries[entries.len() - KEEP..].iter().map(line).collect();
         // A crash or full disk mid-write must not truncate the history, so write a copy and rename it over.
         let temporary = path.with_extension(format!("jsonl.{}.tmp", std::process::id()));
-        let mut file = OpenOptions::new().create(true).write(true).truncate(true).mode(0o600).open(&temporary).map_err(|e| format!("Cannot open {}: {e}", temporary.display()))?;
+        let mut file = crate::process::private_file().create(true).write(true).truncate(true).open(&temporary).map_err(|e| format!("Cannot open {}: {e}", temporary.display()))?;
         file.write_all(kept.as_bytes()).map_err(|e| format!("Cannot write {}: {e}", temporary.display()))?;
         return std::fs::rename(&temporary, &path).map_err(|e| format!("Cannot replace {}: {e}", path.display()));
     }
-    let mut file = OpenOptions::new().create(true).append(true).mode(0o600).open(&path).map_err(|e| format!("Cannot open {}: {e}", path.display()))?;
+    let mut file = crate::process::private_file().create(true).append(true).open(&path).map_err(|e| format!("Cannot open {}: {e}", path.display()))?;
     // `mode` applies only on create; a file from an older build may still be 0644, and prompts hold pasted tokens.
-    file.set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o600)).map_err(|e| format!("Cannot restrict {}: {e}", path.display()))?;
+    crate::process::make_private(&path).map_err(|e| format!("Cannot restrict {}: {e}", path.display()))?;
     file.write_all(line(&entries[entries.len() - 1]).as_bytes()).map_err(|e| format!("Cannot write {}: {e}", path.display()))
 }
 
@@ -102,10 +100,13 @@ mod tests {
         assert_eq!(load(&dir).len(), LIMIT);
         append(&dir, entry("one more")).unwrap();
         let prompts = prompts(&dir);
+        #[cfg(unix)]
         let mode = std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(dir.join("history.jsonl")).unwrap().permissions());
         let files = std::fs::read_dir(&dir).unwrap().count();
         std::fs::remove_dir_all(&dir).unwrap();
-        assert_eq!((mode & 0o777, files), (0o600, 1), "the trimmed file stays private and no copy is left behind");
+        #[cfg(unix)]
+        assert_eq!(mode & 0o777, 0o600, "the trimmed file stays private");
+        assert_eq!(files, 1, "no copy is left behind");
         assert_eq!(prompts.len(), KEEP);
         assert_eq!(prompts.last().unwrap(), "one more");
     }
@@ -118,7 +119,9 @@ mod tests {
         append(&dir, Entry { prompt: "elsewhere".into(), cwd: "/other".into(), session: "s1".into() }).unwrap();
         append(&dir, Entry { prompt: "other session".into(), cwd: "/repo".into(), session: "s2".into() }).unwrap();
         let entries = load(&dir);
+        #[cfg(unix)]
         let mode = std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(dir.join("history.jsonl")).unwrap().permissions());
+        #[cfg(unix)]
         assert_eq!(mode & 0o777, 0o600, "a file from an older build becomes private on the next append");
         std::fs::remove_dir_all(&dir).unwrap();
 

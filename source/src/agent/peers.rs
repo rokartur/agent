@@ -3,12 +3,12 @@
 
 use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Read, Write};
-use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use super::FollowUp;
+use crate::local_socket::{self, Stream};
 
 /// About a million characters, the most one message carries.
 const MAX_MESSAGE_CHARS: usize = 1_000_000;
@@ -54,7 +54,7 @@ pub fn open(home: &Path, follow_ups: &Arc<Mutex<Vec<FollowUp>>>) -> Result<Inbox
     let pid = std::process::id();
     let socket = dir.join(format!("{pid}.sock"));
     let _ = std::fs::remove_file(&socket);
-    let listener = UnixListener::bind(&socket).map_err(|e| format!("Cannot listen on {}: {e}", socket.display()))?;
+    let listener = local_socket::bind(&socket).map_err(|e| format!("Cannot listen on {}: {e}", socket.display()))?;
     let inbox = Inbox { dir, pid, subscribers: Arc::default() };
     let (follow_ups, subscribers) = (follow_ups.clone(), inbox.subscribers.clone());
     std::thread::spawn(move || {
@@ -66,7 +66,7 @@ pub fn open(home: &Path, follow_ups: &Arc<Mutex<Vec<FollowUp>>>) -> Result<Inbox
     Ok(inbox)
 }
 
-fn receive(stream: &UnixStream, follow_ups: &Mutex<Vec<FollowUp>>, subscribers: &Mutex<Vec<String>>) -> Result<String, String> {
+fn receive(stream: &Stream, follow_ups: &Mutex<Vec<FollowUp>>, subscribers: &Mutex<Vec<String>>) -> Result<String, String> {
     stream.set_read_timeout(Some(Duration::from_secs(5))).map_err(|e| e.to_string())?;
     let mut line = String::new();
     BufReader::new(Read::take(stream, MAX_MESSAGE_CHARS as u64 * 4 + 4096)).read_line(&mut line).map_err(|e| format!("Cannot read the message: {e}"))?;
@@ -181,7 +181,7 @@ pub fn send(peer: &Peer, from: &str, from_cwd: &Path, text: &str, notify_when_id
 }
 
 fn deliver(socket: &Path, message: &Value) -> Result<Value, String> {
-    let mut stream = UnixStream::connect(socket).map_err(|e| e.to_string())?;
+    let mut stream = local_socket::connect(socket).map_err(|e| e.to_string())?;
     stream.set_read_timeout(Some(Duration::from_secs(10))).map_err(|e| e.to_string())?;
     writeln!(stream, "{message}").map_err(|e| e.to_string())?;
     let mut reply = String::new();

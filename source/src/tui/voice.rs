@@ -1,5 +1,4 @@
 use std::io::Write;
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Stdio};
 use std::time::Instant;
@@ -16,7 +15,7 @@ pub fn start(home: &Path) -> Result<Recording, String> {
     // Unique per recording, and created here so ffmpeg -y overwrites our own file, never a planted link.
     let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).expect("clock is after 1970").as_nanos();
     let wav = std::env::temp_dir().join(format!("agent-voice-{}-{nonce}.wav", std::process::id()));
-    std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&wav).map_err(|e| format!("Cannot create {}: {e}", wav.display()))?;
+    crate::process::private_file().write(true).create_new(true).open(&wav).map_err(|e| format!("Cannot create {}: {e}", wav.display()))?;
     let ffmpeg = crate::process::command("ffmpeg")
         .args(["-loglevel", "error", "-y"])
         .args(if cfg!(target_os = "macos") { ["-f", "avfoundation", "-i", ":default"] } else { ["-f", "pulse", "-i", "default"] })

@@ -1,7 +1,6 @@
 use serde_json::Value;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
-use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -95,7 +94,14 @@ impl Terminals {
         let title: String = label.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(MAX_TITLE_CHARS).collect();
         let (stdout_file, stdout) = super::private_file("bg", "stdout")?;
         let (stderr_file, stderr) = super::private_file("bg", "stderr")?;
-        let pid = crate::process::command("sh").args(["-c", command]).current_dir(cwd).stdout(stdout_file).stderr(stderr_file).spawn().map_err(|e| format!("Cannot start sh: {e}"))?.id();
+        let pid = crate::process::command(crate::process::shell("sh")?)
+            .args(["-c", command])
+            .current_dir(cwd)
+            .stdout(stdout_file)
+            .stderr(stderr_file)
+            .spawn()
+            .map_err(|e| format!("Cannot start sh: {e}"))?
+            .id();
         self.counter += 1;
         let id = format!("bt-{}", self.counter);
         let terminal = Arc::new(Terminal { id, title, cwd: cwd.to_path_buf(), pid, started: Instant::now(), stdout, stderr, state: Mutex::default() });
@@ -110,9 +116,10 @@ impl Terminals {
             let mut queued = follow_ups.lock().unwrap();
             let mut state = watched.state.lock().unwrap();
             let exit = match status {
-                Ok(status) if state.killed && status.signal().is_some() => (Status::Killed, exit_text(status.code(), status.signal())),
+                // Windows ends a process with an exit code, so there a stopped terminal counts as killed whatever its code.
+                Ok(status) if state.killed && (cfg!(windows) || crate::process::signal_of(status).is_some()) => (Status::Killed, exit_text(status.code(), crate::process::signal_of(status))),
                 Ok(status) if status.success() => (Status::Done, "exit 0".to_string()),
-                Ok(status) => (Status::Failed, exit_text(status.code(), status.signal())),
+                Ok(status) => (Status::Failed, exit_text(status.code(), crate::process::signal_of(status))),
                 Err(e) => (Status::Failed, format!("wait failed: {e}")),
             };
             state.exit = Some(exit);

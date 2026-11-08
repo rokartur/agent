@@ -1,8 +1,7 @@
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::fs::{File, OpenOptions, TryLockError};
+use std::fs::{File, TryLockError};
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Sender};
@@ -2275,7 +2274,7 @@ impl Session {
 
     pub fn append(&self, entry: &Value) -> Result<(), String> {
         let Some(path) = &self.path else { return Ok(()) };
-        let mut file = OpenOptions::new().create(true).append(true).mode(0o600).open(path).map_err(|e| format!("Cannot open {}: {e}", path.display()))?;
+        let mut file = crate::process::private_file().create(true).append(true).open(path).map_err(|e| format!("Cannot open {}: {e}", path.display()))?;
         // One write call, so a signal exit on another thread cannot leave half a line; writeln! on a File writes piecewise.
         file.write_all(format!("{entry}\n").as_bytes()).map_err(|e| format!("Cannot write {}: {e}", path.display()))
     }
@@ -2302,7 +2301,7 @@ impl Session {
 
 /// Writes `text` to a new 0600 file; a failed write removes it, since a partial file would pass as "already here" on the next import.
 fn write_new_private(path: &Path, text: &str) -> std::io::Result<()> {
-    let mut file = OpenOptions::new().write(true).create_new(true).mode(0o600).open(path)?;
+    let mut file = crate::process::private_file().write(true).create_new(true).open(path)?;
     file.write_all(text.as_bytes()).inspect_err(|_| {
         let _ = std::fs::remove_file(path);
     })
@@ -2349,7 +2348,7 @@ fn read_session_index(path: &Path) -> serde_json::Map<String, Value> {
 fn write_session_index(path: &Path, sessions: serde_json::Map<String, Value>) -> std::io::Result<()> {
     // Titles are prompt lines, so 0600 like the sessions; the rename keeps another process from reading half a file.
     let temporary = path.with_extension(format!("json.{}.tmp", std::process::id()));
-    let mut file = OpenOptions::new().create(true).write(true).truncate(true).mode(0o600).open(&temporary)?;
+    let mut file = crate::process::private_file().create(true).write(true).truncate(true).open(&temporary)?;
     file.write_all(json!({"version": SESSION_INDEX_VERSION, "sessions": sessions}).to_string().as_bytes())?;
     std::fs::rename(&temporary, path)
 }
@@ -3053,7 +3052,7 @@ mod tests {
         std::fs::write(&path, header + &prompt("other")).unwrap();
         File::options().write(true).open(&path).unwrap().set_modified(modified).unwrap();
         let same_size_and_mtime = listed();
-        OpenOptions::new().append(true).open(&path).unwrap().write_all(prompt("again").as_bytes()).unwrap();
+        File::options().append(true).open(&path).unwrap().write_all(prompt("again").as_bytes()).unwrap();
         let appended = listed();
         std::fs::remove_dir_all(&dir).unwrap();
         assert_eq!(read, [("first".to_string(), 1)]);
@@ -3073,6 +3072,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn rewind_restores_only_what_this_session_changed() {
         let _index = SNAPSHOT_INDEX.lock().unwrap();
         let (root, work) = git_work("agent-restore");

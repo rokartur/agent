@@ -6,6 +6,7 @@ mod agent;
 mod api;
 mod headroom;
 mod image;
+mod local_socket;
 mod mcp;
 mod plugins;
 mod process;
@@ -143,7 +144,8 @@ enum Resume {
 }
 
 pub(crate) fn home() -> Result<PathBuf, String> {
-    std::env::var_os("HOME").map(PathBuf::from).ok_or_else(|| "HOME is not set.".into())
+    // Windows sets no HOME outside Git Bash; home_dir reads the profile directory there.
+    std::env::var_os("HOME").map(PathBuf::from).or_else(std::env::home_dir).ok_or_else(|| "HOME is not set.".into())
 }
 
 fn doctor_command(args: &[String]) -> Result<(), String> {
@@ -454,6 +456,7 @@ fn open_session(options: &Options, args: &[String]) -> Result<(), String> {
 
 /// Points stdin at the terminal on stdout once the session server holds the piped message. With stdin not a terminal
 /// crossterm reads keys from `/dev/tty`, which kqueue on macOS cannot watch, so no key arrived.
+#[cfg(unix)]
 fn read_keys_from_the_terminal() -> Result<(), String> {
     use std::os::fd::AsRawFd;
     // SAFETY: ttyname returns null or a NUL-terminated name in a static buffer, copied out before any other call.
@@ -470,9 +473,15 @@ fn read_keys_from_the_terminal() -> Result<(), String> {
     Ok(())
 }
 
+/// crossterm on Windows reads keys from the console's `CONIN$`, whatever stdin is.
+#[cfg(windows)]
+fn read_keys_from_the_terminal() -> Result<(), String> {
+    Ok(())
+}
+
 /// The running session `-r` or `-c` names in `cwd`, or a new session server for `args` there. `agent serve
 /// --tailnet` calls it for the computers that start sessions on this one.
-fn local_session(home: &std::path::Path, options: &Options, args: &[String], cwd: &std::path::Path, piped: bool, user_device: Option<&str>) -> Result<std::os::unix::net::UnixStream, String> {
+fn local_session(home: &std::path::Path, options: &Options, args: &[String], cwd: &std::path::Path, piped: bool, user_device: Option<&str>) -> Result<local_socket::Stream, String> {
     let resumed = match &options.resume {
         Some(Resume::Id(id)) => Some(id.clone()),
         Some(Resume::Latest) => Some(Session::latest(&home.join(".agents/sessions"), cwd)?),

@@ -2,8 +2,6 @@
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::fs::PermissionsExt;
-use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread::JoinHandle;
@@ -90,8 +88,8 @@ impl Client {
 /// `Msg::Input` and `Msg::Detached`.
 pub fn listen(socket: &Path, events: Sender<Msg>) -> Result<(), String> {
     let _ = std::fs::remove_file(socket);
-    let listener = UnixListener::bind(socket).map_err(|e| format!("Cannot listen on {}: {e}", socket.display()))?;
-    std::fs::set_permissions(socket, std::fs::Permissions::from_mode(0o600)).map_err(|e| format!("Cannot restrict {}: {e}", socket.display()))?;
+    let listener = crate::local_socket::bind(socket).map_err(|e| format!("Cannot listen on {}: {e}", socket.display()))?;
+    crate::process::make_private(socket).map_err(|e| format!("Cannot restrict {}: {e}", socket.display()))?;
     std::thread::spawn(move || {
         for (id, stream) in (0..).zip(listener.incoming().map_while(Result::ok)) {
             let events = events.clone();
@@ -101,7 +99,7 @@ pub fn listen(socket: &Path, events: Sender<Msg>) -> Result<(), String> {
     Ok(())
 }
 
-fn serve_client(id: u64, stream: UnixStream, events: &Sender<Msg>) {
+fn serve_client(id: u64, stream: crate::local_socket::Stream, events: &Sender<Msg>) {
     let Ok(reader) = stream.try_clone() else { return };
     // A connection that never says hello would otherwise hold this thread forever.
     let _ = stream.set_read_timeout(Some(HELLO_TIMEOUT));

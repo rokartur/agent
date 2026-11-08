@@ -4,14 +4,12 @@
 
 use std::io::{BufRead, BufReader, IsTerminal, Write};
 use std::net::TcpStream;
-use std::os::fd::IntoRawFd;
-use std::os::unix::fs::OpenOptionsExt;
-use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use crate::agent::peers::{self, Peer};
+use crate::local_socket;
 use crate::settings::Settings;
 use crate::tailnet::{self, LOCAL, Reattach};
 use crate::tui::{Ending, Place};
@@ -22,7 +20,7 @@ pub const USER_DEVICE: &str = "AGENT_USER_DEVICE";
 
 /// A session server this terminal reaches: its socket on this computer, or `agent serve --tailnet` on another one.
 pub enum Stream {
-    Local(UnixStream),
+    Local(local_socket::Stream),
     Remote(BufReader<TcpStream>, TcpStream),
 }
 
@@ -69,13 +67,8 @@ pub fn redirect_output(home: &Path) -> Result<(), String> {
     std::fs::create_dir_all(home.join(".agents")).map_err(|e| format!("Cannot create {}: {e}", home.join(".agents").display()))?;
     crate::process::private_dir(&dir(home))?;
     let path = log(home, std::process::id());
-    let file = std::fs::OpenOptions::new().create(true).write(true).truncate(true).mode(0o600).open(&path).map_err(|e| format!("Cannot open {}: {e}", path.display()))?;
-    let fd = file.into_raw_fd();
-    // SAFETY: dup2 only takes descriptors; `fd` is open and stays open for the life of the process.
-    if unsafe { libc::dup2(fd, 1) == -1 || libc::dup2(fd, 2) == -1 } {
-        return Err(format!("Cannot write to {}: {}", path.display(), std::io::Error::last_os_error()));
-    }
-    Ok(())
+    let file = crate::process::private_file().create(true).write(true).truncate(true).open(&path).map_err(|e| format!("Cannot open {}: {e}", path.display()))?;
+    crate::process::redirect_output_to(file).map_err(|e| format!("Cannot write to {}: {e}", path.display()))
 }
 
 /// The log of a server that exits cleanly holds nothing worth keeping.
@@ -91,24 +84,13 @@ pub fn remove_files(home: &Path) {
 
 /// Starts `agent serve <args>` in `cwd` and connects once it listens. A `piped` stdin goes to the server, which reads
 /// the message from it as `agent` always did. `user_device` names the computer of a remote start's terminal.
-pub fn start(home: &Path, args: &[String], cwd: &Path, piped: bool, user_device: Option<&str>) -> Result<UnixStream, String> {
+pub fn start(home: &Path, args: &[String], cwd: &Path, piped: bool, user_device: Option<&str>) -> Result<local_socket::Stream, String> {
     let exe = std::env::current_exe().map_err(|e| format!("Cannot find the agent binary: {e}"))?;
-    // sh starts the server in the background and exits, so the server is no child of ours: on SIGHUP, closing the
-    // terminal, `process::hang_up_children` would end it. An async list's stdin is /dev/null unless redirected.
-    let mut command = crate::process::command("sh");
-    command.args(["-c", r#""$0" serve "$@" <&0 >/dev/null 2>&1 & echo $!"#]).arg(exe).args(args).current_dir(cwd).stdout(Stdio::piped()).stderr(Stdio::null());
-    if piped {
-        command.stdin(Stdio::inherit());
-    }
-    if let Some(device) = user_device {
-        command.env(USER_DEVICE, device);
-    }
-    let output = command.output().map_err(|e| format!("Cannot start the session server: {e}"))?;
-    let pid: u32 = String::from_utf8_lossy(&output.stdout).trim().parse().map_err(|_| format!("Cannot start the session server: sh exited with {}.", output.status))?;
+    let pid = start_server(&exe, args, cwd, piped, user_device)?;
     let (socket, log) = (socket(home, pid), log(home, pid));
     let deadline = Instant::now() + START_TIMEOUT;
     loop {
-        if let Ok(stream) = UnixStream::connect(&socket) {
+        if let Ok(stream) = local_socket::connect(&socket) {
             return Ok(stream);
         }
         if !crate::process::alive(pid) {
@@ -124,8 +106,39 @@ pub fn start(home: &Path, args: &[String], cwd: &Path, piped: bool, user_device:
     }
 }
 
-pub fn connect(home: &Path, pid: u32) -> Result<UnixStream, String> {
-    UnixStream::connect(socket(home, pid)).map_err(|e| format!("Cannot reach session server {pid}: {e}"))
+/// sh starts the server in the background and exits, so the server is no child of ours: on SIGHUP, closing the
+/// terminal, `process::hang_up_children` would end it. An async list's stdin is /dev/null unless redirected.
+#[cfg(unix)]
+fn start_server(exe: &Path, args: &[String], cwd: &Path, piped: bool, user_device: Option<&str>) -> Result<u32, String> {
+    let mut command = crate::process::command("sh");
+    command.args(["-c", r#""$0" serve "$@" <&0 >/dev/null 2>&1 & echo $!"#]).arg(exe).args(args).current_dir(cwd).stdout(Stdio::piped()).stderr(Stdio::null());
+    if piped {
+        command.stdin(Stdio::inherit());
+    }
+    if let Some(device) = user_device {
+        command.env(USER_DEVICE, device);
+    }
+    let output = command.output().map_err(|e| format!("Cannot start the session server: {e}"))?;
+    String::from_utf8_lossy(&output.stdout).trim().parse().map_err(|_| format!("Cannot start the session server: sh exited with {}.", output.status))
+}
+
+/// The server leaves this terminal's job, so closing the terminal does not end it, and runs on a hidden console.
+#[cfg(windows)]
+fn start_server(exe: &Path, args: &[String], cwd: &Path, piped: bool, user_device: Option<&str>) -> Result<u32, String> {
+    let mut command = crate::process::command(exe);
+    command.arg("serve").args(args).current_dir(cwd).stdout(Stdio::null()).stderr(Stdio::null());
+    if piped {
+        command.stdin(Stdio::inherit());
+    }
+    if let Some(device) = user_device {
+        command.env(USER_DEVICE, device);
+    }
+    let child = crate::process::spawn_detached(&mut command).map_err(|e| format!("Cannot start the session server: {e}"))?;
+    Ok(child.id())
+}
+
+pub fn connect(home: &Path, pid: u32) -> Result<local_socket::Stream, String> {
+    local_socket::connect(&socket(home, pid)).map_err(|e| format!("Cannot reach session server {pid}: {e}"))
 }
 
 /// Shows the session until it ends or this terminal detaches, then prints what the server said goodbye with. /env

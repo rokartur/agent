@@ -22,8 +22,9 @@ fn launchd() -> bool {
 pub fn command(args: &[String]) -> Result<(), String> {
     let home = crate::home()?;
     match args {
-        [action] if action == "install" => install(&home),
         [action, on, host] if action == "install" && on == "--on" && !host.starts_with('-') => install_on(host),
+        _ if cfg!(windows) => Err("agent service runs on macOS and Linux only; on Windows run `agent serve --tailnet` in a terminal that stays open.".into()),
+        [action] if action == "install" => install(&home),
         [action] if action == "status" => status(&home),
         [action] if action == "restart" => {
             if !file(&home).exists() {
@@ -188,9 +189,15 @@ fn unload() -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn domain() -> String {
     // SAFETY: getuid takes no arguments and cannot fail.
     format!("gui/{}", unsafe { libc::getuid() })
+}
+
+#[cfg(windows)]
+fn domain() -> String {
+    unreachable!("launchd runs on macOS only")
 }
 
 fn target() -> String {
@@ -312,6 +319,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn the_remote_install_runs_the_hosts_agent_in_its_login_shell_and_refuses_an_old_release() {
         let home = std::env::temp_dir().join(format!("agent-service-remote-{}", std::process::id()));
         let bin = home.join(".local/bin");

@@ -20,11 +20,12 @@ jobs:
   lint:
     strategy:
       matrix:
-        runner: [ubuntu-latest, macos-latest]
+        runner: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.runner }}
     defaults:
       run:
         working-directory: source
+        shell: bash
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -39,11 +40,12 @@ jobs:
   test:
     strategy:
       matrix:
-        runner: [ubuntu-latest, macos-latest]
+        runner: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.runner }}
     defaults:
       run:
         working-directory: source
+        shell: bash
     steps:
       - uses: actions/checkout@v7
       # Tests run rg, fd and ImageMagick's convert; Ubuntu ships fd as fdfind.

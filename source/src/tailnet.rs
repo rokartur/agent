@@ -13,7 +13,6 @@
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{IpAddr, Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
-use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Stdio};
 use std::time::Duration;
@@ -44,8 +43,11 @@ const UNKNOWN_REQUEST: &str = "This computer's agent does not know that request.
 /// A relay that cannot write to its peer for this long gives up, so the session server sees the terminal detach.
 const RELAY_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 /// A peer that went away without closing, asleep or off the network, is dropped after about 30 + 3 * 10 s.
+#[cfg(unix)]
 const KEEPALIVE_IDLE_SECS: libc::c_int = 30;
+#[cfg(unix)]
 const KEEPALIVE_INTERVAL_SECS: libc::c_int = 10;
+#[cfg(unix)]
 const KEEPALIVE_PROBES: libc::c_int = 3;
 
 /// `local` first, then the computers in `environments`, then this user's other computers online on the tailnet.
@@ -181,11 +183,19 @@ fn least_loaded(loads: &[(String, f64)]) -> &(String, f64) {
 }
 
 /// This computer's 1-minute load average per CPU.
+#[cfg(unix)]
 fn load() -> f64 {
     let mut averages = [0.0];
     // SAFETY: getloadavg writes at most the one sample asked for into `averages`.
     unsafe { libc::getloadavg(averages.as_mut_ptr(), 1) };
     averages[0] / std::thread::available_parallelism().map_or(1, usize::from) as f64
+}
+
+// shortcut: Windows has no load average, so a Windows computer always looks idle to placement; read the processor
+// queue length through PDH if placement must weigh it.
+#[cfg(windows)]
+fn load() -> f64 {
+    0.0
 }
 
 pub fn attach(settings: &Settings, environment: &str, session: &str) -> Result<Stream, String> {
@@ -417,7 +427,7 @@ fn handle(stream: TcpStream, home: &Path, device: &str) {
 
 enum Answer {
     Reply(Value),
-    Session(UnixStream),
+    Session(crate::local_socket::Stream),
     Subagent(Child),
 }
 
@@ -464,7 +474,7 @@ fn deliver_here(home: &Path, device: &str, message: &Value) -> Result<String, St
     peers::send(&peer, &from, Path::new(message["from_cwd"].as_str().unwrap_or("unknown")), text, None)
 }
 
-fn start_here(home: &Path, device: &str, start: &Value) -> Result<UnixStream, String> {
+fn start_here(home: &Path, device: &str, start: &Value) -> Result<crate::local_socket::Stream, String> {
     let args: Vec<String> = start["args"].as_array().into_iter().flatten().filter_map(|arg| Some(arg.as_str()?.to_string())).collect();
     // parse_args prints and exits the process for these, which would end this listener.
     if args.iter().any(|arg| matches!(arg.as_str(), "-h" | "--help" | "--version")) {
@@ -520,7 +530,7 @@ fn reply(stream: &TcpStream, mut message: Value) {
 }
 
 /// Copies both ways between the connection and the session's socket; the end of either direction closes both.
-fn relay(mut from_peer: BufReader<TcpStream>, peer: TcpStream, session: UnixStream) {
+fn relay(mut from_peer: BufReader<TcpStream>, peer: TcpStream, session: crate::local_socket::Stream) {
     let (Ok(mut to_peer), Ok(mut from_session)) = (peer.try_clone(), session.try_clone()) else { return };
     let _ = peer.set_write_timeout(Some(RELAY_WRITE_TIMEOUT));
     let mut to_session = session;
@@ -596,6 +606,16 @@ fn tailscale(args: &[&str]) -> Result<Value, String> {
 /// read on a connection whose peer vanished fails instead of waiting forever.
 fn for_keystrokes(stream: &TcpStream) {
     let _ = stream.set_nodelay(true);
+    keep_alive(stream);
+}
+
+// shortcut: std has no keepalive setter, so on Windows a vanished peer is noticed only by the next failed write; set
+// SIO_KEEPALIVE_VALS through WSAIoctl if a sleeping laptop leaves hung relays.
+#[cfg(windows)]
+fn keep_alive(_stream: &TcpStream) {}
+
+#[cfg(unix)]
+fn keep_alive(stream: &TcpStream) {
     use std::os::fd::AsRawFd;
     #[cfg(target_os = "macos")]
     const IDLE: libc::c_int = libc::TCP_KEEPALIVE;
@@ -651,6 +671,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn a_message_from_another_computer_reaches_a_session_here_named_by_that_computer() {
         let home = std::env::temp_dir().join(format!("agent-tailnet-message-{}", std::process::id()));
         let follow_ups = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -676,7 +697,7 @@ mod tests {
         let home = std::env::temp_dir().join(format!("agent-reattach-{}", std::process::id()));
         let socket = serve::socket(&home, 4242);
         std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
-        let _server = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let _server = crate::local_socket::bind(&socket).unwrap();
         assert!(matches!(answer(&home, "laptop", &json!({"protocol": PROTOCOL, "reattach": 4242})), Ok(Answer::Session(_))));
         let ended = |server: u64| answer(&home, "laptop", &json!({"protocol": PROTOCOL, "reattach": server})).err();
         assert_eq!(ended(4243), Some("The session ended: its server 4243 no longer runs.".into()));

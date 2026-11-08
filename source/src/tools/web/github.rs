@@ -277,6 +277,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn checkout_fetches_a_branch_or_a_commit_and_keeps_symlinks_as_plain_files() {
         let root = std::env::temp_dir().join(format!("agent-github-checkout-{}", std::process::id()));
         let remote = root.join("remote");

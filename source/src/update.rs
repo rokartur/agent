@@ -53,7 +53,7 @@ fn install_if_newer(latest: String, report: &dyn Fn(Progress)) -> Result<Option<
         return Ok(None);
     }
     let exe = std::env::current_exe().map_err(|e| format!("Cannot find the agent binary: {e}"))?;
-    let staged = exe.with_file_name(format!(".agent-update-{}", std::process::id()));
+    let staged = exe.with_file_name(format!(".agent-update-{}{}", std::process::id(), std::env::consts::EXE_SUFFIX));
     let result = download(&latest, &staged, report)
         .and_then(|()| {
             report(Progress::Verifying);
@@ -61,13 +61,35 @@ fn install_if_newer(latest: String, report: &dyn Fn(Progress)) -> Result<Option<
         })
         .and_then(|()| {
             report(Progress::Installing);
-            std::fs::rename(&staged, &exe).map_err(|e| format!("Cannot replace {}: {e}", exe.display()))
+            replace(&staged, &exe).map_err(|e| format!("Cannot replace {}: {e}", exe.display()))
         });
     if let Err(error) = result {
         let _ = std::fs::remove_file(&staged);
         return Err(error);
     }
     Ok(Some(latest))
+}
+
+#[cfg(unix)]
+fn replace(staged: &Path, exe: &Path) -> std::io::Result<()> {
+    std::fs::rename(staged, exe)
+}
+
+/// Windows cannot overwrite a running binary but can rename it, so the running one moves aside first. A binary moved
+/// aside by an earlier update is removed once no agent runs it.
+#[cfg(windows)]
+fn replace(staged: &Path, exe: &Path) -> std::io::Result<()> {
+    let dir = exe.parent().expect("a binary sits in a directory");
+    for old in std::fs::read_dir(dir)?.map_while(Result::ok) {
+        if old.file_name().to_string_lossy().starts_with(".agent-old-") {
+            let _ = std::fs::remove_file(old.path());
+        }
+    }
+    let aside = dir.join(format!(".agent-old-{}.exe", std::process::id()));
+    std::fs::rename(exe, &aside)?;
+    std::fs::rename(staged, exe).inspect_err(|_| {
+        let _ = std::fs::rename(&aside, exe);
+    })
 }
 
 /// The stamp holds the channel last checked, so switching channels checks at once.
@@ -124,7 +146,7 @@ fn newest(releases: &Value, include_prereleases: bool) -> Option<&str> {
 }
 
 fn download(version: &str, path: &Path, report: &dyn Fn(Progress)) -> Result<(), String> {
-    let asset = format!("agent-{}-{}", std::env::consts::OS, std::env::consts::ARCH);
+    let asset = format!("agent-{}-{}{}", std::env::consts::OS, std::env::consts::ARCH, std::env::consts::EXE_SUFFIX);
     let url = format!("{RELEASES}/download/v{version}/{asset}");
     let http: ureq::Agent = ureq::Agent::config_builder().timeout_global(Some(Duration::from_secs(300))).build().into();
     // Created first, so an unwritable binary directory fails before a transfer of up to 100 MiB.
@@ -150,8 +172,7 @@ fn download(version: &str, path: &Path, report: &dyn Fn(Progress)) -> Result<(),
         received += read as u64;
         report(Progress::Downloading { version, received, total });
     }
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).map_err(|e| format!("Cannot make {} executable: {e}", path.display()))
+    process::make_executable(path).map_err(|e| format!("Cannot make {} executable: {e}", path.display()))
 }
 
 /// A truncated or wrong download must never replace a working binary.

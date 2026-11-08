@@ -124,7 +124,10 @@ fn local_fields(unix: u64) -> [u32; 5] {
     // SAFETY: localtime_r only writes the `tm` we own; a zeroed tm is a valid value of that C struct.
     let tm = unsafe {
         let mut tm: libc::tm = std::mem::zeroed();
+        #[cfg(unix)]
         libc::localtime_r(&time, &mut tm);
+        #[cfg(windows)]
+        libc::localtime_s(&mut tm, &time);
         tm
     };
     [tm.tm_min, tm.tm_hour, tm.tm_mday, tm.tm_mon + 1, tm.tm_wday].map(|value| value as u32)
