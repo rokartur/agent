@@ -100,7 +100,12 @@ pub(crate) fn write_private(path: &Path, text: &str) -> Result<(), String> {
     let temp = path.with_extension(format!("json.{}.tmp", std::process::id()));
     let mut out = crate::process::private_file().write(true).create(true).truncate(true).open(&temp).map_err(|e| format!("Cannot write {}: {e}", temp.display()))?;
     // mode() applies only on create, so a leftover temp file is made private before the secrets go in.
-    let written = crate::process::make_private(&temp).and_then(|()| out.write_all(text.as_bytes())).and_then(|()| out.sync_all()).and_then(|()| std::fs::rename(&temp, &path));
+    // On the open file, not the path, which another process could have swapped by now.
+    #[cfg(unix)]
+    let restricted = out.set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o600));
+    #[cfg(windows)]
+    let restricted = std::io::Result::Ok(());
+    let written = restricted.and_then(|()| out.write_all(text.as_bytes())).and_then(|()| out.sync_all()).and_then(|()| std::fs::rename(&temp, &path));
     written.map_err(|e| {
         let _ = std::fs::remove_file(&temp);
         format!("Cannot write {}: {e}", path.display())

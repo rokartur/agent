@@ -11,6 +11,10 @@ pub struct Recording {
 }
 
 pub fn start(home: &Path) -> Result<Recording, String> {
+    // ffmpeg's dshow input has no default microphone; it takes a device name.
+    if cfg!(windows) {
+        return Err("/voice does not work on Windows yet.".into());
+    }
     let model = crate::tools::video::whisper_model(&home.join(".agents"))?;
     // Unique per recording, and created here so ffmpeg -y overwrites our own file, never a planted link.
     let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).expect("clock is after 1970").as_nanos();

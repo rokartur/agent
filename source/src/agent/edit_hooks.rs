@@ -37,10 +37,8 @@ pub fn hooks(files: &[PathBuf], trusted_projects: &[String]) -> (Vec<Hook>, Vec<
     for file in files {
         let Ok(file) = crate::process::canonicalize(file) else { continue };
         let Some(dir) = config_dir(&file) else { continue };
-        let relative = file.strip_prefix(&dir).expect("the config dir is an ancestor of the file").display().to_string();
-        // Globs match with slashes, and bash would read backslashes in `{files}` as escapes.
-        #[cfg(windows)]
-        let relative = relative.replace('\\', "/");
+        // Globs match with slashes, and bash would read Windows' backslashes in `{files}` as escapes.
+        let relative = file.strip_prefix(&dir).expect("the config dir is an ancestor of the file").display().to_string().replace(std::path::MAIN_SEPARATOR, "/");
         let group = files_by_dir.entry(dir).or_default();
         if !group.contains(&relative) {
             group.push(relative);

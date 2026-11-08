@@ -23,12 +23,13 @@ unsafe extern "system" {
 const PROCESS_TERMINATE: u32 = 0x0001;
 const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
 const SYNCHRONIZE: u32 = 0x0010_0000;
-const STILL_ACTIVE: u32 = 259;
 const ERROR_ACCESS_DENIED: i32 = 5;
 const INFINITE: u32 = u32::MAX;
 const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
+const CHILD_FLAGS: u32 = CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW;
+const WAIT_TIMEOUT: u32 = 0x102;
 const STD_OUTPUT_HANDLE: u32 = -11i32 as u32;
 const STD_ERROR_HANDLE: u32 = -12i32 as u32;
 const JOB_OBJECT_EXTENDED_LIMIT_INFORMATION: i32 = 9;
@@ -97,16 +98,16 @@ pub fn command(program: impl AsRef<OsStr>) -> Command {
     command.env_remove(crate::mcp::CLIENT_SERVERS_ENV);
     // Set for a session's process only: an `agent acp` its Bash starts routes again.
     command.env_remove(crate::acp::SESSION_ENV);
-    command.creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
+    command.creation_flags(CHILD_FLAGS);
     command
 }
 
 /// Spawns `command` outside the job from `exit_on_signal`, so it outlives the agent. An outer job that forbids
 /// breakaway (some CI runners and IDE terminals) keeps it inside; it then ends with the agent.
 pub fn spawn_detached(command: &mut Command) -> std::io::Result<std::process::Child> {
-    command.creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW | CREATE_BREAKAWAY_FROM_JOB);
+    command.creation_flags(CHILD_FLAGS | CREATE_BREAKAWAY_FROM_JOB);
     match command.spawn() {
-        Err(e) if e.raw_os_error() == Some(ERROR_ACCESS_DENIED) => command.creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW).spawn(),
+        Err(e) if e.raw_os_error() == Some(ERROR_ACCESS_DENIED) => command.creation_flags(CHILD_FLAGS).spawn(),
         spawned => spawned,
     }
 }
@@ -136,12 +137,20 @@ pub fn make_executable(_path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Creates `dir`; it inherits the ACL of the user's profile or temp directory it sits in.
+/// Creates `dir`; it inherits the ACL of the user's profile or temp directory it sits in. An existing one must be a
+/// plain directory: a junction or link there could send the files somewhere shared.
 pub fn private_dir(dir: &Path) -> Result<(), String> {
     match std::fs::create_dir(dir) {
-        Err(e) if e.kind() != std::io::ErrorKind::AlreadyExists => Err(format!("Cannot create {}: {e}", dir.display())),
-        _ => Ok(()),
+        Ok(()) => return Ok(()),
+        Err(e) if e.kind() != std::io::ErrorKind::AlreadyExists => return Err(format!("Cannot create {}: {e}", dir.display())),
+        Err(_) => {}
     }
+    let metadata = std::fs::symlink_metadata(dir).map_err(|e| format!("Cannot read {}: {e}", dir.display()))?;
+    // symlink_metadata reports a junction or link as a link, never as a directory.
+    if !metadata.is_dir() {
+        return Err(format!("Cannot use {}: not a private directory of this user", dir.display()));
+    }
+    Ok(())
 }
 
 /// Windows ends a process with an exit code, never a signal.
@@ -149,16 +158,16 @@ pub fn signal_of(_status: ExitStatus) -> Option<i32> {
     None
 }
 
-/// An `OpenProcess` refused with access denied means the process exists under another user.
+/// An `OpenProcess` refused with access denied means the process exists under another user. Not the exit code:
+/// STILL_ACTIVE (259) is also what a process that called exit(259) leaves.
 pub fn alive(pid: u32) -> bool {
     // SAFETY: OpenProcess takes plain integers; a non-null handle is closed below.
-    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    let process = unsafe { OpenProcess(SYNCHRONIZE, 0, pid) };
     if process.is_null() {
         return std::io::Error::last_os_error().raw_os_error() == Some(ERROR_ACCESS_DENIED);
     }
-    let mut code = 0;
-    // SAFETY: `process` is a valid handle and `code` is writable.
-    let running = unsafe { GetExitCodeProcess(process, &mut code) } != 0 && code == STILL_ACTIVE;
+    // SAFETY: `process` is a valid handle with SYNCHRONIZE access.
+    let running = unsafe { WaitForSingleObject(process, 0) } == WAIT_TIMEOUT;
     // SAFETY: the handle came from OpenProcess above.
     unsafe { CloseHandle(process) };
     running
@@ -223,16 +232,15 @@ fn end_children_with_the_agent() {
     let limits = ExtendedLimits { basic: BasicLimits { flags: JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_BREAKAWAY_OK, ..Default::default() }, ..Default::default() };
     // SAFETY: null attributes and name create an anonymous job; its handle stays open until the process exits, which
     // is what ends the job's processes.
-    unsafe {
+    let joined = unsafe {
         let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
-        if job.is_null() {
-            return;
-        }
-        // A job the agent cannot join (an outer job that forbids nesting) only loses this cleanup.
-        let set = SetInformationJobObject(job, JOB_OBJECT_EXTENDED_LIMIT_INFORMATION, (&raw const limits).cast(), size_of::<ExtendedLimits>() as u32);
-        if set != 0 {
-            AssignProcessToJobObject(job, GetCurrentProcess());
-        }
+        !job.is_null()
+            && SetInformationJobObject(job, JOB_OBJECT_EXTENDED_LIMIT_INFORMATION, (&raw const limits).cast(), size_of::<ExtendedLimits>() as u32) != 0
+            && AssignProcessToJobObject(job, GetCurrentProcess()) != 0
+    };
+    // An outer job that forbids nesting only loses this cleanup.
+    if !joined {
+        eprintln!("warning: processes the agent starts may outlive it: cannot join a job: {}", std::io::Error::last_os_error());
     }
 }
 

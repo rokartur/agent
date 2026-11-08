@@ -87,8 +87,9 @@ fn replace(staged: &Path, exe: &Path) -> std::io::Result<()> {
     }
     let aside = dir.join(format!(".agent-old-{}.exe", std::process::id()));
     std::fs::rename(exe, &aside)?;
-    std::fs::rename(staged, exe).inspect_err(|_| {
-        let _ = std::fs::rename(&aside, exe);
+    std::fs::rename(staged, exe).map_err(|e| match std::fs::rename(&aside, exe) {
+        Ok(()) => e,
+        Err(_) => std::io::Error::new(e.kind(), format!("{e}; the previous binary is at {}", aside.display())),
     })
 }
 

@@ -9,6 +9,7 @@ pub use unix::*;
 pub use windows::*;
 
 use std::process::{Command, Output, Stdio};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 pub const SIGHUP: i32 = 1;
@@ -34,20 +35,42 @@ pub fn output_within(command: &mut Command, timeout: Duration) -> std::io::Resul
         // Short poll: callers such as the rtk rewrite sit on the bash tool's path.
         std::thread::sleep(Duration::from_millis(10));
     };
-    // A background child (`sleep 5 &`) keeps the pipes open, so the readers would wait for it.
+    // A background child (`sleep 5 &`) keeps the pipes open, so the readers would wait for it. Windows' taskkill finds
+    // no tree under an exited parent, so there the grace period below ends the wait instead.
+    #[cfg(unix)]
     signal_group(child.id(), SIGKILL);
-    let joined = |reader: std::thread::JoinHandle<Vec<u8>>| reader.join().expect("pipe reader does not panic");
-    Ok(Some(Output { status, stdout: joined(stdout), stderr: joined(stderr) }))
+    let drained_by = Instant::now() + Duration::from_secs(1);
+    Ok(Some(Output { status, stdout: collect(&stdout, drained_by), stderr: collect(&stderr, drained_by) }))
 }
 
-fn read_in_background(pipe: Option<impl std::io::Read + Send + 'static>) -> std::thread::JoinHandle<Vec<u8>> {
+fn read_in_background(pipe: Option<impl std::io::Read + Send + 'static>) -> mpsc::Receiver<Vec<u8>> {
     let mut pipe = pipe.expect("piped above");
+    let (send, chunks) = mpsc::channel();
     std::thread::spawn(move || {
-        let mut bytes = Vec::new();
+        let mut chunk = [0; 8192];
         // A read error ends the capture early; the caller still gets the exit status and what arrived.
-        _ = pipe.read_to_end(&mut bytes);
-        bytes
-    })
+        loop {
+            let read = match pipe.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(read) => read,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => break,
+            };
+            if send.send(chunk[..read].to_vec()).is_err() {
+                break;
+            }
+        }
+    });
+    chunks
+}
+
+/// What a reader sent until its pipe closed or `deadline` passed.
+fn collect(chunks: &mpsc::Receiver<Vec<u8>>, deadline: Instant) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    while let Ok(chunk) = chunks.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+        bytes.extend(chunk);
+    }
+    bytes
 }
 
 /// `std::fs::canonicalize` without the `\\?\` prefix Windows adds, which git, shells and path comparisons do not expect.
@@ -73,7 +96,7 @@ pub fn hash(text: &str) -> String {
     format!("sha256:{hex}")
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -84,12 +107,23 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn installed_finds_only_executables_on_path() {
         assert!(installed("sh"));
         assert!(!installed("agent-no-such-binary"));
     }
 
     #[test]
+    fn private_dir_refuses_a_file_in_its_place() {
+        let path = std::env::temp_dir().join(format!("agent-private-file-{}", std::process::id()));
+        std::fs::write(&path, "").unwrap();
+        let refused = private_dir(&path);
+        std::fs::remove_file(&path).unwrap();
+        assert!(refused.unwrap_err().contains("not a private directory"));
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn private_dir_refuses_an_existing_shared_directory() {
         use std::os::unix::fs::PermissionsExt;
         let dir = std::env::temp_dir().join(format!("agent-private-{}", std::process::id()));
@@ -103,20 +137,22 @@ mod tests {
 
     #[test]
     fn output_within_returns_the_output_or_kills_a_late_command() {
-        let output = output_within(command("sh").args(["-c", "echo hi"]), Duration::from_secs(5)).unwrap().unwrap();
+        let sh = || command(shell("sh").unwrap());
+        let output = output_within(sh().args(["-c", "echo hi"]), Duration::from_secs(5)).unwrap().unwrap();
         assert_eq!(output.stdout, b"hi\n");
         let started = Instant::now();
-        assert!(output_within(command("sh").args(["-c", "sleep 5; echo late"]), Duration::from_millis(100)).unwrap().is_none());
+        assert!(output_within(sh().args(["-c", "sleep 5; echo late"]), Duration::from_millis(100)).unwrap().is_none());
         assert!(started.elapsed() < Duration::from_secs(2));
         let started = Instant::now();
-        let output = output_within(command("sh").args(["-c", "echo hi; sleep 5 &"]), Duration::from_secs(5)).unwrap().unwrap();
+        let output = output_within(sh().args(["-c", "echo hi; sleep 5 &"]), Duration::from_secs(5)).unwrap().unwrap();
         assert_eq!(output.stdout, b"hi\n");
-        assert!(started.elapsed() < Duration::from_secs(2), "a leftover child holding the pipe was waited for");
-        let output = output_within(command("sh").args(["-c", "head -c 200000 /dev/zero"]), Duration::from_secs(2)).unwrap().expect("more than a pipe buffer is read while it runs");
+        assert!(started.elapsed() < Duration::from_secs(3), "a leftover child holding the pipe was waited for");
+        let output = output_within(sh().args(["-c", "head -c 200000 /dev/zero"]), Duration::from_secs(5)).unwrap().expect("more than a pipe buffer is read while it runs");
         assert_eq!(output.stdout.len(), 200_000);
     }
 
     #[test]
+    #[cfg(unix)]
     fn wait_unreaped_reports_the_exit_and_leaves_the_child_to_reap() {
         for script in ["exit 3", "kill -9 $$"] {
             let mut child = command("sh").args(["-c", script]).spawn().unwrap();

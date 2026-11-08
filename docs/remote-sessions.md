@@ -29,7 +29,7 @@ To run the listener without the service, for example to watch its output, run `a
 
 ## On the computer you type on
 
-Your other computers online on the tailnet show up as environments by their Tailscale name: untagged macOS and Linux devices logged in as you, as `tailscale status` lists them. To keep a host offered while it is offline, so `agent attach` shows the sessions it last had, list it in `~/.agents/settings.json`:
+Your other computers online on the tailnet show up as environments by their Tailscale name: untagged macOS, Linux and Windows devices logged in as you, as `tailscale status` lists them. To keep a host offered while it is offline, so `agent attach` shows the sessions it last had, list it in `~/.agents/settings.json`:
 
 ```json
 { "environments": ["studio"] }

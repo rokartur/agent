@@ -66,13 +66,13 @@ pub fn environments(settings: &Settings) -> Vec<String> {
 }
 
 /// The peers in `tailscale status --json` a listener there would admit this computer from, as `owned_by` decides,
-/// that are online and run macOS or Linux, named by the first label of their MagicDNS name.
+/// that are online and run macOS, Linux or Windows, named by the first label of their MagicDNS name.
 fn discovered(status: &Value) -> Vec<String> {
     let Some(owner) = status["Self"]["UserID"].as_u64().filter(|_| status["BackendState"] == "Running") else { return Vec::new() };
     let mut names = Vec::new();
     for peer in status["Peer"].as_object().into_iter().flat_map(|peers| peers.values()) {
         let tagged = peer["Tags"].as_array().is_some_and(|tags| !tags.is_empty());
-        let desktop = matches!(peer["OS"].as_str(), Some("macOS" | "linux"));
+        let desktop = matches!(peer["OS"].as_str(), Some("macOS" | "linux" | "windows"));
         if peer["Online"] != true || peer["UserID"].as_u64() != Some(owner) || tagged || !desktop {
             continue;
         }
@@ -193,11 +193,27 @@ fn load() -> f64 {
     averages[0] / std::thread::available_parallelism().map_or(1, usize::from) as f64
 }
 
-// shortcut: Windows has no load average, so a Windows computer always looks idle to placement; read the processor
-// queue length through PDH if placement must weigh it.
+/// The share of CPU time spent busy over the next 100 ms: Windows keeps no load average.
 #[cfg(windows)]
 fn load() -> f64 {
-    0.0
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetSystemTimes(idle: *mut u64, kernel: *mut u64, user: *mut u64) -> i32;
+    }
+    let sample = || {
+        let (mut idle, mut kernel, mut user) = (0, 0, 0);
+        // SAFETY: each FILETIME is two u32s in the layout of one little-endian u64; kernel time includes idle time.
+        unsafe { GetSystemTimes(&mut idle, &mut kernel, &mut user) };
+        (idle, kernel + user)
+    };
+    let (idle_before, total_before) = sample();
+    std::thread::sleep(Duration::from_millis(100));
+    let (idle, total) = sample();
+    let elapsed = total - total_before;
+    if elapsed == 0 {
+        return 0.0;
+    }
+    1.0 - (idle - idle_before) as f64 / elapsed as f64
 }
 
 pub fn attach(settings: &Settings, environment: &str, session: &str) -> Result<Stream, String> {
@@ -770,7 +786,7 @@ mod tests {
             "k6": peer("phone.tail1.ts.net.", "iOS", 7, true, Value::Null),
             "k7": peer("pc.tail1.ts.net.", "windows", 7, true, Value::Null),
         }});
-        assert_eq!(discovered(&status), ["box", "studio"]);
+        assert_eq!(discovered(&status), ["box", "pc", "studio"]);
         let mut stopped = status.clone();
         stopped["BackendState"] = json!("Stopped");
         assert!(discovered(&stopped).is_empty());

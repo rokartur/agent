@@ -152,7 +152,7 @@ impl Editor {
         } else {
             command.env("ANTHROPIC_API_KEY", api_key);
         }
-        let mut child = command
+        command
             .arg("acp")
             .current_dir(home.project())
             .env("HOME", &home.dir)
@@ -162,9 +162,11 @@ impl Editor {
             .env_remove("OPENROUTER_API_KEY")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
+            .stderr(Stdio::null());
+        // As from PowerShell or cmd, which set no HOME; the agent takes the profile directory.
+        #[cfg(windows)]
+        command.env_remove("HOME").env("USERPROFILE", &home.dir);
+        let mut child = command.spawn().unwrap();
         let stdin = child.stdin.take().unwrap();
         let stdout = child.stdout.take().unwrap();
         let (sent, lines) = mpsc::channel();
@@ -829,6 +831,21 @@ fn a_file_outside_the_editors_project_is_read_and_edited_on_disk() {
     assert_eq!(std::fs::read_to_string(home.dir.join("written.txt")).unwrap(), "new\n");
     let asked_the_editor = editor.seen.iter().any(|message| message["method"].as_str().is_some_and(|method| method.starts_with("fs/")));
     assert!(!asked_the_editor, "{:#?}", editor.seen);
+}
+
+#[test]
+fn a_tilde_path_reads_from_the_home_directory() {
+    let home = Home::new("tilde");
+    std::fs::write(home.dir.join("notes.txt"), "in home\n").unwrap();
+    let api = fake_api(vec![reply(&[tool_use("toolu_read", "Read", json!({"file_path": "~/notes.txt"}))], "tool_use"), reply(&[text("Read.")], "end_turn")]);
+    let mut editor = Editor::start(&home, &api);
+    let session_id = editor.new_session(&home.project());
+
+    editor.prompt(&session_id, "Read my notes.").unwrap();
+
+    let read = api.requests.try_iter().nth(1).unwrap();
+    let result = read["messages"].as_array().unwrap().last().unwrap()["content"][0]["content"].to_string();
+    assert!(result.contains("in home"), "{result}");
 }
 
 #[test]

@@ -545,7 +545,11 @@ impl SpillFile {
 }
 
 pub(crate) fn spill_dir() -> PathBuf {
-    std::env::temp_dir().join(format!("agent-{}", std::process::id()))
+    spill_dir_of(std::process::id())
+}
+
+pub(crate) fn spill_dir_of(pid: u32) -> PathBuf {
+    std::env::temp_dir().join(format!("agent-{pid}"))
 }
 
 /// A new owner-only `{stem}-{n}.{extension}` in this run's spill dir.

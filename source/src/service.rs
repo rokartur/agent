@@ -115,7 +115,8 @@ fn install_on(host: &str) -> Result<(), String> {
         }
         // ssh exits 255 for its own failures, which it has printed.
         Some(255) => Err(format!("ssh {host} failed. agent service install --on needs `ssh {host}` to work from this computer.")),
-        _ => Err(format!("agent service install failed on {host}: {status}.")),
+        // A Windows host's ssh runs cmd, which cannot run the script.
+        _ => Err(format!("agent service install failed on {host}: {status}. A Windows host runs no agent service; run agent serve --tailnet there.")),
     }
 }
 

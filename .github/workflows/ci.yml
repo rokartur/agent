@@ -87,7 +87,9 @@ jobs:
       # choco puts rg and fd shims on PATH; ImageMagick's installer changes PATH only for later shells.
       - if: runner.os == 'Windows'
         run: |
-          choco install -y --no-progress ripgrep fd imagemagick.app
+          choco install -y --no-progress ripgrep --version 15.2.0
+          choco install -y --no-progress fd --version 10.5.2
+          choco install -y --no-progress imagemagick.app --version 7.1.2.2500
           cygpath -w "/c/Program Files"/ImageMagick-* >> "$GITHUB_PATH"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2

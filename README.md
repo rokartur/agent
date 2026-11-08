@@ -22,9 +22,9 @@ agent
 
 Type `/login` and pick Claude, ChatGPT or GitHub Copilot. You already pay for one; that's the setup. Google Gemini (as the Gemini CLI) and Antigravity sign in too, once `GEMINI_CLI_CLIENT_SECRET` or `ANTIGRAVITY_CLIENT_SECRET` holds the app's OAuth client secret; Google has banned accounts that use the Antigravity sign-in outside Antigravity. Prefer pay as you go? Paste an Anthropic or OpenRouter API key, and every OpenRouter model is in `/model`.
 
-macOS and Linux. Updates itself. `agent --help` for the rest.
+macOS, Linux and Windows. Updates itself. `agent --help` for the rest.
 
-Windows 10 1803 or later: download `agent-windows-x86_64.exe` from the [latest release](https://github.com/rokartur/agent/releases/latest) and install [Git for Windows](https://git-scm.com/download/win), whose bash runs the shell tools. `agent service` is macOS and Linux only; run `agent serve --tailnet` instead. The Windows console reports a paste as typed keys, so each line of pasted text sends on its own; paste one line at a time.
+Windows 10 1803 or later: download `agent-windows-x86_64.exe` from the [latest release](https://github.com/rokartur/agent/releases/latest), rename it to `agent.exe` and move it to a folder of its own on your `PATH`, such as `%LOCALAPPDATA%\Programs\agent`. Windows runs a tool such as `git.exe` from the agent's folder before `PATH`, so keep nothing else there. Install [Git for Windows](https://git-scm.com/download/win), whose bash runs the shell tools. `agent service` is macOS and Linux only; run `agent serve --tailnet` instead. `/voice` does not work on Windows yet. The Windows console reports a paste as typed keys, so each line of pasted text sends on its own; paste one line at a time.
 
 ## Switch computers with /env
 

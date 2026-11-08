@@ -144,8 +144,7 @@ enum Resume {
 }
 
 pub(crate) fn home() -> Result<PathBuf, String> {
-    // Windows sets no HOME outside Git Bash; home_dir reads the profile directory there.
-    std::env::var_os("HOME").map(PathBuf::from).or_else(std::env::home_dir).ok_or_else(|| "HOME is not set.".into())
+    std::env::var_os("HOME").map(PathBuf::from).ok_or_else(|| "HOME is not set.".into())
 }
 
 fn doctor_command(args: &[String]) -> Result<(), String> {
@@ -225,6 +224,14 @@ fn plugin_command(args: &[String]) -> Result<(), String> {
 }
 
 fn main() {
+    // Windows sets no HOME outside Git Bash, and the tools and the bash they start read it.
+    #[cfg(windows)]
+    if std::env::var_os("HOME").is_none()
+        && let Some(home) = std::env::home_dir()
+    {
+        // SAFETY: no other thread runs yet.
+        unsafe { std::env::set_var("HOME", home) };
+    }
     process::exit_on_signal(clean_up_on_signal);
     // An earlier agent with this pid that crashed left files that the spill and bg log `create_new` would refuse.
     tools::remove_spills();
@@ -443,6 +450,8 @@ fn open_session(options: &Options, args: &[String]) -> Result<(), String> {
         }
         // Started before the screen, so "Reading the message from stdin..." stays visible.
         let stream = serve::Stream::Local(local_session(&home, options, &args, &cwd, piped, None)?);
+        // crossterm on Windows reads keys from the console's `CONIN$`, whatever stdin is.
+        #[cfg(unix)]
         read_keys_from_the_terminal()?;
         return serve::show(&home, &environment, || Ok(stream));
     }
@@ -470,12 +479,6 @@ fn read_keys_from_the_terminal() -> Result<(), String> {
     if unsafe { libc::dup2(terminal.as_raw_fd(), libc::STDIN_FILENO) } == -1 {
         return Err(format!("Cannot read keys from {path}: {}", std::io::Error::last_os_error()));
     }
-    Ok(())
-}
-
-/// crossterm on Windows reads keys from the console's `CONIN$`, whatever stdin is.
-#[cfg(windows)]
-fn read_keys_from_the_terminal() -> Result<(), String> {
     Ok(())
 }
 

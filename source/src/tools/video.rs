@@ -524,7 +524,8 @@ fn run(command: &mut Command, scratch: &Path, abort: &AtomicBool, mut on_line: i
         "whisper-cli" => "whisper-cpp",
         other => other,
     };
-    let child = command.stdout(Stdio::piped()).stderr(log).spawn().map_err(|e| format!("Cannot run {program}: {e}. Install it: brew install {package}"))?;
+    let install = if cfg!(windows) { format!("install {package} and put it on PATH") } else { format!("brew install {package}") };
+    let child = command.stdout(Stdio::piped()).stderr(log).spawn().map_err(|e| format!("Cannot run {program}: {e}. Install it: {install}"))?;
     let mut stdout = Vec::new();
     let mut handed = 0;
     let (status, killed) = super::wait_streaming(child, abort, None, |chunk| {

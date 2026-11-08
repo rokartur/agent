@@ -94,14 +94,14 @@ impl Terminals {
         let title: String = label.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(MAX_TITLE_CHARS).collect();
         let (stdout_file, stdout) = super::private_file("bg", "stdout")?;
         let (stderr_file, stderr) = super::private_file("bg", "stderr")?;
-        let pid = crate::process::command(crate::process::shell("sh")?)
+        let child = crate::process::command(crate::process::shell("sh")?)
             .args(["-c", command])
             .current_dir(cwd)
             .stdout(stdout_file)
             .stderr(stderr_file)
             .spawn()
-            .map_err(|e| format!("Cannot start sh: {e}"))?
-            .id();
+            .map_err(|e| format!("Cannot start sh: {e}"))?;
+        let pid = child.id();
         self.counter += 1;
         let id = format!("bt-{}", self.counter);
         let terminal = Arc::new(Terminal { id, title, cwd: cwd.to_path_buf(), pid, started: Instant::now(), stdout, stderr, state: Mutex::default() });
@@ -112,12 +112,16 @@ impl Terminals {
             // shortcut: every settled `sh` stays a zombie until the agent exits, so `stop` and `kill_all` never signal a
             // reused group; reap once the group is empty if a session starts thousands of terminals.
             let status = crate::process::wait_unreaped(pid);
+            // Held until here: on Windows its handle is all that keeps a fast `sh`'s pid from being reused before the wait opens one.
+            drop(child);
             // follow_ups before state, the order TaskOutput and TaskStop use, so neither sees the exit before its report is queued.
             let mut queued = follow_ups.lock().unwrap();
             let mut state = watched.state.lock().unwrap();
             let exit = match status {
-                // Windows ends a process with an exit code, so there a stopped terminal counts as killed whatever its code.
-                Ok(status) if state.killed && (cfg!(windows) || crate::process::signal_of(status).is_some()) => (Status::Killed, exit_text(status.code(), crate::process::signal_of(status))),
+                // Windows ends a process with an exit code, so there a stopped terminal that did not exit 0 counts as killed.
+                Ok(status) if state.killed && (crate::process::signal_of(status).is_some() || cfg!(windows) && !status.success()) => {
+                    (Status::Killed, exit_text(status.code(), crate::process::signal_of(status)))
+                }
                 Ok(status) if status.success() => (Status::Done, "exit 0".to_string()),
                 Ok(status) => (Status::Failed, exit_text(status.code(), crate::process::signal_of(status))),
                 Err(e) => (Status::Failed, format!("wait failed: {e}")),
@@ -356,6 +360,20 @@ mod tests {
         assert_eq!(kill(&targets, &follow_ups, &abort), format!("Killed bt-1 \"sleep 30 & sleep 30\" ({how})."));
         assert!(follow_ups.lock().unwrap().is_empty());
         assert_eq!(kill(&targets, &follow_ups, &abort), format!("bt-1 \"sleep 30 & sleep 30\" was already killed ({how})."));
+    }
+
+    #[test]
+    fn a_terminal_that_exits_at_once_is_done() {
+        let dir = std::env::temp_dir();
+        let follow_ups = Arc::default();
+        let mut terminals = Terminals::default();
+        for _ in 0..5 {
+            terminals.start(&json!({"command": "exit 0"}), &dir, &follow_ups).unwrap();
+        }
+        wait_until(|| follow_ups.lock().unwrap().len() == 5);
+        for terminal in &terminals.list {
+            assert!(terminal.status() == Status::Done, "{}", terminal.result_text());
+        }
     }
 
     #[test]

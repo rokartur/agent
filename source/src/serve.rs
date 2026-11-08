@@ -348,6 +348,8 @@ fn sweep(home: &Path) {
         if crate::process::alive(pid) {
             continue;
         }
+        // A server ended by TerminateProcess or SIGKILL never ran the cleanup that removes its tool outputs.
+        let _ = std::fs::remove_dir_all(crate::tools::spill_dir_of(pid));
         let old = path.metadata().and_then(|metadata| metadata.modified()).is_ok_and(|modified| modified.elapsed().is_ok_and(|age| age > CRASH_LOG_AGE));
         if path.extension().is_some_and(|ext| ext == "sock") || old {
             let _ = std::fs::remove_file(&path);
@@ -371,8 +373,11 @@ mod tests {
             std::fs::write(path, "").unwrap();
         }
         std::fs::File::options().write(true).open(&old_log).unwrap().set_modified(std::time::SystemTime::now() - CRASH_LOG_AGE * 2).unwrap();
+        let spills = crate::tools::spill_dir_of(dead);
+        std::fs::create_dir_all(&spills).unwrap();
+        std::fs::write(spills.join("out.txt"), "tool output").unwrap();
         sweep(&home);
-        assert_eq!([socket.exists(), log.exists(), live_socket.exists(), old_log.exists()], [false, true, true, false]);
+        assert_eq!([socket.exists(), log.exists(), live_socket.exists(), old_log.exists(), spills.exists()], [false, true, true, false, false]);
         std::fs::remove_dir_all(&home).unwrap();
     }
 

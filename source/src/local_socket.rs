@@ -37,6 +37,7 @@ mod windows {
     const WSA_FLAG_OVERLAPPED: u32 = 0x01;
     const WSA_FLAG_NO_HANDLE_INHERIT: u32 = 0x80;
     const BACKLOG: i32 = 128;
+    const HANDLE_FLAG_INHERIT: u32 = 0x01;
 
     #[repr(C)]
     struct SockaddrUn {
@@ -93,8 +94,11 @@ mod windows {
             }
             // SAFETY: accept returned a new socket that nothing else owns.
             let socket = unsafe { OwnedSocket::from_raw_socket(socket as RawSocket) };
-            // An accepted socket would otherwise leak into every process the agent starts. SAFETY: a socket is a handle.
-            unsafe { SetHandleInformation(socket.as_raw_socket() as *mut c_void, 1, 0) };
+            // An accepted socket would otherwise leak into every process the agent starts.
+            // SAFETY: a socket is a handle.
+            if unsafe { SetHandleInformation(socket.as_raw_socket() as *mut c_void, HANDLE_FLAG_INHERIT, 0) } == 0 {
+                return Err(io::Error::last_os_error());
+            }
             Ok(Stream::from(socket))
         }
     }
@@ -126,5 +130,30 @@ mod windows {
     fn last_error() -> io::Error {
         // SAFETY: reads this thread's last Winsock error.
         io::Error::from_raw_os_error(unsafe { WSAGetLastError() })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::{BufRead, BufReader, Write};
+
+    #[test]
+    fn clones_of_both_ends_carry_lines_each_way() {
+        let path = std::env::temp_dir().join(format!("agent-socket-{}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let listener = super::bind(&path).unwrap();
+        let client = super::connect(&path).unwrap();
+        let server = listener.incoming().next().unwrap().unwrap();
+        let read_line = |stream: &super::Stream| {
+            let mut line = String::new();
+            BufReader::new(stream.try_clone().unwrap()).read_line(&mut line).unwrap();
+            line
+        };
+        server.try_clone().unwrap().write_all(b"to client\n").unwrap();
+        assert_eq!(read_line(&client), "to client\n");
+        client.try_clone().unwrap().write_all(b"to server\n").unwrap();
+        assert_eq!(read_line(&server), "to server\n");
+        drop((listener, client, server));
+        std::fs::remove_file(&path).unwrap();
     }
 }

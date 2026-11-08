@@ -182,7 +182,7 @@ fn sniffed_media_type(bytes: &[u8]) -> Option<&'static str> {
     }
 }
 
-const CLIPBOARD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+pub(crate) const CLIPBOARD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// GDI+ cannot write a PNG to the unseekable stdout, so the image goes through a memory stream; exit 1 means no image.
 const WINDOWS_CLIPBOARD_PNG: &str = "Add-Type -AssemblyName System.Windows.Forms, System.Drawing; \
@@ -314,9 +314,10 @@ pub(crate) mod tests {
         std::fs::write(&file, b"png").unwrap();
         // Terminals escape a dropped path with backslashes only on macOS and Linux, where they are not separators.
         #[cfg(unix)]
-        let escaped = file.display().to_string().replace(' ', "\\ ").replace('(', "\\(").replace(')', "\\)").replace('&', "\\&");
-        #[cfg(unix)]
-        assert_eq!(pasted_path(&escaped), Some(file.clone()));
+        {
+            let escaped = file.display().to_string().replace(' ', "\\ ").replace('(', "\\(").replace(')', "\\)").replace('&', "\\&");
+            assert_eq!(pasted_path(&escaped), Some(file.clone()));
+        }
         assert_eq!(pasted_path(&format!("'{}'", file.display())), Some(file.clone()));
         assert_eq!(pasted_path(&format!("\"{}\"", file.display())), Some(file.clone()));
         assert_eq!(pasted_path("just some text"), None);

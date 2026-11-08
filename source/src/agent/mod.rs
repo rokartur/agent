@@ -2257,9 +2257,10 @@ impl Session {
             if file.try_lock().is_ok() {
                 // A file that cannot be removed now is tried again at the next start.
                 let _ = std::fs::remove_file(&path);
-                drop(file);
+                // Removed while still locked, so no resume can lock a session whose transcript is gone.
                 #[cfg(windows)]
                 let _ = std::fs::remove_file(path.with_extension("lock"));
+                drop(file);
             }
         }
     }
@@ -3087,7 +3088,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(unix)]
     fn rewind_restores_only_what_this_session_changed() {
         let _index = SNAPSHOT_INDEX.lock().unwrap();
         let (root, work) = git_work("agent-restore");
@@ -3104,8 +3104,11 @@ mod tests {
         };
         write("a.txt", "v1");
         let first = tool_call(1, &[("a.txt", "v2")]);
-        let store = std::fs::read_dir(root.join(".agents/snapshots")).unwrap().next().unwrap().unwrap();
-        assert_eq!(std::os::unix::fs::PermissionsExt::mode(&store.metadata().unwrap().permissions()) & 0o777, 0o700, "snapshots hold file contents");
+        #[cfg(unix)]
+        {
+            let store = std::fs::read_dir(root.join(".agents/snapshots")).unwrap().next().unwrap().unwrap();
+            assert_eq!(std::os::unix::fs::PermissionsExt::mode(&store.metadata().unwrap().permissions()) & 0o777, 0o700, "snapshots hold file contents");
+        }
         write("between.txt", "user");
         let second = tool_call(3, &[("a.txt", "v3"), ("new.txt", "agent"), ("shared.txt", "agent")]);
         write("other.txt", "another session");

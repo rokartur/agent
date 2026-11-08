@@ -213,10 +213,26 @@ fn copy_to_clipboard(text: &str) -> Result<(), String> {
         .stderr(std::process::Stdio::null())
         .spawn()
         .map_err(|e| format!("Cannot run {program}: {e}"))?;
-    // The stdin handle drops before `wait`, so the child sees EOF; it is reaped even when the write failed.
+    // The stdin handle drops before the wait, so the child sees EOF; it is reaped even when the write failed.
     let written = child.stdin.take().unwrap().write_all(text.as_bytes());
-    child.wait().map_err(|e| e.to_string())?;
-    written.map_err(|e| e.to_string())
+    // Bounded: Set-Clipboard waits while another app holds the clipboard open.
+    let deadline = std::time::Instant::now() + crate::image::CLIPBOARD_TIMEOUT;
+    let status = loop {
+        if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
+            break status;
+        }
+        if std::time::Instant::now() > deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!("{program} did not finish copying."));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
+    written.map_err(|e| e.to_string())?;
+    if !status.success() {
+        return Err(format!("{program} exited with {status}"));
+    }
+    Ok(())
 }
 
 fn open_in_browser(url: &str) -> Result<(), String> {
@@ -224,13 +240,7 @@ fn open_in_browser(url: &str) -> Result<(), String> {
         return Err(format!("Not a web link: {url}"));
     }
     if !cfg!(target_os = "macos") {
-        // Not `cmd /c start`: cmd would read the `&` between query parameters as a command separator.
-        let (program, args): (&str, &[&str]) = if cfg!(windows) { ("rundll32", &["url.dll,FileProtocolHandler"]) } else { ("xdg-open", &[]) };
-        // Reaped on a thread: xdg-open runs a browser without a desktop handler in the foreground.
-        let mut child =
-            crate::process::command(program).args(args).arg(url).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().map_err(|e| format!("Cannot run {program}: {e}"))?;
-        std::thread::spawn(move || child.wait());
-        return Ok(());
+        return crate::api::oauth::spawn_browser(url);
     }
     // output() and not status(): open's stderr would draw over the alternate screen.
     let output = crate::process::command("open").arg(url).output().map_err(|e| format!("Cannot run open: {e}"))?;

@@ -101,11 +101,12 @@ mod tests {
         append(&dir, entry("one more")).unwrap();
         let prompts = prompts(&dir);
         #[cfg(unix)]
-        let mode = std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(dir.join("history.jsonl")).unwrap().permissions());
+        {
+            let mode = std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(dir.join("history.jsonl")).unwrap().permissions());
+            assert_eq!(mode & 0o777, 0o600, "the trimmed file stays private");
+        }
         let files = std::fs::read_dir(&dir).unwrap().count();
         std::fs::remove_dir_all(&dir).unwrap();
-        #[cfg(unix)]
-        assert_eq!(mode & 0o777, 0o600, "the trimmed file stays private");
         assert_eq!(files, 1, "no copy is left behind");
         assert_eq!(prompts.len(), KEEP);
         assert_eq!(prompts.last().unwrap(), "one more");
@@ -120,9 +121,10 @@ mod tests {
         append(&dir, Entry { prompt: "other session".into(), cwd: "/repo".into(), session: "s2".into() }).unwrap();
         let entries = load(&dir);
         #[cfg(unix)]
-        let mode = std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(dir.join("history.jsonl")).unwrap().permissions());
-        #[cfg(unix)]
-        assert_eq!(mode & 0o777, 0o600, "a file from an older build becomes private on the next append");
+        {
+            let mode = std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(dir.join("history.jsonl")).unwrap().permissions());
+            assert_eq!(mode & 0o777, 0o600, "a file from an older build becomes private on the next append");
+        }
         std::fs::remove_dir_all(&dir).unwrap();
 
         let in_scope = |scope| entries.iter().filter(|e| e.in_scope(scope, Path::new("/repo"), "s1")).map(|e| e.prompt.as_str()).collect::<Vec<_>>();
