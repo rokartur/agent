@@ -35,7 +35,7 @@ pub fn edited_files(tool: &str, input: &Value, cwd: &Path, anchors: &Anchors) ->
 pub fn hooks(files: &[PathBuf], trusted_projects: &[String]) -> (Vec<Hook>, Vec<String>, usize) {
     let mut files_by_dir: BTreeMap<PathBuf, Vec<String>> = BTreeMap::new();
     for file in files {
-        let Ok(file) = file.canonicalize() else { continue };
+        let Ok(file) = crate::process::canonicalize(file) else { continue };
         let Some(dir) = config_dir(&file) else { continue };
         let relative = file.strip_prefix(&dir).expect("the config dir is an ancestor of the file").display().to_string();
         let group = files_by_dir.entry(dir).or_default();
@@ -222,7 +222,7 @@ mod tests {
     fn files_run_the_nearest_config_once_per_first_matching_glob() {
         let root = std::env::temp_dir().join(format!("agent-edit-hooks-{}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
-        let root = root.canonicalize().unwrap();
+        let root = crate::process::canonicalize(&root).unwrap();
         let write = |path: &str, text: &str| {
             let path = root.join(path);
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -262,7 +262,7 @@ mod tests {
         for dir in [root.join(".agents"), root.join(".git"), vendored.join(".agents"), vendored.join(".git")] {
             std::fs::create_dir_all(dir).unwrap();
         }
-        let root = root.canonicalize().unwrap();
+        let root = crate::process::canonicalize(&root).unwrap();
         std::fs::write(root.join(CONFIG), r#"{"onStop": {"*": "fmt {file}"}}"#).unwrap();
         std::fs::write(vendored.join(CONFIG), r#"{"onStop": {"*": ["touch pwned", "fmt {file}"]}}"#).unwrap();
         let files = [root.join("a.txt"), vendored.join("b.txt")];

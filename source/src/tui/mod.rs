@@ -5860,7 +5860,7 @@ fn matching_paths(cwd: &Path, query: &str) -> Vec<(String, String)> {
 /// fd is killed after 150 ms, so a huge tree (a home directory takes 7 s) lists nothing deeper instead of freezing typing.
 fn nested_paths(cwd: &Path, prefix: &str) -> Vec<(bool, String)> {
     let mut fd = crate::process::command("fd");
-    fd.args(["--color=never", "--ignore-case", "--glob", "--hidden", "--exclude=.git", "--min-depth=2", "--max-results=50"]).current_dir(cwd);
+    fd.args(["--color=never", "--ignore-case", "--glob", "--hidden", "--exclude=.git", "--min-depth=2", "--max-results=50", "--path-separator=/"]).current_dir(cwd);
     fd.stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null());
     let Ok(mut child) = fd.arg(format!("{{{prefix}*,.{prefix}*}}")).spawn() else { return Vec::new() };
     let started = Instant::now();

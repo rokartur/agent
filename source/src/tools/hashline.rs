@@ -588,7 +588,7 @@ pub fn str_arg<'a>(input: &'a Value, name: &str) -> Result<&'a str, String> {
 /// Replaces an existing `path` through a temp file and rename, so a crash or full disk never truncates it; a new file is written in place.
 pub(super) fn replace_file(path: &Path, new: &[u8]) -> Result<(), String> {
     // rename would replace a symlink itself, so the temp file goes next to the file it points to.
-    let Ok(path) = path.canonicalize() else { return std::fs::write(path, new).map_err(|e| format!("Cannot write {}: {e}", path.display())) };
+    let Ok(path) = crate::process::canonicalize(path) else { return std::fs::write(path, new).map_err(|e| format!("Cannot write {}: {e}", path.display())) };
     let name = path.file_name().expect("a canonical file path has a name").to_string_lossy();
     let temp = path.with_file_name(format!(".{name}.{}.tmp", crate::api::oauth::random_hex(4)));
     let write = || -> std::io::Result<()> {
@@ -616,7 +616,7 @@ pub fn resolve(cwd: &Path, path: &str) -> PathBuf {
 }
 
 fn existing_file(cwd: &Path, path: &str) -> Result<PathBuf, String> {
-    let full = resolve(cwd, path).canonicalize().map_err(|e| format!("Cannot read {path}: {e}"))?;
+    let full = crate::process::canonicalize(resolve(cwd, path)).map_err(|e| format!("Cannot read {path}: {e}"))?;
     if full.is_dir() {
         return Err(format!("{} is a directory. List it with fd or ls in bash.", full.display()));
     }
@@ -649,7 +649,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("f.txt");
         std::fs::write(&path, content).unwrap();
-        path.canonicalize().unwrap()
+        crate::process::canonicalize(path).unwrap()
     }
 
     fn anchors_of(output: &str) -> Vec<String> {
@@ -924,6 +924,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn read_refuses_devices() {
         let err = Anchors::new("s").read(Path::new("/"), &json!({"file_path": "/dev/null"})).unwrap_err();
         assert!(err.contains("is not a regular file"), "{err}");

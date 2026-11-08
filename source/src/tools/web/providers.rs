@@ -784,7 +784,8 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("agent-web-keys-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let log = dir.join("runs");
-        let settings = json!({"exaApiKey": format!("!echo run >> {}; echo k1", log.display()), "tavilyApiKey": " "});
+        // Forward slashes: bash would read the backslashes of a Windows path as escapes.
+        let settings = json!({"exaApiKey": format!("!echo run >> {}; echo k1", log.display().to_string().replace('\\', "/")), "tavilyApiKey": " "});
         std::fs::write(dir.join("web-search.json"), settings.to_string()).unwrap();
         let keys_lock = PROVIDER_KEYS.lock().unwrap();
         unsafe { std::env::set_var("TAVILY_API_KEY", "!from-env") };

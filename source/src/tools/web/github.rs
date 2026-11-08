@@ -199,6 +199,9 @@ fn walk(root: &Path, dir: &Path, lines: &mut Vec<String>) {
             continue;
         }
         let rel = path.strip_prefix(root).unwrap_or(&path).display().to_string();
+        // One separator in the tree the model reads, as GitHub shows it.
+        #[cfg(windows)]
+        let rel = rel.replace('\\', "/");
         if !path.is_dir() {
             lines.push(rel);
         } else if NOISE.contains(&name.as_str()) {

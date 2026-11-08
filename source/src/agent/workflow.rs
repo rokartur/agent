@@ -360,7 +360,7 @@ pub fn save(script: &str, name: &str, dir: &Path, project: bool) -> Result<PathB
 /// The closest `.agents/workflows` that exists between `cwd` and the project root, else the root's.
 pub fn project_save_dir(cwd: &Path) -> PathBuf {
     let root = super::prompt::project_root(cwd);
-    let cwd = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
+    let cwd = crate::process::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
     let mut dirs = cwd.ancestors().take_while(|dir| dir.starts_with(&root)).map(|dir| dir.join(".agents").join("workflows"));
     dirs.find(|dir| dir.is_dir()).unwrap_or_else(|| root.join(".agents").join("workflows"))
 }

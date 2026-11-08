@@ -88,7 +88,7 @@ impl Lsp {
         let deadline = Instant::now() + TIMEOUT;
         self.stop_idle();
         // `/tmp` and `/private/tmp`, or a symlinked checkout, would otherwise start a second server on one directory.
-        let file = &file.canonicalize().map_err(|e| format!("[lsp] Cannot read {}: {e}", file.display()))?;
+        let file = &crate::process::canonicalize(file).map_err(|e| format!("[lsp] Cannot read {}: {e}", file.display()))?;
         let key = (language.clone(), root(file, &server.roots));
         if !self.servers.contains_key(&key) {
             match Server::start(&server.command, &key.1, deadline, abort) {

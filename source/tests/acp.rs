@@ -24,7 +24,11 @@ impl Home {
         let dir = std::env::temp_dir().join(format!("agent-acp-e2e-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("project")).unwrap();
-        Home { dir: dir.canonicalize().unwrap() }
+        #[allow(clippy::disallowed_methods)]
+        let dir = dir.canonicalize().unwrap();
+        // The agent drops the \\?\ prefix Windows' canonicalize adds.
+        let dir = dir.to_str().unwrap().strip_prefix(r"\\?\").map_or(dir.clone(), PathBuf::from);
+        Home { dir }
     }
 
     fn project(&self) -> PathBuf {

@@ -298,7 +298,7 @@ fn write(input: &Value, cwd: &Path, editor: Option<&dyn hashline::EditorFiles>) 
         None => hashline::replace_file(&path, content.as_bytes())?,
     }
     // An editor may keep a new file as an unsaved buffer, which canonicalize cannot find on disk.
-    let path = path.canonicalize().unwrap_or(path);
+    let path = crate::process::canonicalize(&path).unwrap_or(path);
     // No echo of the content: it is already in the call, and every later turn would pay for it twice.
     Ok(format!("Wrote {} lines to {}.", content.lines().count(), path.display()))
 }
@@ -377,7 +377,7 @@ fn rg_rows(json: &str, cwd: &Path, anchors: &mut Anchors) -> Result<String, Stri
         let separator = match event["type"].as_str() {
             Some("begin") => {
                 let in_budget = rows.len() < MAX_LINES && anchors.minted() - minted_before < SEARCH_ANCHOR_BUDGET;
-                tracked = if in_budget { cwd.join(path).canonicalize().ok().filter(|file| anchors.track(file, MAX_LINES).is_ok()) } else { None };
+                tracked = if in_budget { crate::process::canonicalize(cwd.join(path)).ok().filter(|file| anchors.track(file, MAX_LINES).is_ok()) } else { None };
                 continue;
             }
             Some("match") => ':',
@@ -591,7 +591,7 @@ mod tests {
     }
 
     fn run_bash(input: Value, abort: &Arc<AtomicBool>) -> (String, bool) {
-        run("Bash", &input, Path::new("/tmp"), &mut Anchors::new("t"), &Rtk::OFF, abort)
+        run("Bash", &input, &std::env::temp_dir(), &mut Anchors::new("t"), &Rtk::OFF, abort)
     }
 
     #[test]
@@ -750,7 +750,7 @@ mod tests {
 
     #[test]
     fn rg_reports_a_missing_path_instead_of_no_matches() {
-        let error = rg(&json!({"pattern": "needle", "path": "/nonexistent-agent-path"}), Path::new("/tmp"), &mut Anchors::new("t"), &AtomicBool::new(false)).unwrap_err();
+        let error = rg(&json!({"pattern": "needle", "path": "/nonexistent-agent-path"}), &std::env::temp_dir(), &mut Anchors::new("t"), &AtomicBool::new(false)).unwrap_err();
         assert!(error.starts_with("rg failed"), "{error}");
     }
 
@@ -759,7 +759,7 @@ mod tests {
         // About 68 KB in 1500 lines: under the line cap, over the 50 KB byte cap.
         let pad = "x".repeat(32);
         let command = format!("awk 'BEGIN {{ for (i = 1; i <= 1500; i++) print \"line\", i, \"{pad}\" }}'");
-        let (out, _) = run("Bash", &json!({ "command": command }), Path::new("/tmp"), &mut Anchors::new("t"), &Rtk::ON, &Arc::default());
+        let (out, _) = run("Bash", &json!({ "command": command }), &std::env::temp_dir(), &mut Anchors::new("t"), &Rtk::ON, &Arc::default());
         assert!(out.contains(&format!("\nline 1500 {pad}\n")), "{}", &out[out.len().saturating_sub(300)..]);
         let path = out.rsplit("Full output: ").next().unwrap().trim_end_matches(']');
         assert_eq!(std::fs::read_to_string(path).unwrap(), (1..=1500).map(|i| format!("line {i} {pad}\n")).collect::<String>());

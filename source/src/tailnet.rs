@@ -15,6 +15,8 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{IpAddr, Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use serde_json::{Value, json};
@@ -517,7 +519,8 @@ fn subagent_here(home: &Path, device: &str, subagent: &Value) -> Result<Child, S
 
 /// Where a remote start runs: the directory it asked for, or home and the asked one when that is not on this computer.
 fn start_dir(home: &Path, asked: Option<&str>) -> (PathBuf, Option<PathBuf>) {
-    match asked.map(PathBuf::from).filter(|cwd| cwd.is_absolute()) {
+    // has_root, not is_absolute: a Unix path sent to Windows has no drive, and is still a directory missing here.
+    match asked.map(PathBuf::from).filter(|cwd| cwd.has_root()) {
         Some(cwd) if cwd.is_dir() => (cwd, None),
         missing => (home.to_path_buf(), missing),
     }
@@ -550,14 +553,17 @@ fn relay_subagent(mut from_parent: BufReader<TcpStream>, parent: TcpStream, mut 
     let mut from_child = child.stdout.take().expect("stdout is piped");
     if let Ok(mut to_parent) = parent.try_clone() {
         let _ = to_parent.set_write_timeout(Some(RELAY_WRITE_TIMEOUT));
+        let output_ended = Arc::new(AtomicBool::new(false));
+        let ended = output_ended.clone();
         // Not joined: a process the child started can keep its stdout open after the child exits.
         std::thread::spawn(move || {
             // `dyn Read` keeps std off splice, which on Linux holds the pipe's lock while it waits on the other end,
             // leaving the child stuck uninterruptibly in its read or write.
             let _ = std::io::copy(&mut from_child as &mut dyn Read, &mut to_parent);
             let _ = to_parent.shutdown(Shutdown::Both);
+            ended.store(true, Ordering::Relaxed);
         });
-        let _ = std::io::copy(&mut from_parent as &mut dyn Read, &mut to_child);
+        relay_input(&mut from_parent, &mut to_child, &output_ended);
     }
     if let Ok(None) = child.try_wait() {
         // SIGTERM, as a local stop sends: the child's handler then ends its own commands.
@@ -567,6 +573,22 @@ fn relay_subagent(mut from_parent: BufReader<TcpStream>, parent: TcpStream, mut 
         crate::process::signal_group(child.id(), crate::process::SIGTERM);
     }
     let _ = child.wait();
+}
+
+/// Copies the parent's input to the child until either side ends. Windows' shutdown does not wake a recv blocked on
+/// the same socket, so the read wakes each second to see whether the child's output ended.
+fn relay_input(from_parent: &mut BufReader<TcpStream>, to_child: &mut impl Write, output_ended: &AtomicBool) {
+    let _ = from_parent.get_ref().set_read_timeout(Some(Duration::from_secs(1)));
+    let mut buffer = [0; 8192];
+    while !output_ended.load(Ordering::Relaxed) {
+        match from_parent.read(&mut buffer) {
+            Ok(0) => return,
+            Ok(read) if to_child.write_all(&buffer[..read]).is_err() => return,
+            Ok(_) => {}
+            Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut | std::io::ErrorKind::Interrupted) => {}
+            Err(_) => return,
+        }
+    }
 }
 
 fn own_user() -> Result<u64, String> {

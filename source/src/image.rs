@@ -137,8 +137,14 @@ fn shrunk(bytes: &[u8], media_type: &'static str, side: u32) -> Result<(&'static
     let output = dir.join(format!("{nonce}-out.{format}"));
     std::fs::write(&input, bytes).map_err(|e| format!("Cannot write {}: {e}", input.display()))?;
     let side = side.to_string();
-    // ImageMagick 6, as Ubuntu ships it, has `convert` and no `magick`.
-    let programs: &[&str] = if cfg!(target_os = "macos") { &["sips"] } else { &["magick", "convert"] };
+    // ImageMagick 6, as Ubuntu ships it, has `convert` and no `magick`; on Windows `convert` is System32's disk converter.
+    let programs: &[&str] = if cfg!(target_os = "macos") {
+        &["sips"]
+    } else if cfg!(windows) {
+        &["magick"]
+    } else {
+        &["magick", "convert"]
+    };
     let mut program = programs[0];
     let mut result = Err(std::io::ErrorKind::NotFound.into());
     for &candidate in programs {
@@ -294,7 +300,10 @@ pub(crate) mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("capture screen (1) & co.png");
         std::fs::write(&file, b"png").unwrap();
+        // Terminals escape a dropped path with backslashes only on macOS and Linux, where they are not separators.
+        #[cfg(unix)]
         let escaped = file.display().to_string().replace(' ', "\\ ").replace('(', "\\(").replace(')', "\\)").replace('&', "\\&");
+        #[cfg(unix)]
         assert_eq!(pasted_path(&escaped), Some(file.clone()));
         assert_eq!(pasted_path(&format!("'{}'", file.display())), Some(file.clone()));
         assert_eq!(pasted_path(&format!("\"{}\"", file.display())), Some(file.clone()));
@@ -329,7 +338,7 @@ pub(crate) mod tests {
             command.args(["-z", "1920", "3840"]).arg(&file);
             command
         } else {
-            let mut command = crate::process::command("convert");
+            let mut command = crate::process::command(if cfg!(windows) { "magick" } else { "convert" });
             command.arg(&file).args(["-resize", "3840x1920!"]).arg(&file);
             command
         };

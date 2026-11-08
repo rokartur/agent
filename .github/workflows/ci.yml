@@ -84,6 +84,11 @@ jobs:
           tar xzf ripgrep-15.2.0-aarch64-apple-darwin.tar.gz -C bin --strip-components=1 ripgrep-15.2.0-aarch64-apple-darwin/rg
           tar xzf fd-v10.5.1-aarch64-apple-darwin.tar.gz -C bin --strip-components=1 fd-v10.5.1-aarch64-apple-darwin/fd
           echo "$PWD/bin" >> "$GITHUB_PATH"
+      # choco puts rg and fd shims on PATH; ImageMagick's installer changes PATH only for later shells.
+      - if: runner.os == 'Windows'
+        run: |
+          choco install -y --no-progress ripgrep fd imagemagick.app
+          cygpath -w "/c/Program Files"/ImageMagick-* >> "$GITHUB_PATH"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:

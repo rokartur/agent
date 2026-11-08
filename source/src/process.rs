@@ -50,6 +50,19 @@ fn read_in_background(pipe: Option<impl std::io::Read + Send + 'static>) -> std:
     })
 }
 
+/// `std::fs::canonicalize` without the `\\?\` prefix Windows adds, which git, shells and path comparisons do not expect.
+#[allow(clippy::disallowed_methods)]
+pub fn canonicalize(path: impl AsRef<std::path::Path>) -> std::io::Result<std::path::PathBuf> {
+    let path = std::fs::canonicalize(path)?;
+    #[cfg(windows)]
+    if let Some(local) = path.to_str().and_then(|path| path.strip_prefix(r"\\?\"))
+        && !local.starts_with(r"UNC\")
+    {
+        return Ok(local.into());
+    }
+    Ok(path)
+}
+
 pub fn now_ms() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).expect("clock is after 1970").as_millis() as u64
 }

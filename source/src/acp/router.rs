@@ -168,7 +168,7 @@ fn cancel_start(request_id: &Value, routes: &Arc<Mutex<Routes>>) {
 fn list(params: &Value) -> Result<Value, (i64, String)> {
     let sessions_dir = crate::home().map_err(|error| (INTERNAL_ERROR, error))?.join(".agents/sessions");
     // macOS: /tmp is a link to /private/tmp, and sessions record the resolved directory.
-    let cwd = params["cwd"].as_str().map(|cwd| std::fs::canonicalize(cwd).map_or(cwd.to_string(), |cwd| cwd.display().to_string()));
+    let cwd = params["cwd"].as_str().map(|cwd| crate::process::canonicalize(cwd).map_or(cwd.to_string(), |cwd| cwd.display().to_string()));
     let sessions: Vec<Value> = Session::list(&sessions_dir)
         .into_iter()
         .filter(|info| cwd.as_ref().is_none_or(|cwd| info.cwd == *cwd))

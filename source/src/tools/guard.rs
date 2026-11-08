@@ -71,7 +71,11 @@ fn printed_range(words: &[&str], dir: Option<&str>) -> Option<Value> {
         _ => return None,
     };
     let file = file.trim_matches(['\'', '"']);
-    let path = dir.map_or(file.to_string(), |dir| std::path::Path::new(dir).join(file).display().to_string());
+    // Joined as text: these are bash paths, and Path::join would put a backslash in them on Windows.
+    let path = match dir {
+        Some(dir) if !file.starts_with('/') => format!("{}/{file}", dir.trim_end_matches('/')),
+        _ => file.to_string(),
+    };
     if file.starts_with('-') || path.contains(['|', '<', '>', ';', '&', '$', '`', '*', '?', '[', '{', '(']) {
         return None;
     }

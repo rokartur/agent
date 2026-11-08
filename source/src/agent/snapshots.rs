@@ -28,13 +28,17 @@ impl Snapshots {
         let paths = run(crate::process::command("git").arg("-C").arg(cwd).args(["rev-parse", "--show-toplevel", "--path-format=absolute", "--git-path", "info/exclude"])).ok()?;
         let (top, exclude) = paths.split_once('\n')?;
         let (work_tree, exclude) = (PathBuf::from(top), PathBuf::from(exclude));
-        let git_dir = home.join(".agents/snapshots").join(work_tree.to_string_lossy().replace('/', "-"));
+        let name = work_tree.to_string_lossy().replace('/', "-");
+        // git prints C:/Users/... on Windows, and joining "C:-Users-..." would resolve against drive C instead.
+        #[cfg(windows)]
+        let name = name.replace([':', '\\'], "-");
+        let git_dir = home.join(".agents/snapshots").join(name);
         // One index per process, so two agents in the same repo do not fight over index.lock; the private
         // spill dir keeps other local users from locking or planting it, and quitting removes it.
         let spills = crate::tools::spill_dir();
         crate::process::private_dir(&spills).ok()?;
         let index = spills.join("snapshot.index");
-        let agent_data = home.join(".agents").canonicalize().ok().and_then(|dir| dir.strip_prefix(&work_tree).ok().map(Path::to_path_buf));
+        let agent_data = crate::process::canonicalize(home.join(".agents")).ok().and_then(|dir| dir.strip_prefix(&work_tree).ok().map(Path::to_path_buf));
         let files_git_dir = home.join(".agents/snapshots/files");
         Some(Snapshots { git_dir, work_tree, index, exclude, last_ref: RefCell::default(), agent_data, files_git_dir })
     }

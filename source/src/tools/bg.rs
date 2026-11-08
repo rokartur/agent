@@ -352,12 +352,14 @@ mod tests {
         terminals.start(&json!({"command": "sleep 30 &\n sleep 30"}), &dir, &follow_ups).unwrap();
         let targets = [terminals.find("bt-1").unwrap()];
         let abort = AtomicBool::new(false);
-        assert_eq!(kill(&targets, &follow_ups, &abort), "Killed bt-1 \"sleep 30 & sleep 30\" (SIGTERM).");
+        let how = if cfg!(windows) { "exit 1" } else { "SIGTERM" };
+        assert_eq!(kill(&targets, &follow_ups, &abort), format!("Killed bt-1 \"sleep 30 & sleep 30\" ({how})."));
         assert!(follow_ups.lock().unwrap().is_empty());
-        assert_eq!(kill(&targets, &follow_ups, &abort), "bt-1 \"sleep 30 & sleep 30\" was already killed (SIGTERM).");
+        assert_eq!(kill(&targets, &follow_ups, &abort), format!("bt-1 \"sleep 30 & sleep 30\" was already killed ({how})."));
     }
 
     #[test]
+    #[cfg(unix)]
     fn kill_reaches_children_that_outlive_the_shell() {
         let dir = std::env::temp_dir();
         let follow_ups = Arc::default();
@@ -378,6 +380,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn alive(pid: &str) -> bool {
         crate::process::command("kill").args(["-0", pid]).stderr(std::process::Stdio::null()).status().unwrap().success()
     }

@@ -1278,9 +1278,9 @@ impl Agent {
 
     fn switch_worktree(&mut self, path: &str, emit: &mut dyn FnMut(Event)) -> Result<String, String> {
         let typed = self.cwd.join(path);
-        let path = typed.canonicalize().map_err(|e| format!("Cannot open {}: {e}", typed.display()))?;
+        let path = crate::process::canonicalize(&typed).map_err(|e| format!("Cannot open {}: {e}", typed.display()))?;
         let (worktrees, current) = crate::worktree::list(&self.cwd)?;
-        if !worktrees.iter().any(|worktree| worktree.path.canonicalize().is_ok_and(|known| known == path)) {
+        if !worktrees.iter().any(|worktree| crate::process::canonicalize(&worktree.path).is_ok_and(|known| known == path)) {
             return Err(format!("{} is not in `git worktree list` of this repository.", path.display()));
         }
         if path == current {
@@ -1756,11 +1756,11 @@ impl Agent {
 
     /// --add-dir and /workspace add: `path` is relative to cwd or starts with `~`; saved so a resume restores it. Returns the notice to show.
     pub fn add_dir(&mut self, path: &str) -> Result<String, String> {
-        let dir = tools::hashline::resolve(&self.cwd, path).canonicalize().map_err(|e| format!("Cannot open {path}: {e}"))?;
+        let dir = crate::process::canonicalize(tools::hashline::resolve(&self.cwd, path)).map_err(|e| format!("Cannot open {path}: {e}"))?;
         if !dir.is_dir() {
             return Err(format!("{} is not a directory.", dir.display()));
         }
-        let cwd = self.cwd.canonicalize().map_err(|e| format!("Cannot open {}: {e}", self.cwd.display()))?;
+        let cwd = crate::process::canonicalize(&self.cwd).map_err(|e| format!("Cannot open {}: {e}", self.cwd.display()))?;
         // Not an error, so `agent -c --add-dir ../api` on a session that has it still starts.
         if dir.starts_with(&cwd) {
             return Ok(format!("{} is inside the working directory, so it is already in the workspace.", dir.display()));
@@ -1776,7 +1776,7 @@ impl Agent {
     /// /workspace remove: takes the path as listed or as typed relative to cwd. Returns the notice to show.
     pub fn remove_dir(&mut self, path: &str) -> Result<String, String> {
         let typed = tools::hashline::resolve(&self.cwd, path);
-        let dir = typed.canonicalize().unwrap_or(typed);
+        let dir = crate::process::canonicalize(&typed).unwrap_or(typed);
         let index = self.extra_dirs.iter().position(|known| *known == dir).ok_or(format!("{} is not an extra directory.", dir.display()))?;
         let dir = self.extra_dirs.remove(index);
         self.save_extra_dirs()?;
@@ -1799,7 +1799,7 @@ impl Agent {
             Some(rest) if rest.is_empty() || rest.starts_with('/') => self.home.join(rest.trim_start_matches('/')),
             _ => self.cwd.join(dir),
         };
-        let dir = typed.canonicalize().map_err(|e| format!("Cannot open {dir}: {e}"))?;
+        let dir = crate::process::canonicalize(&typed).map_err(|e| format!("Cannot open {dir}: {e}"))?;
         if !dir.is_dir() {
             return Err(format!("{} is not a directory.", dir.display()));
         }
@@ -2088,7 +2088,7 @@ impl Session {
         }
         session.append(&json!({"type": "session", "id": session.id, "cwd": cwd, "model": model, "timestamp": now_ms()}))?;
         if let Some(path) = &session.path {
-            let file = File::open(path).map_err(|e| format!("Cannot open {}: {e}", path.display()))?;
+            let file = lock_file(path).map_err(|e| format!("Cannot open {}: {e}", path.display()))?;
             file.try_lock().map_err(|e| format!("Cannot lock {}: {e}", path.display()))?;
             session.lock = Some(Arc::new(file));
         }
@@ -2101,7 +2101,7 @@ impl Session {
         let id = resolve_id(dir, id)?;
         let path = dir.join(format!("{id}.jsonl"));
         let history = Session::history(&path)?;
-        let file = File::open(&path).map_err(|e| format!("Cannot open {}: {e}", path.display()))?;
+        let file = lock_file(&path).map_err(|e| format!("Cannot open {}: {e}", path.display()))?;
         match file.try_lock() {
             Ok(()) => Ok((Session { id, path: Some(path), forked_from: None, lock: Some(Arc::new(file)) }, history)),
             Err(TryLockError::WouldBlock) => Ok((Session::fork(dir, &path, id)?, history)),
@@ -2253,10 +2253,13 @@ impl Session {
             if modified >= cutoff {
                 continue;
             }
-            let Ok(file) = File::open(&path) else { continue };
+            let Ok(file) = lock_file(&path) else { continue };
             if file.try_lock().is_ok() {
                 // A file that cannot be removed now is tried again at the next start.
                 let _ = std::fs::remove_file(&path);
+                drop(file);
+                #[cfg(windows)]
+                let _ = std::fs::remove_file(path.with_extension("lock"));
             }
         }
     }
@@ -2351,6 +2354,18 @@ fn write_session_index(path: &Path, sessions: serde_json::Map<String, Value>) ->
     let mut file = crate::process::private_file().create(true).write(true).truncate(true).open(&temporary)?;
     file.write_all(json!({"version": SESSION_INDEX_VERSION, "sessions": sessions}).to_string().as_bytes())?;
     std::fs::rename(&temporary, path)
+}
+
+/// The file whose lock marks a session as open in a process.
+#[cfg(unix)]
+fn lock_file(session: &Path) -> std::io::Result<File> {
+    File::open(session)
+}
+
+/// Windows locks are mandatory: a lock on the session itself would block its own appends and every reader, so it sits beside it.
+#[cfg(windows)]
+fn lock_file(session: &Path) -> std::io::Result<File> {
+    File::options().create(true).write(true).truncate(false).open(session.with_extension("lock"))
 }
 
 /// The full id for an exact id or a unique prefix of a saved session's id.
@@ -2911,7 +2926,7 @@ mod tests {
         let mut agent = Agent::new(Client::new(&home).unwrap(), &settings, home.clone(), cwd, session, home.join("sessions"), None);
         let added = agent.add_dir("~");
         std::fs::remove_dir_all(&home).unwrap();
-        let real_home = PathBuf::from(std::env::var("HOME").unwrap()).canonicalize().unwrap();
+        let real_home = crate::process::canonicalize(std::env::var("HOME").unwrap()).unwrap();
         assert_eq!(added, Ok(format!("Added {}.", real_home.display())));
         assert_eq!(agent.extra_dirs, [real_home]);
     }

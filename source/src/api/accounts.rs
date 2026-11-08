@@ -95,7 +95,7 @@ fn save(home: &Path, accounts: &[Account]) -> Result<(), String> {
 /// Writes `text` through a 0600 temp file and a rename, so a crash never leaves half a file.
 pub(crate) fn write_private(path: &Path, text: &str) -> Result<(), String> {
     // Renaming over a symlink would replace a dotfiles link with a plain file.
-    let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let path = crate::process::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     // Per process: two agents sharing one temp name would rename each other's half-written file into place.
     let temp = path.with_extension(format!("json.{}.tmp", std::process::id()));
     let mut out = crate::process::private_file().write(true).create(true).truncate(true).open(&temp).map_err(|e| format!("Cannot write {}: {e}", temp.display()))?;
