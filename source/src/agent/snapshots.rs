@@ -73,7 +73,9 @@ impl Snapshots {
         // shortcut: glob characters in `agent_data` are not escaped; such a path keeps them in the snapshots.
         if let Some(dir) = &self.agent_data {
             for data in ["sessions", "snapshots", "models"] {
-                rules.extend_from_slice(format!("\n/{}/", dir.join(data).display()).as_bytes());
+                // Git rules split on `/` only; Windows paths display with `\`.
+                let rule = dir.join(data).display().to_string().replace(std::path::MAIN_SEPARATOR, "/");
+                rules.extend_from_slice(format!("\n/{rule}/").as_bytes());
             }
         }
         let info = self.git_dir.join("info");
