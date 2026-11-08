@@ -186,9 +186,15 @@ fn codex_account_id(access: &str) -> Option<String> {
     claims[CODEX_JWT_CLAIM]["chatgpt_account_id"].as_str().filter(|id| !id.is_empty()).map(String::from)
 }
 
+/// An http(s) URL without a quote, space or control character, which a valid URL carries only percent-encoded. rundll32
+/// parses its own command line, so such a character could end the URL argument there.
+pub fn is_web_link(url: &str) -> bool {
+    (url.starts_with("https://") || url.starts_with("http://")) && !url.chars().any(|c| c == '"' || c.is_whitespace() || c.is_control())
+}
+
 pub fn open_browser(url: &str) {
     // MCP servers supply the authorization URL; a file:// or app scheme would open something local.
-    if !(url.starts_with("https://") || url.starts_with("http://")) {
+    if !is_web_link(url) {
         return;
     }
     let (opener, args): (&str, &[&str]) = if cfg!(target_os = "macos") {

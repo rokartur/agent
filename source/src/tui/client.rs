@@ -220,7 +220,7 @@ fn copy_to_clipboard(text: &str) -> Result<(), String> {
 }
 
 fn open_in_browser(url: &str) -> Result<(), String> {
-    if !(url.starts_with("https://") || url.starts_with("http://")) {
+    if !crate::api::oauth::is_web_link(url) {
         return Err(format!("Not a web link: {url}"));
     }
     if !cfg!(target_os = "macos") {
@@ -295,6 +295,7 @@ mod tests {
     #[test]
     fn only_a_failed_or_asked_for_request_is_answered() {
         assert_eq!(serve_request(&json!({"open": "file:///etc/passwd"})), Some(json!({"failed": "Not a web link: file:///etc/passwd"})));
+        assert_eq!(serve_request(&json!({"open": "https://a.test/\" C:\\x.exe"})), Some(json!({"failed": "Not a web link: https://a.test/\" C:\\x.exe"})));
         assert_eq!(serve_request(&json!({"unknown": 1})), None);
     }
 
