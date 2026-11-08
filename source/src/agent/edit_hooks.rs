@@ -38,6 +38,9 @@ pub fn hooks(files: &[PathBuf], trusted_projects: &[String]) -> (Vec<Hook>, Vec<
         let Ok(file) = crate::process::canonicalize(file) else { continue };
         let Some(dir) = config_dir(&file) else { continue };
         let relative = file.strip_prefix(&dir).expect("the config dir is an ancestor of the file").display().to_string();
+        // Globs match with slashes, and bash would read backslashes in `{files}` as escapes.
+        #[cfg(windows)]
+        let relative = relative.replace('\\', "/");
         let group = files_by_dir.entry(dir).or_default();
         if !group.contains(&relative) {
             group.push(relative);
@@ -238,7 +241,7 @@ mod tests {
         let files: Vec<PathBuf> = ["a.ts", "it's.ts", "README.md", "pkg/b.rs", "notes.txt", "a.ts", "deleted.ts", "broken/c.rs"].iter().map(|f| root.join(f)).collect();
         let (hooks, errors, _) = hooks(&files, &[root.display().to_string()]);
         assert_eq!(errors.len(), 1);
-        assert!(errors[0].contains("broken/.agents/edit-hooks.json is invalid"), "{errors:?}");
+        assert!(errors[0].contains(&format!("{} is invalid", Path::new("broken").join(CONFIG).display())), "{errors:?}");
         let commands: Vec<(&Path, &str)> = hooks.iter().map(|hook| (hook.dir.as_path(), hook.command.as_str())).collect();
         let pkg = root.join("pkg");
         assert_eq!(

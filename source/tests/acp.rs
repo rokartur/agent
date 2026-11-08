@@ -529,7 +529,8 @@ fn a_session_loaded_closed_or_open_keeps_the_editors_directories_and_makes_no_co
         editor.request("session/load", load.clone()).unwrap();
         editor.prompt(&session_id, "Again.").unwrap();
         let system = api.requests.try_iter().last().unwrap()["system"].to_string();
-        assert!(system.contains(&other.display().to_string()), "closed first: {close_first}; {system}");
+        let other_in_json = json!(other).to_string();
+        assert!(system.contains(other_in_json.trim_matches('"')), "closed first: {close_first}; {system}");
     }
     let listed = editor.request("session/list", json!({"cwd": home.project()})).unwrap();
     assert_eq!(listed["sessions"].as_array().unwrap().len(), 1, "{listed}");
@@ -543,8 +544,10 @@ fn a_session_open_in_another_process_does_not_load_into_a_copy() {
     let session_id = editor.new_session(&home.project());
     editor.prompt(&session_id, "Hi.").unwrap();
     editor.request("session/close", json!({"sessionId": session_id})).unwrap();
-    // As the TUI holds a session it has open.
-    let held = std::fs::File::open(home.dir.join(format!(".agents/sessions/{session_id}.jsonl"))).unwrap();
+    // As the TUI holds a session it has open; on Windows, whose locks block reads, through a file beside it.
+    let session = home.dir.join(format!(".agents/sessions/{session_id}.jsonl"));
+    let lock = if cfg!(windows) { session.with_extension("lock") } else { session };
+    let held = std::fs::File::options().read(true).write(true).create(true).truncate(false).open(lock).unwrap();
     held.lock().unwrap();
 
     let error = editor.request("session/load", json!({"sessionId": session_id, "cwd": home.project(), "mcpServers": []})).unwrap_err();
@@ -610,6 +613,8 @@ fn closing_a_session_cancels_its_running_turn() {
     assert_eq!(editor.answer(close, "session/close")["result"], json!({}));
 }
 
+// Git Bash's `$PPID` is an MSYS pid, not the Windows one `kill` would need.
+#[cfg(unix)]
 #[test]
 fn a_prompt_gets_an_error_when_its_session_process_dies() {
     let home = Home::new("dies");

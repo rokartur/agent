@@ -519,7 +519,7 @@ mod tests {
         std::fs::remove_dir_all(&root).unwrap();
         assert_eq!(outside, "");
         let block = |path: PathBuf, text: &str| format!("<project_instructions path=\"{}\">\n{text}\n</project_instructions>", path.display());
-        assert_eq!(attached, format!("{}\n\n{}", block(extra.join("AGENTS.md"), "api rules"), block(extra.join("sub/AGENTS.md"), "sub rules")));
+        assert_eq!(attached, format!("{}\n\n{}", block(extra.join("AGENTS.md"), "api rules"), block(extra.join("sub").join("AGENTS.md"), "sub rules")));
     }
 
     #[test]

@@ -390,9 +390,9 @@ for line in sys.stdin:
         mcp.sync(&[], &[key]);
         change.recv_timeout(Duration::from_secs(10)).unwrap();
         let (views, _) = mcp.list();
-        // Windows refuses to remove the directory while the server process still runs in it.
         drop(mcp);
-        std::fs::remove_dir_all(&root).unwrap();
+        // Windows keeps the directory while the killed server, ended asynchronously, still runs in it.
+        let _ = std::fs::remove_dir_all(&root);
         assert!(matches!(views[0].status, Status::Ready { tools: 2 }));
         assert_eq!(views[0].approval, None);
     }

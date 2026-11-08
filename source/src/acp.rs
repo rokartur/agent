@@ -472,7 +472,8 @@ const TERMINAL_OUTPUT_BYTES: u64 = 4 << 20;
 
 impl EditorTerminal for EditorClient {
     fn run(&self, call: &str, script: &str, cwd: &Path, abort: &AtomicBool, deadline: Option<Instant>) -> Result<(String, i32, Option<Killed>), String> {
-        let create = json!({"sessionId": self.session_id, "command": "bash", "args": ["-c", script], "cwd": cwd, "outputByteLimit": TERMINAL_OUTPUT_BYTES});
+        let bash = crate::process::shell("bash")?;
+        let create = json!({"sessionId": self.session_id, "command": bash, "args": ["-c", script], "cwd": cwd, "outputByteLimit": TERMINAL_OUTPUT_BYTES});
         let created = self.request("terminal/create", create)?;
         let terminal_id = created["terminalId"].as_str().ok_or("The editor sent no terminal id.")?.to_string();
         self.terminals.lock().unwrap().insert(call.to_string());

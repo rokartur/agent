@@ -290,14 +290,15 @@ pub(super) mod tests {
     fn restoring_a_path_with_glob_characters_touches_only_that_file() {
         let _index = SNAPSHOT_INDEX.lock().unwrap();
         let (root, work) = git_work("agent-restore-glob");
-        std::fs::write(work.join("a*.txt"), "v1").unwrap();
+        // `[b]` and not `*`: Windows forbids `*` in file names.
+        std::fs::write(work.join("a[b].txt"), "v1").unwrap();
         std::fs::write(work.join("ab.txt"), "v1").unwrap();
         let snapshots = Snapshots::open(&root, &work).unwrap();
         let tree = snapshots.take().unwrap();
-        std::fs::write(work.join("a*.txt"), "v2").unwrap();
+        std::fs::write(work.join("a[b].txt"), "v2").unwrap();
         std::fs::write(work.join("ab.txt"), "user").unwrap();
-        snapshots.restore(&tree, "a*.txt").unwrap();
-        let state = [std::fs::read_to_string(work.join("a*.txt")).unwrap(), std::fs::read_to_string(work.join("ab.txt")).unwrap()];
+        snapshots.restore(&tree, "a[b].txt").unwrap();
+        let state = [std::fs::read_to_string(work.join("a[b].txt")).unwrap(), std::fs::read_to_string(work.join("ab.txt")).unwrap()];
         std::fs::remove_dir_all(&root).unwrap();
         assert_eq!(state, ["v1", "user"]);
     }

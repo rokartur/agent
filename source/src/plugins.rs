@@ -439,7 +439,7 @@ fn clear_run(state: &mut State, index: usize) {
 /// Files already there and not in the source stay, since a plugin may keep state next to its code.
 pub fn install(home: &Path, source: &str) -> Result<String, String> {
     let plugins = home.join(".agents/plugins");
-    if source.contains('/') {
+    if source.contains(['/', std::path::MAIN_SEPARATOR]) {
         let from = crate::process::canonicalize(source).map_err(|e| format!("Cannot read {source}: {e}"))?;
         let name = from.file_name().unwrap_or_default().to_string_lossy().to_string();
         check_name(&name)?;
