@@ -375,7 +375,16 @@ mod tests {
         login.key(KeyCode::Enter.into());
         login.paste("sk-or-1");
         login.key(KeyCode::Enter.into());
-        let saved = |provider: &str| AccountView { provider: provider.into(), name: "openrouter".into(), oauth: false, account_id: None, usage: None, current: false, pinned: false };
+        let saved = |provider: &str| AccountView {
+            provider: provider.into(),
+            name: "openrouter".into(),
+            oauth: false,
+            account_id: None,
+            usage: None,
+            current: false,
+            pinned: false,
+            status: crate::api::AccountStatus::Unchecked,
+        };
         assert!(!login.ask_overwrite(&[saved("anthropic")]));
         let Action::Save(account) = login.key(KeyCode::Enter.into()) else { panic!("expected a save") };
         assert_eq!((account.provider.as_str(), account.name.as_str()), ("openrouter", "openrouter"));
@@ -384,7 +393,16 @@ mod tests {
     #[test]
     fn a_taken_name_saves_only_after_confirming_and_editing_asks_again() {
         let mut login = Login::Name { provider: "openrouter", secret: Secret::ApiKey("sk-or-2".into()), input: Editor::from_text("work"), overwrite: false };
-        let saved = [AccountView { provider: "openrouter".into(), name: "work".into(), oauth: false, account_id: None, usage: None, current: false, pinned: false }];
+        let saved = [AccountView {
+            provider: "openrouter".into(),
+            name: "work".into(),
+            oauth: false,
+            account_id: None,
+            usage: None,
+            current: false,
+            pinned: false,
+            status: crate::api::AccountStatus::Unchecked,
+        }];
         assert!(login.ask_overwrite(&saved));
         login.key(KeyCode::Char('2').into());
         login.key(KeyCode::Backspace.into());

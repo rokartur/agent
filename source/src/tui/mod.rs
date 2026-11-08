@@ -46,7 +46,7 @@ use crate::agent::{self, Agent, Event, FileChange, Opened, RestoredFiles, Rewind
 use crate::api::accounts::Policy;
 use crate::api::models::{self, Model};
 use crate::api::oauth::Tokens;
-use crate::api::{AccountView, Client, Delta, Usage};
+use crate::api::{AccountStatus, AccountView, Client, Delta, Usage};
 use crate::settings::THINKING_LEVELS;
 use crate::settings::{self, CACHE_TTLS, CONFLICT_PRIORITIES, MID_TURN, PROVIDER_SORTS, PRUNE_SESSIONS, SPEEDS, Settings, model_key};
 use crate::tools::bg::{Status as TerminalStatus, Terminal, Terminals};
@@ -3052,6 +3052,12 @@ impl App {
                     }
                     KeyCode::Up => *index = index.saturating_sub(1),
                     KeyCode::Down => *index = (*index + 1).min(accounts.len().saturating_sub(1)),
+                    KeyCode::Tab if !logout => {
+                        let events = self.events.clone();
+                        self.client.check_accounts(move || {
+                            let _ = events.send(Msg::UsageFetched);
+                        });
+                    }
                     KeyCode::Enter => {
                         let Some(account) = accounts.get(*index) else { return };
                         self.panel = None;
@@ -4336,7 +4342,7 @@ impl App {
                     rows: &rows,
                     selected: account_rows.get(*index).copied().unwrap_or(0),
                     empty: "No matching accounts.",
-                    hint: if *logout { "↑↓ navigate     enter remove     esc close" } else { "↑↓ navigate     shift+↑↓ failover order     enter use     esc close" },
+                    hint: if *logout { "↑↓ navigate     enter remove     esc close" } else { "↑↓ navigate     shift+↑↓ failover order     tab check all     enter use     esc close" },
                 };
                 view.render(width, PANEL_ROWS)
             }
@@ -5327,21 +5333,22 @@ fn usage_rows(totals: &[ModelTotal], catalog: &[Model]) -> Vec<panel::Row> {
 /// The `/account` table: subscriptions, then API keys, each under a heading row, with columns shared by both groups.
 /// Also returns each account's row index, since headings and the gap between groups cannot be selected.
 fn account_rows(accounts: &[AccountView], labels: &[(String, HashMap<String, String>)]) -> (Vec<panel::Row>, Vec<usize>) {
-    let mut table: Vec<(String, Vec<String>)> = Vec::new();
+    // Each row's cells and the style of its Status cell.
+    let mut table: Vec<(String, Vec<String>, Style)> = Vec::new();
     let mut account_rows = Vec::new();
     let mut group = None;
     for a in accounts {
         if group != Some(a.oauth) {
             if group.is_some() {
-                table.push((String::new(), Vec::new()));
+                table.push((String::new(), Vec::new(), MUTED));
             }
             group = Some(a.oauth);
             let (title, five_hour, seven_day) = if a.oauth { ("Subscription", "5h", "7d") } else { ("API key", "", "") };
             let mut heading: Vec<String> = ["Provider", five_hour, seven_day, "Pinned"].map(String::from).into();
-            if a.oauth {
-                heading.extend(labels.iter().map(|(plugin, _)| plugin.clone()));
-            }
-            table.push((format!("  {title}"), heading));
+            heading.extend(labels.iter().map(|(plugin, _)| if a.oauth { plugin.clone() } else { String::new() }));
+            // Last, so a long error runs off the edge instead of pushing columns.
+            heading.push("Status".into());
+            table.push((format!("  {title}"), heading, MUTED));
         }
         let percent = |share: Option<f64>| match (a.oauth, share) {
             (true, Some(share)) => format!("{share:.0}%"),
@@ -5353,32 +5360,39 @@ fn account_rows(accounts: &[AccountView], labels: &[(String, HashMap<String, Str
         let no_five_hour = a.usage.as_ref().is_some_and(|u| u.five_hour.is_none());
         let five_hour = if no_five_hour { "-".to_string() } else { percent(a.usage.as_ref().and_then(|u| u.five_hour)) };
         let seven_day = if quotas.is_empty() { percent(a.usage.as_ref().map(|u| u.seven_day)) } else { "-".to_string() };
+        let (status, status_style) = match &a.status {
+            AccountStatus::Unchecked => (String::new(), MUTED),
+            AccountStatus::Checking => ("checking…".to_string(), MUTED),
+            AccountStatus::Working => ("ok".to_string(), OK),
+            AccountStatus::Limited => ("rate limited".to_string(), WARN),
+            AccountStatus::Failed(error) => (error.lines().next().unwrap_or_default().to_string(), ERROR),
+        };
         let mut cells = vec![a.provider.clone(), five_hour, seven_day, if a.pinned { "pinned" } else { "" }.to_string()];
         for (_, by_account) in labels {
             cells.push(a.account_id.as_ref().and_then(|id| by_account.get(id)).cloned().unwrap_or_default());
         }
+        cells.push(status);
         account_rows.push(table.len());
-        table.push((format!("{mark}{}", a.name), cells));
+        table.push((format!("{mark}{}", a.name), cells, status_style));
         // Google's quotas are per model, with their own resets, so each gets a line under its account.
         for quota in quotas {
             let reset = quota.resets_at.map(|at| format!(", resets {}", crate::api::accounts::resets_in(at))).unwrap_or_default();
-            table.push((format!("      {} {:.0}%{reset}", quota.model, quota.used), Vec::new()));
+            table.push((format!("      {} {:.0}%{reset}", quota.model, quota.used), Vec::new(), MUTED));
         }
     }
-    let columns = table.iter().map(|(_, cells)| cells.len()).max().unwrap_or(0);
-    let widths: Vec<usize> = (0..columns).map(|c| table.iter().filter_map(|(_, cells)| cells.get(c)).map(|cell| width(cell)).max().unwrap_or(0)).collect();
+    let columns = table.iter().map(|(_, cells, _)| cells.len()).max().unwrap_or(0);
+    let widths: Vec<usize> = (0..columns).map(|c| table.iter().filter_map(|(_, cells, _)| cells.get(c)).map(|cell| width(cell)).max().unwrap_or(0)).collect();
     let rows = table
         .into_iter()
-        .map(|(left, cells)| {
-            let mut right = String::new();
+        .map(|(left, cells, status_style)| {
+            let mut right = Vec::new();
             for (c, cell) in cells.iter().enumerate() {
                 let pad = " ".repeat(widths[c] - width(cell));
                 // The 5h and 7d percentages line up on the right.
-                let padded = if c == 1 || c == 2 { format!("{pad}{cell}") } else { format!("{cell}{pad}") };
-                right.push_str(&padded);
-                right.push_str("  ");
+                let padded = if c == 1 || c == 2 { format!("{pad}{cell}  ") } else { format!("{cell}{pad}  ") };
+                right.push(span(padded, if c == cells.len() - 1 { status_style } else { MUTED }));
             }
-            panel::Row { left, right: vec![span(right.trim_end(), MUTED)] }
+            panel::Row { left, right }
         })
         .collect();
     (rows, account_rows)
@@ -7139,6 +7153,7 @@ mod tests {
             usage: usage.map(|(five_hour, seven_day)| crate::api::accounts::Usage { five_hour, seven_day, resets_at: None, models: Vec::new() }),
             current: name == "claudescom",
             pinned: name == "rokartur",
+            status: AccountStatus::Unchecked,
         };
         let quota = |model: &str, used| crate::api::accounts::ModelQuota { model: model.into(), used, resets_at: None };
         let gemini = AccountView {
@@ -7147,31 +7162,32 @@ mod tests {
             ..account("gemini", true, Some("proj-1"), None)
         };
         let accounts = [
-            account("claudescom", true, Some("uuid-1"), Some((Some(21.0), 73.0))),
-            account("rokartur", true, Some("uuid-2"), None),
-            account("ultra", true, Some("uuid-3"), Some((None, 41.0))),
-            gemini,
+            AccountView { status: AccountStatus::Working, ..account("claudescom", true, Some("uuid-1"), Some((Some(21.0), 73.0))) },
+            AccountView { status: AccountStatus::Failed("Usage request failed (401).\nbody".into()), ..account("rokartur", true, Some("uuid-2"), None) },
+            AccountView { status: AccountStatus::Limited, ..account("ultra", true, Some("uuid-3"), Some((None, 41.0))) },
+            AccountView { status: AccountStatus::Checking, ..gemini },
             account("claudescom-api", false, None, None),
         ];
         let labels = [("usagefleet".to_string(), HashMap::from([("uuid-1".to_string(), "uf_tVdC…".to_string())]))];
         let (rows, account_rows) = account_rows(&accounts, &labels);
-        let table: Vec<(&str, String)> = rows.iter().map(|row| (row.left.as_str(), text(&row.right))).collect();
+        let table: Vec<(&str, String)> = rows.iter().map(|row| (row.left.as_str(), text(&row.right).trim_end().to_string())).collect();
         assert_eq!(
             table,
             [
-                ("  Subscription", "Provider            5h   7d  Pinned  usagefleet".to_string()),
-                ("✓ claudescom", "anthropic          21%  73%          uf_tVdC…".to_string()),
-                ("  rokartur", "anthropic            ?    ?  pinned".to_string()),
-                ("  ultra", "anthropic            -  41%".to_string()),
-                ("  gemini", "google-gemini-cli    -    -".to_string()),
+                ("  Subscription", "Provider            5h   7d  Pinned  usagefleet  Status".to_string()),
+                ("✓ claudescom", "anthropic          21%  73%          uf_tVdC…    ok".to_string()),
+                ("  rokartur", "anthropic            ?    ?  pinned              Usage request failed (401).".to_string()),
+                ("  ultra", "anthropic            -  41%                      rate limited".to_string()),
+                ("  gemini", "google-gemini-cli    -    -                      checking…".to_string()),
                 ("      gemini-2.5-flash 10%", String::new()),
                 ("      gemini-2.5-pro 80%", String::new()),
                 ("", String::new()),
-                ("  API key", "Provider                     Pinned".to_string()),
+                ("  API key", "Provider                     Pinned              Status".to_string()),
                 ("  claudescom-api", "anthropic".to_string()),
             ]
         );
         assert_eq!(account_rows, [1, 2, 3, 4, 9]);
+        assert_eq!([1, 2].map(|row| rows[row].right.last().unwrap().style), [OK, ERROR]);
         let names = |query| matching_accounts(accounts.to_vec(), query).into_iter().map(|a| a.name).collect::<Vec<_>>();
         assert_eq!(names("API"), ["claudescom-api", "claudescom", "rokartur", "ultra"]);
         assert_eq!(names("anthropic").len(), 4);
