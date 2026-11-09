@@ -219,6 +219,9 @@ pub struct Agent {
     pub session: Session,
     pub sessions_dir: PathBuf,
     pub context_window: u64,
+    /// What the provider takes, input plus output: the catalog's window, lowered by a limit a "too long" error named.
+    /// `context_window` can be a smaller /context-window budget for compaction, which should not cut the output.
+    provider_window: u64,
     pub max_tokens: u64,
     /// `small_model` from settings, else the provider's cheapest: titles, Video descriptions, and by default condense summaries.
     pub cheap_model: String,
@@ -436,6 +439,7 @@ impl Agent {
             effort: settings.thinking.clone(),
             // settle_model fills these four and condense once the model lists arrive.
             context_window: 0,
+            provider_window: 0,
             max_tokens: 0,
             cheap_model: String::new(),
             reviewer_model: String::new(),
@@ -610,15 +614,28 @@ impl Agent {
             self.collect_condensed(emit)?;
             let messages = self.provider_view();
             let (system, tools) = self.system_and_tools();
-            let mut request = api::request(&self.model, self.max_tokens, &self.effort, &self.cache_ttl, &system, &self.cwd_section(), &tools, &messages);
+            let input = context::estimate(&format!("{system}{}", self.cwd_section()), &tools, &messages);
+            let max_tokens = context::output_tokens(self.max_tokens, self.provider_window, input);
+            let mut request = api::request(&self.model, max_tokens, &self.effort, &self.cache_ttl, &system, &self.cwd_section(), &tools, &messages);
             if self.speed != "standard" {
                 request["speed"] = json!(self.speed);
             }
-            let mut reply = self.client.send_in_thread(&request, &mut self.message_thread, &self.abort, self.text_to_stdout, &mut |delta| match delta {
+            let sent = self.client.send_in_thread(&request, &mut self.message_thread, &self.abort, self.text_to_stdout, &mut |delta| match delta {
                 Delta::Text(text) => emit(Event::Text(text.to_string())),
                 Delta::Thinking(text) => emit(Event::Thinking(text.to_string())),
                 Delta::Notice(text) => emit(Event::Notice(text.to_string())),
-            })?;
+            });
+            let mut reply = match sent {
+                Ok(reply) => reply,
+                Err(error) => {
+                    // Each retry needs a strictly lower limit, so a provider repeating the same one ends the turn.
+                    let Some(limit) = context::limit_in_error(&error).filter(|&limit| limit < self.provider_window) else { return Err(error) };
+                    self.provider_window = limit;
+                    self.context_window = self.context_window.min(limit);
+                    emit(Event::Notice(format!("{} takes at most {} tokens of context; retrying within that.", self.model, limit)));
+                    continue;
+                }
+            };
             drop_reminders(&mut reply.message);
             self.turns += 1;
             self.usage.add(reply.usage);
@@ -1745,6 +1762,7 @@ impl Agent {
         self.speed = settings.speed.clone();
         self.cache_ttl = settings.cache_ttl.clone();
         self.context_window = settings.context_window(model);
+        self.provider_window = model.context_window;
         self.max_tokens = model.max_tokens;
         self.cheap_model = cheap_model.to_string();
         self.reviewer_model = if settings.reviewer_model.is_empty() { cheap_model.to_string() } else { settings.reviewer_model.clone() };

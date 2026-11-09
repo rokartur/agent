@@ -33,6 +33,33 @@ pub fn estimate(system: &str, tools: &Value, messages: &[Value]) -> u64 {
     bytes(system, tools, messages).iter().sum::<u64>() / BYTES_PER_TOKEN
 }
 
+const MIN_OUTPUT_TOKENS: u64 = 4_096;
+
+/// `max_tokens` cut to what fits in `window` after `input`: providers reject a request whose input plus max_tokens
+/// exceeds the window, and OpenRouter lists max outputs near the whole window (Kimi K3.1: 943,718 of 1,048,576).
+pub fn output_tokens(max_tokens: u64, window: u64, input: u64) -> u64 {
+    // `input` is counted at 4 bytes per token; code and Polish text run nearer 3.
+    let room = window.saturating_sub(input + input / 3);
+    max_tokens.min(room.max(MIN_OUTPUT_TOKENS))
+}
+
+/// The context limit a provider's "too long" error names: "maximum context length is N tokens" (OpenRouter, OpenAI),
+/// "prompt is too long: X tokens > N maximum" and "exceed context limit: X + Y > N" (Anthropic).
+pub fn limit_in_error(error: &str) -> Option<u64> {
+    if let Some((_, rest)) = error.split_once("maximum context length is ") {
+        return leading_number(rest);
+    }
+    if !error.contains("prompt is too long") && !error.contains("exceed context limit") {
+        return None;
+    }
+    leading_number(error.split_once(" > ")?.1)
+}
+
+fn leading_number(text: &str) -> Option<u64> {
+    let digits: String = text.chars().take_while(|c| c.is_ascii_digit() || *c == ',').filter(|c| *c != ',').collect();
+    digits.parse().ok()
+}
+
 fn bytes(system: &str, tools: &Value, messages: &[Value]) -> PerPart {
     let mut bytes = [0; PARTS.len()];
     bytes[SYSTEM] = system.len() as u64;
@@ -90,5 +117,25 @@ mod tests {
         assert_eq!(split("", &tools, &[], 0), [0; 5]);
         assert_eq!(split(&"s".repeat(100), &tools, &messages, 7).iter().sum::<u64>(), 7);
         assert_eq!(estimate(&"s".repeat(100), &tools, &messages), sum / 4, "the base64 image counts by estimate, not its 100 KB");
+    }
+
+    #[test]
+    fn output_tokens_leave_the_input_room_in_the_window() {
+        assert_eq!(output_tokens(943_718, 1_048_576, 30_000), 943_718);
+        assert_eq!(output_tokens(943_718, 1_048_576, 90_000), 928_576, "the session 419cc652 overflow");
+        assert_eq!(output_tokens(128_000, 200_000, 150_000), 4_096, "a full window still asks for a usable reply");
+        assert_eq!(output_tokens(2_000, 200_000, 150_000), 2_000);
+    }
+
+    #[test]
+    fn limit_in_error_reads_each_providers_wording() {
+        let openrouter = r#"API error 400: {"error":{"message":"This endpoint's maximum context length is 262144 tokens. However, you requested about 1063412 tokens (119694 of text input, 943718 in the output).","code":400}}"#;
+        let anthropic = r#"API error 400: {"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 205000 tokens > 200000 maximum"}}"#;
+        let anthropic_output = "API error 400: input length and `max_tokens` exceed context limit: 188240 + 21333 > 200000, decrease input length or `max_tokens` and try again";
+        assert_eq!(limit_in_error(openrouter), Some(262_144));
+        assert_eq!(limit_in_error("API error 400: This model's maximum context length is 128,000 tokens."), Some(128_000));
+        assert_eq!(limit_in_error(anthropic), Some(200_000));
+        assert_eq!(limit_in_error(anthropic_output), Some(200_000));
+        assert_eq!(limit_in_error("API error 400: max_tokens: 5 > 4 is not allowed"), None);
     }
 }
