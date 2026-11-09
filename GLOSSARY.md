@@ -57,7 +57,7 @@ _Avoid_: Image generator, imagegen
 ## Control
 
 **Permission mode**:
-How much the agent does without asking: `ask`, `auto` (a reviewer model approves or denies) or `full access`.
+How much the agent does without asking: `ask`, `auto` (edits in the workspace run, a reviewer model approves or denies the rest) or `full access`.
 _Avoid_: Approval mode, autonomy level
 
 **Reviewer**:
