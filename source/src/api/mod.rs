@@ -312,7 +312,8 @@ impl Client {
 
     fn reload(&self, mut saved: Vec<Account>) {
         for (provider, var) in [("anthropic", "ANTHROPIC_API_KEY"), ("openrouter", "OPENROUTER_API_KEY")] {
-            let env_key = std::env::var(var).ok().filter(|k| !k.is_empty());
+            // Unit tests share the developer's environment; a key there must not become an account.
+            let env_key = std::env::var(var).ok().filter(|k| !k.is_empty() && !cfg!(test));
             if let Some(key) = env_key.filter(|_| !saved.iter().any(|a| a.provider == provider)) {
                 saved.push(Account { provider: provider.into(), name: "env".into(), secret: Secret::ApiKey(key) });
             }
