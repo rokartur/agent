@@ -16,11 +16,13 @@ jobs:
           - { runner: macos-latest, target: x86_64-apple-darwin, asset: agent-macos-x86_64 }
           - { runner: ubuntu-latest, target: x86_64-unknown-linux-musl, asset: agent-linux-x86_64 }
           - { runner: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl, asset: agent-linux-aarch64 }
+          - { runner: windows-latest, target: x86_64-pc-windows-msvc, asset: agent-windows-x86_64.exe }
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 15
     defaults:
       run:
         working-directory: source
+        shell: bash
     steps:
       - uses: actions/checkout@v7
       - name: Tag matches Cargo.toml
@@ -33,7 +35,7 @@ jobs:
           AGENT_RELEASE: "1"
         run: |
           cargo build --release --locked --target ${{ matrix.target }}
-          cp target/${{ matrix.target }}/release/agent ${{ matrix.asset }}
+          cp target/${{ matrix.target }}/release/agent${{ runner.os == 'Windows' && '.exe' || '' }} ${{ matrix.asset }}
       - if: matrix.target != 'x86_64-apple-darwin'
         run: ./${{ matrix.asset }} --version
       - uses: actions/upload-artifact@v7

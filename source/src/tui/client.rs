@@ -198,6 +198,9 @@ pub fn ctrl_c_within(wait: Duration) -> bool {
 fn copy_to_clipboard(text: &str) -> Result<(), String> {
     let (program, args): (&str, &[&str]) = if cfg!(target_os = "macos") {
         ("pbcopy", &[])
+    } else if cfg!(windows) {
+        // Not clip.exe: it reads stdin in the console code page and mangles anything past ASCII.
+        ("powershell", &["-NoProfile", "-NonInteractive", "-Command", "[Console]::InputEncoding = [Text.UTF8Encoding]::new($false); Set-Clipboard -Value ([Console]::In.ReadToEnd())"])
     } else if std::env::var_os("WAYLAND_DISPLAY").is_some() {
         ("wl-copy", &[])
     } else {
@@ -210,22 +213,25 @@ fn copy_to_clipboard(text: &str) -> Result<(), String> {
         .stderr(std::process::Stdio::null())
         .spawn()
         .map_err(|e| format!("Cannot run {program}: {e}"))?;
-    // The stdin handle drops before `wait`, so the child sees EOF; it is reaped even when the write failed.
+    // The stdin handle drops before the wait, so the child sees EOF; it is reaped even when the write failed.
     let written = child.stdin.take().unwrap().write_all(text.as_bytes());
-    child.wait().map_err(|e| e.to_string())?;
-    written.map_err(|e| e.to_string())
+    // Bounded: Set-Clipboard waits while another app holds the clipboard open.
+    let Some(status) = crate::process::wait_within(&mut child, crate::image::CLIPBOARD_TIMEOUT).map_err(|e| e.to_string())? else {
+        return Err(format!("{program} did not finish copying."));
+    };
+    written.map_err(|e| e.to_string())?;
+    if !status.success() {
+        return Err(format!("{program} exited with {status}"));
+    }
+    Ok(())
 }
 
 fn open_in_browser(url: &str) -> Result<(), String> {
-    if !(url.starts_with("https://") || url.starts_with("http://")) {
+    if !crate::api::oauth::is_web_link(url) {
         return Err(format!("Not a web link: {url}"));
     }
     if !cfg!(target_os = "macos") {
-        // Reaped on a thread: xdg-open runs a browser without a desktop handler in the foreground.
-        let mut child =
-            crate::process::command("xdg-open").arg(url).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().map_err(|e| format!("Cannot run xdg-open: {e}"))?;
-        std::thread::spawn(move || child.wait());
-        return Ok(());
+        return crate::api::oauth::spawn_browser(url);
     }
     // output() and not status(): open's stderr would draw over the alternate screen.
     let output = crate::process::command("open").arg(url).output().map_err(|e| format!("Cannot run open: {e}"))?;
@@ -272,9 +278,25 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    /// One test for both: the clipboard is shared and tests run in parallel.
+    #[cfg(windows)]
+    #[test]
+    fn the_windows_clipboard_takes_text_past_ascii_and_gives_an_image() {
+        let powershell = |script: &str| crate::process::command("powershell").args(["-NoProfile", "-STA", "-Command", script]).output().unwrap();
+        assert_eq!(serve_request(&json!({"copy": "zażółć 🦀"})), Some(json!({"copied": true})));
+        let read = powershell("[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false); Get-Clipboard -Raw");
+        assert_eq!(String::from_utf8(read.stdout).unwrap().trim_end(), "zażółć 🦀");
+
+        let put = powershell("Add-Type -AssemblyName System.Windows.Forms, System.Drawing; [Windows.Forms.Clipboard]::SetImage((New-Object Drawing.Bitmap 3, 2))");
+        assert!(put.status.success(), "{}", String::from_utf8_lossy(&put.stderr));
+        let pasted = serve_request(&json!({"paste_image": true})).unwrap();
+        assert!(pasted["image"]["data"].as_str().is_some_and(|data| !data.is_empty()), "{pasted}");
+    }
+
     #[test]
     fn only_a_failed_or_asked_for_request_is_answered() {
         assert_eq!(serve_request(&json!({"open": "file:///etc/passwd"})), Some(json!({"failed": "Not a web link: file:///etc/passwd"})));
+        assert_eq!(serve_request(&json!({"open": "https://a.test/\" C:\\x.exe"})), Some(json!({"failed": "Not a web link: https://a.test/\" C:\\x.exe"})));
         assert_eq!(serve_request(&json!({"unknown": 1})), None);
     }
 

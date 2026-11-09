@@ -28,7 +28,7 @@ Every anchor is four ASCII letters so a long session can hold one per line read 
 
 `tools/guard.rs` refuses three command shapes before they run: a blind `sleep` loop, `gh pr merge` chained after `gh pr checks` with `;` or a pipe (drops the exit status), and plain file reads (`cat`, `head`, `sed -n`) mixed with other commands. A command that is only file reads runs as `Read` in the same turn so the lines come back with anchors.
 
-`run_in_background: true` starts the command in its own process group tracked by `tools/bg.rs`; its exit arrives as a follow-up message, `TaskOutput` peeks, `TaskStop` sends SIGTERM then SIGKILL.
+`run_in_background: true` starts the command in its own process group tracked by `tools/bg.rs`; its exit arrives as a follow-up message, `TaskOutput` peeks, `TaskStop` sends SIGTERM then SIGKILL; on Windows it ends the process tree with taskkill at once.
 
 ## Permissions
 

@@ -22,8 +22,9 @@ fn launchd() -> bool {
 pub fn command(args: &[String]) -> Result<(), String> {
     let home = crate::home()?;
     match args {
-        [action] if action == "install" => install(&home),
         [action, on, host] if action == "install" && on == "--on" && !host.starts_with('-') => install_on(host),
+        _ if cfg!(windows) => Err("agent service runs on macOS and Linux only; on Windows run `agent serve --tailnet` in a terminal that stays open.".into()),
+        [action] if action == "install" => install(&home),
         [action] if action == "status" => status(&home),
         [action] if action == "restart" => {
             if !file(&home).exists() {
@@ -106,7 +107,8 @@ fn install(home: &Path) -> Result<(), String> {
 /// `agent service install` there. The host's output shows here, and its exit status is this command's.
 fn install_on(host: &str) -> Result<(), String> {
     println!("Connecting to {host} over ssh...");
-    let status = process::command("ssh").args([host, &remote_install()]).stdin(std::process::Stdio::inherit()).status().map_err(|e| format!("Cannot run ssh: {e}"))?;
+    // BatchMode: from Windows ssh runs on a hidden console, where a password or host key prompt would wait unseen.
+    let status = process::command("ssh").args(["-o", "BatchMode=yes", host, &remote_install()]).stdin(std::process::Stdio::inherit()).status().map_err(|e| format!("Cannot run ssh: {e}"))?;
     match status.code() {
         Some(0) => {
             println!("Done on {host}.");
@@ -114,7 +116,8 @@ fn install_on(host: &str) -> Result<(), String> {
         }
         // ssh exits 255 for its own failures, which it has printed.
         Some(255) => Err(format!("ssh {host} failed. agent service install --on needs `ssh {host}` to work from this computer.")),
-        _ => Err(format!("agent service install failed on {host}: {status}.")),
+        // A Windows host's ssh runs cmd, which cannot run the script.
+        _ => Err(format!("agent service install failed on {host}: {status}. If {host} runs Windows, it runs no agent service; run agent serve --tailnet there.")),
     }
 }
 
@@ -188,9 +191,15 @@ fn unload() -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn domain() -> String {
     // SAFETY: getuid takes no arguments and cannot fail.
     format!("gui/{}", unsafe { libc::getuid() })
+}
+
+#[cfg(windows)]
+fn domain() -> String {
+    unreachable!("launchd runs on macOS only")
 }
 
 fn target() -> String {
@@ -312,6 +321,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn the_remote_install_runs_the_hosts_agent_in_its_login_shell_and_refuses_an_old_release() {
         let home = std::env::temp_dir().join(format!("agent-service-remote-{}", std::process::id()));
         let bin = home.join(".local/bin");

@@ -121,10 +121,13 @@ fn unix_seconds() -> u64 {
 /// Minute, hour, day of month, month and weekday (Sunday 0) of `unix` in the local time zone.
 fn local_fields(unix: u64) -> [u32; 5] {
     let time = unix as libc::time_t;
-    // SAFETY: localtime_r only writes the `tm` we own; a zeroed tm is a valid value of that C struct.
+    // SAFETY: localtime_r and localtime_s only write the `tm` we own; a zeroed tm is a valid value of that C struct.
     let tm = unsafe {
         let mut tm: libc::tm = std::mem::zeroed();
-        libc::localtime_r(&time, &mut tm);
+        #[cfg(unix)]
+        assert!(!libc::localtime_r(&time, &mut tm).is_null(), "localtime_r converts {unix}");
+        #[cfg(windows)]
+        assert_eq!(libc::localtime_s(&mut tm, &time), 0, "localtime_s converts {unix}");
         tm
     };
     [tm.tm_min, tm.tm_hour, tm.tm_mday, tm.tm_mon + 1, tm.tm_wday].map(|value| value as u32)

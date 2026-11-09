@@ -186,16 +186,40 @@ fn codex_account_id(access: &str) -> Option<String> {
     claims[CODEX_JWT_CLAIM]["chatgpt_account_id"].as_str().filter(|id| !id.is_empty()).map(String::from)
 }
 
+/// An http(s) URL without a quote, space or control character, which a valid URL carries only percent-encoded. rundll32
+/// parses its own command line, so such a character could end the URL argument there.
+pub fn is_web_link(url: &str) -> bool {
+    (url.starts_with("https://") || url.starts_with("http://")) && !url.chars().any(|c| c == '"' || c.is_whitespace() || c.is_control())
+}
+
 pub fn open_browser(url: &str) {
     // MCP servers supply the authorization URL; a file:// or app scheme would open something local.
-    if !(url.starts_with("https://") || url.starts_with("http://")) {
-        return;
+    if is_web_link(url) {
+        let _ = spawn_browser(url);
     }
-    let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
+}
+
+/// Starts the system's opener for `url` without waiting for it; the caller checks `is_web_link` first.
+pub fn spawn_browser(url: &str) -> Result<(), String> {
+    let (opener, args): (&str, &[&str]) = if cfg!(target_os = "macos") {
+        ("open", &[])
+    } else if cfg!(windows) {
+        // Not `cmd /c start`: cmd would read the `&` between query parameters as a command separator.
+        ("rundll32", &["url.dll,FileProtocolHandler"])
+    } else {
+        ("xdg-open", &[])
+    };
+    let mut command = crate::process::command(opener);
+    command.args(args).arg(url).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+    // A browser rundll32 starts would join the agent's job and close when the agent exits.
+    #[cfg(windows)]
+    let spawned = crate::process::spawn_detached(&mut command);
+    #[cfg(unix)]
+    let spawned = command.spawn();
+    let mut child = spawned.map_err(|e| format!("Cannot run {opener}: {e}"))?;
     // Reaped on a thread, not waited for: xdg-open runs a browser without a desktop handler in the foreground.
-    if let Ok(mut child) = crate::process::command(opener).arg(url).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn() {
-        std::thread::spawn(move || child.wait());
-    }
+    std::thread::spawn(move || child.wait());
+    Ok(())
 }
 
 /// POSTs to a token or client registration endpoint. The error carries the status and body, never the request,

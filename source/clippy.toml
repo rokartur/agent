@@ -1,1 +1,5 @@
-disallowed-methods = [{ path = "std::process::Command::new", reason = "use process::command, which detaches the child from the TUI's terminal" }]
+disallowed-methods = [
+    { path = "std::process::Command::new", reason = "use process::command, which detaches the child from the TUI's terminal" },
+    { path = "std::fs::canonicalize", reason = "use process::canonicalize, which drops the \\\\?\\ prefix Windows adds" },
+    { path = "std::path::Path::canonicalize", reason = "use process::canonicalize, which drops the \\\\?\\ prefix Windows adds" },
+]

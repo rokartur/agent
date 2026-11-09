@@ -168,7 +168,7 @@ fn handle(agent: &mut Agent, connection: &mut Connection, message: &Value) -> Re
         method @ ("session/new" | "session/load" | "session/resume") => {
             let cwd = params["cwd"].as_str().unwrap_or_default();
             // macOS: /tmp is a link to /private/tmp, and agent.cwd is resolved.
-            if std::fs::canonicalize(cwd).ok().as_deref() != Some(agent.cwd.as_path()) {
+            if crate::process::canonicalize(cwd).ok().as_deref() != Some(agent.cwd.as_path()) {
                 return Err((INVALID_PARAMS, format!("agent acp serves the directory it started in, {}, not {cwd}.", agent.cwd.display())));
             }
             let mut settings = crate::settings::load(&agent.home).map_err(|error| (INTERNAL_ERROR, error))?;
@@ -214,7 +214,7 @@ fn handle(agent: &mut Agent, connection: &mut Connection, message: &Value) -> Re
             let files = client["fs"]["readTextFile"] == true && client["fs"]["writeTextFile"] == true;
             let terminal = client["terminal"] == true;
             // Zed's fs methods reach only its project's worktrees, the session's directories.
-            let dirs = params["additionalDirectories"].as_array().into_iter().flatten().filter_map(|dir| std::fs::canonicalize(dir.as_str()?).ok());
+            let dirs = params["additionalDirectories"].as_array().into_iter().flatten().filter_map(|dir| crate::process::canonicalize(dir.as_str()?).ok());
             let roots = if files { std::iter::once(agent.cwd.clone()).chain(dirs).collect() } else { Vec::new() };
             let editor = Arc::new(EditorClient { session_id: session_id.clone(), replies: replies.clone(), next_id: AtomicU64::new(0), roots, terminals: Mutex::default() });
             agent.anchors.editor = files.then(|| editor.clone() as Arc<dyn EditorFiles>);
@@ -453,7 +453,7 @@ fn result_of(method: &str, reply: &Value) -> Result<Value, String> {
 impl EditorFiles for EditorClient {
     fn serves(&self, path: &Path) -> bool {
         // By its real directory: `project/../x` and a link out of the project are outside.
-        let dir = path.parent().and_then(|dir| dir.canonicalize().ok());
+        let dir = path.parent().and_then(|dir| crate::process::canonicalize(dir).ok());
         dir.is_some_and(|dir| self.roots.iter().any(|root| dir.starts_with(root)))
     }
 
@@ -472,7 +472,8 @@ const TERMINAL_OUTPUT_BYTES: u64 = 4 << 20;
 
 impl EditorTerminal for EditorClient {
     fn run(&self, call: &str, script: &str, cwd: &Path, abort: &AtomicBool, deadline: Option<Instant>) -> Result<(String, i32, Option<Killed>), String> {
-        let create = json!({"sessionId": self.session_id, "command": "bash", "args": ["-c", script], "cwd": cwd, "outputByteLimit": TERMINAL_OUTPUT_BYTES});
+        let bash = crate::process::shell("bash")?;
+        let create = json!({"sessionId": self.session_id, "command": bash, "args": ["-c", script], "cwd": cwd, "outputByteLimit": TERMINAL_OUTPUT_BYTES});
         let created = self.request("terminal/create", create)?;
         let terminal_id = created["terminalId"].as_str().ok_or("The editor sent no terminal id.")?.to_string();
         self.terminals.lock().unwrap().insert(call.to_string());
@@ -877,6 +878,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn an_edit_of_a_fifo_gets_no_diff_and_does_not_block() {
         let fifo = std::env::temp_dir().join(format!("agent-acp-fifo-{}", std::process::id()));
         let _ = std::fs::remove_file(&fifo);

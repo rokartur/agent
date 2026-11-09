@@ -28,13 +28,17 @@ impl Snapshots {
         let paths = run(crate::process::command("git").arg("-C").arg(cwd).args(["rev-parse", "--show-toplevel", "--path-format=absolute", "--git-path", "info/exclude"])).ok()?;
         let (top, exclude) = paths.split_once('\n')?;
         let (work_tree, exclude) = (PathBuf::from(top), PathBuf::from(exclude));
-        let git_dir = home.join(".agents/snapshots").join(work_tree.to_string_lossy().replace('/', "-"));
+        let name = work_tree.to_string_lossy().replace('/', "-");
+        // git prints C:/Users/... on Windows, and joining "C:-Users-..." would resolve against drive C instead.
+        #[cfg(windows)]
+        let name = name.replace([':', '\\'], "-");
+        let git_dir = home.join(".agents/snapshots").join(name);
         // One index per process, so two agents in the same repo do not fight over index.lock; the private
         // spill dir keeps other local users from locking or planting it, and quitting removes it.
         let spills = crate::tools::spill_dir();
         crate::process::private_dir(&spills).ok()?;
         let index = spills.join("snapshot.index");
-        let agent_data = home.join(".agents").canonicalize().ok().and_then(|dir| dir.strip_prefix(&work_tree).ok().map(Path::to_path_buf));
+        let agent_data = crate::process::canonicalize(home.join(".agents")).ok().and_then(|dir| dir.strip_prefix(&work_tree).ok().map(Path::to_path_buf));
         let files_git_dir = home.join(".agents/snapshots/files");
         Some(Snapshots { git_dir, work_tree, index, exclude, last_ref: RefCell::default(), agent_data, files_git_dir })
     }
@@ -69,7 +73,9 @@ impl Snapshots {
         // shortcut: glob characters in `agent_data` are not escaped; such a path keeps them in the snapshots.
         if let Some(dir) = &self.agent_data {
             for data in ["sessions", "snapshots", "models"] {
-                rules.extend_from_slice(format!("\n/{}/", dir.join(data).display()).as_bytes());
+                // Git rules split on `/` only; Windows paths display with `\`.
+                let rule = dir.join(data).display().to_string().replace(std::path::MAIN_SEPARATOR, "/");
+                rules.extend_from_slice(format!("\n/{rule}/").as_bytes());
             }
         }
         let info = self.git_dir.join("info");
@@ -286,14 +292,15 @@ pub(super) mod tests {
     fn restoring_a_path_with_glob_characters_touches_only_that_file() {
         let _index = SNAPSHOT_INDEX.lock().unwrap();
         let (root, work) = git_work("agent-restore-glob");
-        std::fs::write(work.join("a*.txt"), "v1").unwrap();
+        // `[b]` and not `*`: Windows forbids `*` in file names.
+        std::fs::write(work.join("a[b].txt"), "v1").unwrap();
         std::fs::write(work.join("ab.txt"), "v1").unwrap();
         let snapshots = Snapshots::open(&root, &work).unwrap();
         let tree = snapshots.take().unwrap();
-        std::fs::write(work.join("a*.txt"), "v2").unwrap();
+        std::fs::write(work.join("a[b].txt"), "v2").unwrap();
         std::fs::write(work.join("ab.txt"), "user").unwrap();
-        snapshots.restore(&tree, "a*.txt").unwrap();
-        let state = [std::fs::read_to_string(work.join("a*.txt")).unwrap(), std::fs::read_to_string(work.join("ab.txt")).unwrap()];
+        snapshots.restore(&tree, "a[b].txt").unwrap();
+        let state = [std::fs::read_to_string(work.join("a[b].txt")).unwrap(), std::fs::read_to_string(work.join("ab.txt")).unwrap()];
         std::fs::remove_dir_all(&root).unwrap();
         assert_eq!(state, ["v1", "user"]);
     }

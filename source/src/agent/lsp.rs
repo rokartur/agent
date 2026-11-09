@@ -88,7 +88,7 @@ impl Lsp {
         let deadline = Instant::now() + TIMEOUT;
         self.stop_idle();
         // `/tmp` and `/private/tmp`, or a symlinked checkout, would otherwise start a second server on one directory.
-        let file = &file.canonicalize().map_err(|e| format!("[lsp] Cannot read {}: {e}", file.display()))?;
+        let file = &crate::process::canonicalize(file).map_err(|e| format!("[lsp] Cannot read {}: {e}", file.display()))?;
         let key = (language.clone(), root(file, &server.roots));
         if !self.servers.contains_key(&key) {
             match Server::start(&server.command, &key.1, deadline, abort) {
@@ -250,7 +250,9 @@ impl Server {
         }
         let own = |message: &Value| {
             let params = &message["params"];
-            message["method"] == "textDocument/publishDiagnostics" && params["uri"] == uri.as_str() && (params["version"].is_null() || params["version"] == version)
+            message["method"] == "textDocument/publishDiagnostics"
+                && params["uri"].as_str().is_some_and(|published| same_document(published, &uri))
+                && (params["version"].is_null() || params["version"] == version)
         };
         let mut published = self.wait_for(deadline, abort, own)?;
         loop {
@@ -338,11 +340,23 @@ fn read_frame(reader: &mut impl BufRead) -> Option<Value> {
     serde_json::from_slice(&body).ok()
 }
 
-/// RFC 3986 path: every byte except unreserved characters and `/` is percent-encoded.
+/// RFC 3986 path: every byte except unreserved characters and `/` is percent-encoded. A Windows path becomes
+/// `file:///C:/dir/file`, with the drive's `:` kept as RFC 8089 writes it.
 fn file_uri(path: &Path) -> String {
     use std::fmt::Write as _;
     let mut uri = String::from("file://");
-    for byte in path.to_string_lossy().bytes() {
+    let path = path.to_string_lossy();
+    #[cfg(windows)]
+    let path = path.replace('\\', "/");
+    let mut rest = path.as_bytes();
+    if cfg!(windows)
+        && let [drive, b':', tail @ ..] = rest
+        && drive.is_ascii_alphabetic()
+    {
+        write!(uri, "/{}:", *drive as char).expect("writing to a String cannot fail");
+        rest = tail;
+    }
+    for &byte in rest {
         if byte.is_ascii_alphanumeric() || b"/-._~".contains(&byte) {
             uri.push(byte as char);
         } else {
@@ -350,6 +364,15 @@ fn file_uri(path: &Path) -> String {
         }
     }
     uri
+}
+
+/// Whether a server's `published` URI names the document sent as `sent`. Windows servers may lowercase the drive
+/// and encode its `:` (`file:///c%3A/dir/file`), and Windows paths ignore case.
+fn same_document(published: &str, sent: &str) -> bool {
+    if cfg!(windows) {
+        return published.replace("%3A", ":").replace("%3a", ":").eq_ignore_ascii_case(sent);
+    }
+    published == sent
 }
 
 #[cfg(test)]
@@ -381,6 +404,15 @@ mod tests {
     #[test]
     fn uris_encode_everything_but_path_characters() {
         assert_eq!(file_uri(Path::new("/tmp/a b/zażółć.ts")), "file:///tmp/a%20b/za%C5%BC%C3%B3%C5%82%C4%87.ts");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn windows_uris_put_the_drive_in_the_path() {
+        let uri = file_uri(Path::new(r"C:\proj\a b.rs"));
+        assert_eq!(uri, "file:///C:/proj/a%20b.rs");
+        assert!(same_document("file:///c%3A/proj/a%20b.rs", &uri));
+        assert!(!same_document("file:///c%3A/proj/other.rs", &uri));
     }
 
     #[test]

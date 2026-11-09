@@ -227,7 +227,7 @@ fn resolve_credential(raw: &str, provider: &str) -> Result<String, String> {
     }
     if let Some(command) = raw.strip_prefix('!') {
         // From `/`, so a relative command never runs out of the project the agent was opened in.
-        let mut shell = crate::process::command("sh");
+        let mut shell = crate::process::command(crate::process::shell("sh")?);
         shell.arg("-c").arg(command).current_dir("/");
         let output = crate::process::output_within(&mut shell, CREDENTIAL_TIMEOUT)
             .map_err(|e| format!("{provider} credential command failed: {e}"))?
@@ -784,7 +784,8 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("agent-web-keys-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let log = dir.join("runs");
-        let settings = json!({"exaApiKey": format!("!echo run >> {}; echo k1", log.display()), "tavilyApiKey": " "});
+        // Forward slashes: bash would read the backslashes of a Windows path as escapes.
+        let settings = json!({"exaApiKey": format!("!echo run >> {}; echo k1", log.display().to_string().replace('\\', "/")), "tavilyApiKey": " "});
         std::fs::write(dir.join("web-search.json"), settings.to_string()).unwrap();
         let keys_lock = PROVIDER_KEYS.lock().unwrap();
         unsafe { std::env::set_var("TAVILY_API_KEY", "!from-env") };

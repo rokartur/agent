@@ -71,7 +71,7 @@ pub fn project_agents_dirs(cwd: &Path, trusted: bool) -> Vec<PathBuf> {
 
 /// The directory /trust records: the git root above `cwd`, or `cwd` outside a repo.
 pub fn project_root(cwd: &Path) -> PathBuf {
-    let cwd = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
+    let cwd = crate::process::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
     cwd.ancestors().find(|dir| dir.join(".git").exists()).unwrap_or(&cwd).to_path_buf()
 }
 
@@ -112,7 +112,7 @@ pub fn nested_context(cwd: &Path, extra_dirs: &[PathBuf], file: &Path, loaded: &
         }
     } else {
         // Extra dirs are canonical, so `../api/x.rs` and symlinks must resolve before they match.
-        let Ok(parent) = parent.canonicalize() else { return String::new() };
+        let Ok(parent) = crate::process::canonicalize(parent) else { return String::new() };
         let Some(extra) = extra_dirs.iter().find(|extra| parent.starts_with(extra)) else { return String::new() };
         // cwd's own AGENTS.md is in the system prompt, an extra dir's is not.
         dirs.extend(parent.ancestors().take_while(|ancestor| ancestor.starts_with(extra)).map(Path::to_path_buf));
@@ -178,7 +178,7 @@ pub fn load_skills(agent_dir: &Path, cwd: &Path, trusted: bool, enabled: impl Fn
         collect_skill_files(&dir.join("skills"), true, &mut files);
         let sources = skill_sources(&dir);
         for path in files {
-            if !seen.insert(path.canonicalize().unwrap_or_else(|_| path.clone())) {
+            if !seen.insert(crate::process::canonicalize(&path).unwrap_or_else(|_| path.clone())) {
                 continue;
             }
             let Some(mut skill) = parse_skill(&path) else { continue };
@@ -500,14 +500,14 @@ mod tests {
         let first = nested_context(&cwd, &[], &file, &mut loaded);
         let second = nested_context(&cwd, &[], &file, &mut loaded);
         std::fs::remove_dir_all(&cwd).unwrap();
-        assert_eq!(first, format!("<project_instructions path=\"{}\">\nsub rules\n</project_instructions>", cwd.join("sub/AGENTS.md").display()));
+        assert_eq!(first, format!("<project_instructions path=\"{}\">\nsub rules\n</project_instructions>", cwd.join("sub").join("AGENTS.md").display()));
         assert_eq!(second, "");
         assert_eq!(nested_context(&cwd, &[], &cwd.join("x.rs"), &mut loaded), "");
     }
 
     #[test]
     fn extra_dir_agents_md_is_attached_from_the_extra_dir_down() {
-        let root = std::env::temp_dir().canonicalize().unwrap().join(format!("agent-nested-extra-{}", std::process::id()));
+        let root = crate::process::canonicalize(std::env::temp_dir()).unwrap().join(format!("agent-nested-extra-{}", std::process::id()));
         let extra = root.join("api");
         std::fs::create_dir_all(extra.join("sub")).unwrap();
         std::fs::create_dir_all(root.join("repo")).unwrap();
@@ -519,7 +519,7 @@ mod tests {
         std::fs::remove_dir_all(&root).unwrap();
         assert_eq!(outside, "");
         let block = |path: PathBuf, text: &str| format!("<project_instructions path=\"{}\">\n{text}\n</project_instructions>", path.display());
-        assert_eq!(attached, format!("{}\n\n{}", block(extra.join("AGENTS.md"), "api rules"), block(extra.join("sub/AGENTS.md"), "sub rules")));
+        assert_eq!(attached, format!("{}\n\n{}", block(extra.join("AGENTS.md"), "api rules"), block(extra.join("sub").join("AGENTS.md"), "sub rules")));
     }
 
     #[test]

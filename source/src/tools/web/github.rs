@@ -198,7 +198,8 @@ fn walk(root: &Path, dir: &Path, lines: &mut Vec<String>) {
         if name == ".git" {
             continue;
         }
-        let rel = path.strip_prefix(root).unwrap_or(&path).display().to_string();
+        // One separator in the tree the model reads, as GitHub shows it.
+        let rel = path.strip_prefix(root).unwrap_or(&path).display().to_string().replace(std::path::MAIN_SEPARATOR, "/");
         if !path.is_dir() {
             lines.push(rel);
         } else if NOISE.contains(&name.as_str()) {
@@ -277,6 +278,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn checkout_fetches_a_branch_or_a_commit_and_keeps_symlinks_as_plain_files() {
         let root = std::env::temp_dir().join(format!("agent-github-checkout-{}", std::process::id()));
         let remote = root.join("remote");

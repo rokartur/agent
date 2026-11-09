@@ -439,14 +439,14 @@ fn clear_run(state: &mut State, index: usize) {
 /// Files already there and not in the source stay, since a plugin may keep state next to its code.
 pub fn install(home: &Path, source: &str) -> Result<String, String> {
     let plugins = home.join(".agents/plugins");
-    if source.contains('/') {
-        let from = Path::new(source).canonicalize().map_err(|e| format!("Cannot read {source}: {e}"))?;
+    if source.contains(std::path::is_separator) {
+        let from = crate::process::canonicalize(source).map_err(|e| format!("Cannot read {source}: {e}"))?;
         let name = from.file_name().unwrap_or_default().to_string_lossy().to_string();
         check_name(&name)?;
         read_manifest(&from)?;
         let target = plugins.join(&name);
         // Copying the installed directory onto itself would truncate every file to zero bytes.
-        if target.canonicalize().is_ok_and(|target| target == from) {
+        if crate::process::canonicalize(&target).is_ok_and(|target| target == from) {
             return Ok(name);
         }
         copy_dir(&from, &target)?;
@@ -699,8 +699,10 @@ done"#
         let home = home_with("crash", &[("broken", "echo 'no bun here' >&2; exit 3")]);
         let plugins = Plugins::new(&home);
         plugins.sync(&[], &json!({}));
-        eventually(|| !plugins.list()[0].running);
-        assert_eq!(plugins.list()[0].error.as_deref(), Some("Exited (exit status: 3): no bun here"));
+        // The error lands after the wait that follows `running` turning false.
+        eventually(|| plugins.list()[0].error.is_some());
+        let status = if cfg!(windows) { "exit code: 3" } else { "exit status: 3" };
+        assert_eq!(plugins.list()[0].error, Some(format!("Exited ({status}): no bun here")));
         assert_eq!(plugins.input("hi", &json!({})), Ok("hi".into()));
     }
 
@@ -855,7 +857,7 @@ done"#;
         assert_eq!(
             update(&home, &[]),
             Ok(vec![
-                format!("mine: updated to 1.1.0 from {}.", source.canonicalize().unwrap().display()),
+                format!("mine: updated to 1.1.0 from {}.", crate::process::canonicalize(&source).unwrap().display()),
                 "old: not installed from a directory; install it again with agent plugin install <path>.".to_string(),
                 format!("usagefleet: {bundled} is the newest."),
             ])

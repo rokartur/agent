@@ -1,8 +1,7 @@
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::fs::{File, OpenOptions, TryLockError};
+use std::fs::{File, TryLockError};
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Sender};
@@ -1283,9 +1282,9 @@ impl Agent {
 
     fn switch_worktree(&mut self, path: &str, emit: &mut dyn FnMut(Event)) -> Result<String, String> {
         let typed = self.cwd.join(path);
-        let path = typed.canonicalize().map_err(|e| format!("Cannot open {}: {e}", typed.display()))?;
+        let path = crate::process::canonicalize(&typed).map_err(|e| format!("Cannot open {}: {e}", typed.display()))?;
         let (worktrees, current) = crate::worktree::list(&self.cwd)?;
-        if !worktrees.iter().any(|worktree| worktree.path.canonicalize().is_ok_and(|known| known == path)) {
+        if !worktrees.iter().any(|worktree| crate::process::canonicalize(&worktree.path).is_ok_and(|known| known == path)) {
             return Err(format!("{} is not in `git worktree list` of this repository.", path.display()));
         }
         if path == current {
@@ -1801,11 +1800,11 @@ impl Agent {
 
     /// --add-dir and /workspace add: `path` is relative to cwd or starts with `~`; saved so a resume restores it. Returns the notice to show.
     pub fn add_dir(&mut self, path: &str) -> Result<String, String> {
-        let dir = tools::hashline::resolve(&self.cwd, path).canonicalize().map_err(|e| format!("Cannot open {path}: {e}"))?;
+        let dir = crate::process::canonicalize(tools::hashline::resolve(&self.cwd, path)).map_err(|e| format!("Cannot open {path}: {e}"))?;
         if !dir.is_dir() {
             return Err(format!("{} is not a directory.", dir.display()));
         }
-        let cwd = self.cwd.canonicalize().map_err(|e| format!("Cannot open {}: {e}", self.cwd.display()))?;
+        let cwd = crate::process::canonicalize(&self.cwd).map_err(|e| format!("Cannot open {}: {e}", self.cwd.display()))?;
         // Not an error, so `agent -c --add-dir ../api` on a session that has it still starts.
         if dir.starts_with(&cwd) {
             return Ok(format!("{} is inside the working directory, so it is already in the workspace.", dir.display()));
@@ -1821,7 +1820,7 @@ impl Agent {
     /// /workspace remove: takes the path as listed or as typed relative to cwd. Returns the notice to show.
     pub fn remove_dir(&mut self, path: &str) -> Result<String, String> {
         let typed = tools::hashline::resolve(&self.cwd, path);
-        let dir = typed.canonicalize().unwrap_or(typed);
+        let dir = crate::process::canonicalize(&typed).unwrap_or(typed);
         let index = self.extra_dirs.iter().position(|known| *known == dir).ok_or(format!("{} is not an extra directory.", dir.display()))?;
         let dir = self.extra_dirs.remove(index);
         self.save_extra_dirs()?;
@@ -1844,7 +1843,7 @@ impl Agent {
             Some(rest) if rest.is_empty() || rest.starts_with('/') => self.home.join(rest.trim_start_matches('/')),
             _ => self.cwd.join(dir),
         };
-        let dir = typed.canonicalize().map_err(|e| format!("Cannot open {dir}: {e}"))?;
+        let dir = crate::process::canonicalize(&typed).map_err(|e| format!("Cannot open {dir}: {e}"))?;
         if !dir.is_dir() {
             return Err(format!("{} is not a directory.", dir.display()));
         }
@@ -2137,7 +2136,7 @@ impl Session {
         }
         session.append(&json!({"type": "session", "id": session.id, "cwd": cwd, "model": model, "timestamp": now_ms()}))?;
         if let Some(path) = &session.path {
-            let file = File::open(path).map_err(|e| format!("Cannot open {}: {e}", path.display()))?;
+            let file = lock_file(path).map_err(|e| format!("Cannot open {}: {e}", path.display()))?;
             file.try_lock().map_err(|e| format!("Cannot lock {}: {e}", path.display()))?;
             session.lock = Some(Arc::new(file));
         }
@@ -2150,7 +2149,7 @@ impl Session {
         let id = resolve_id(dir, id)?;
         let path = dir.join(format!("{id}.jsonl"));
         let history = Session::history(&path)?;
-        let file = File::open(&path).map_err(|e| format!("Cannot open {}: {e}", path.display()))?;
+        let file = lock_file(&path).map_err(|e| format!("Cannot open {}: {e}", path.display()))?;
         match file.try_lock() {
             Ok(()) => Ok((Session { id, path: Some(path), forked_from: None, lock: Some(Arc::new(file)) }, history)),
             Err(TryLockError::WouldBlock) => Ok((Session::fork(dir, &path, id)?, history)),
@@ -2302,10 +2301,14 @@ impl Session {
             if modified >= cutoff {
                 continue;
             }
-            let Ok(file) = File::open(&path) else { continue };
+            let Ok(file) = lock_file(&path) else { continue };
             if file.try_lock().is_ok() {
                 // A file that cannot be removed now is tried again at the next start.
                 let _ = std::fs::remove_file(&path);
+                // Removed while still locked, so no resume can lock a session whose transcript is gone.
+                #[cfg(windows)]
+                let _ = std::fs::remove_file(path.with_extension("lock"));
+                drop(file);
             }
         }
     }
@@ -2323,7 +2326,7 @@ impl Session {
 
     pub fn append(&self, entry: &Value) -> Result<(), String> {
         let Some(path) = &self.path else { return Ok(()) };
-        let mut file = OpenOptions::new().create(true).append(true).mode(0o600).open(path).map_err(|e| format!("Cannot open {}: {e}", path.display()))?;
+        let mut file = crate::process::private_file().create(true).append(true).open(path).map_err(|e| format!("Cannot open {}: {e}", path.display()))?;
         // One write call, so a signal exit on another thread cannot leave half a line; writeln! on a File writes piecewise.
         file.write_all(format!("{entry}\n").as_bytes()).map_err(|e| format!("Cannot write {}: {e}", path.display()))
     }
@@ -2350,7 +2353,7 @@ impl Session {
 
 /// Writes `text` to a new 0600 file; a failed write removes it, since a partial file would pass as "already here" on the next import.
 fn write_new_private(path: &Path, text: &str) -> std::io::Result<()> {
-    let mut file = OpenOptions::new().write(true).create_new(true).mode(0o600).open(path)?;
+    let mut file = crate::process::private_file().write(true).create_new(true).open(path)?;
     file.write_all(text.as_bytes()).inspect_err(|_| {
         let _ = std::fs::remove_file(path);
     })
@@ -2397,9 +2400,23 @@ fn read_session_index(path: &Path) -> serde_json::Map<String, Value> {
 fn write_session_index(path: &Path, sessions: serde_json::Map<String, Value>) -> std::io::Result<()> {
     // Titles are prompt lines, so 0600 like the sessions; the rename keeps another process from reading half a file.
     let temporary = path.with_extension(format!("json.{}.tmp", std::process::id()));
-    let mut file = OpenOptions::new().create(true).write(true).truncate(true).mode(0o600).open(&temporary)?;
+    let mut file = crate::process::private_file().create(true).write(true).truncate(true).open(&temporary)?;
     file.write_all(json!({"version": SESSION_INDEX_VERSION, "sessions": sessions}).to_string().as_bytes())?;
     std::fs::rename(&temporary, path)
+}
+
+/// The file whose lock marks a session as open in a process.
+#[cfg(unix)]
+fn lock_file(session: &Path) -> std::io::Result<File> {
+    File::open(session)
+}
+
+/// Windows locks are mandatory: a lock on the session itself would block its own appends and every reader, so it sits beside it.
+#[cfg(windows)]
+fn lock_file(session: &Path) -> std::io::Result<File> {
+    // NotFound for a pruned session, as the Unix open gives, so a resume does not lock a fresh sidecar.
+    File::open(session)?;
+    File::options().create(true).write(true).truncate(false).open(session.with_extension("lock"))
 }
 
 /// The full id for an exact id or a unique prefix of a saved session's id.
@@ -2960,7 +2977,7 @@ mod tests {
         let mut agent = Agent::new(Client::new(&home).unwrap(), &settings, home.clone(), cwd, session, home.join("sessions"), None);
         let added = agent.add_dir("~");
         std::fs::remove_dir_all(&home).unwrap();
-        let real_home = PathBuf::from(std::env::var("HOME").unwrap()).canonicalize().unwrap();
+        let real_home = crate::process::canonicalize(std::env::var("HOME").unwrap()).unwrap();
         assert_eq!(added, Ok(format!("Added {}.", real_home.display())));
         assert_eq!(agent.extra_dirs, [real_home]);
     }
@@ -3135,7 +3152,7 @@ mod tests {
         std::fs::write(&path, header + &prompt("other")).unwrap();
         File::options().write(true).open(&path).unwrap().set_modified(modified).unwrap();
         let same_size_and_mtime = listed();
-        OpenOptions::new().append(true).open(&path).unwrap().write_all(prompt("again").as_bytes()).unwrap();
+        File::options().append(true).open(&path).unwrap().write_all(prompt("again").as_bytes()).unwrap();
         let appended = listed();
         std::fs::remove_dir_all(&dir).unwrap();
         assert_eq!(read, [("first".to_string(), 1)]);
@@ -3171,8 +3188,11 @@ mod tests {
         };
         write("a.txt", "v1");
         let first = tool_call(1, &[("a.txt", "v2")]);
-        let store = std::fs::read_dir(root.join(".agents/snapshots")).unwrap().next().unwrap().unwrap();
-        assert_eq!(std::os::unix::fs::PermissionsExt::mode(&store.metadata().unwrap().permissions()) & 0o777, 0o700, "snapshots hold file contents");
+        #[cfg(unix)]
+        {
+            let store = std::fs::read_dir(root.join(".agents/snapshots")).unwrap().next().unwrap().unwrap();
+            assert_eq!(std::os::unix::fs::PermissionsExt::mode(&store.metadata().unwrap().permissions()) & 0o777, 0o700, "snapshots hold file contents");
+        }
         write("between.txt", "user");
         let second = tool_call(3, &[("a.txt", "v3"), ("new.txt", "agent"), ("shared.txt", "agent")]);
         write("other.txt", "another session");

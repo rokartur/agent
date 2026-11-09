@@ -29,7 +29,7 @@ To run the listener without the service, for example to watch its output, run `a
 
 ## On the computer you type on
 
-Your other computers online on the tailnet show up as environments by their Tailscale name: untagged macOS and Linux devices logged in as you, as `tailscale status` lists them. To keep a host offered while it is offline, so `agent attach` shows the sessions it last had, list it in `~/.agents/settings.json`:
+Your other computers online on the tailnet show up as environments by their Tailscale name: untagged macOS, Linux and Windows devices logged in as you, as `tailscale status` lists them. To keep a host offered while it is offline, so `agent attach` shows the sessions it last had, list it in `~/.agents/settings.json`:
 
 ```json
 { "environments": ["studio"] }
@@ -45,11 +45,11 @@ Then:
 
 Sessions on different computers can message each other. `ListAgents` lists the running sessions of your other computers as `<computer>:<session>`, and `SendMessage` to that address starts a turn in the session there. That session sees the sender's address in the same form and can reply to it, but the reply arrives only when the sender's computer runs the listener too (`agent service install`). `notify_when_idle` works only for sessions on the same computer.
 
-A session can also hand a task to another computer: the `Agent` tool takes `on: "studio"` (or `"auto"`), and the subagent runs there, on that computer's files, tools and accounts, in the same directory path. When that path is missing there and is a git project, it is first copied over with rsync like the copy a new remote session offers, and the subagent's changes stay on that copy; any other missing path leaves the subagent in the host's home. Only its text answer comes back; images it looked at, such as `Video` frames, stay there. Stopping the subagent closes the connection, and the host then stops its process. The host needs a release that has remote subagents.
+A session can also hand a task to another computer: the `Agent` tool takes `on: "studio"` (or `"auto"`), and the subagent runs there, on that computer's files, tools and accounts, in the same directory path. When that path is missing there and is a git project, it is first copied over with rsync like the copy a new remote session offers, and the subagent's changes stay on that copy; any other missing path leaves the subagent in the host's home. From Windows nothing is copied: the subagent starts in the host's home when the path is missing there. Only its text answer comes back; images it looked at, such as `Video` frames, stay there. Stopping the subagent closes the connection, and the host then stops its process. The host needs a release that has remote subagents.
 
 A session started from another computer knows it: its prompt names the computer your terminal is on, so the model does not take the host's screen, apps or files for yours. `AGENT_USER_DEVICE` carries that name to its subagents and shell commands.
 
-A new remote session starts in the same directory path as your terminal. When that directory does not exist on the host, it starts in the host's home directory and says so. Move it with `!cd <dir>`, then use `/worktree` to pick a branch or a worktree there.
+A new remote session starts in the same directory path as your terminal. When that directory does not exist on the host, it starts in the host's home directory and says so. From Windows it never offers to copy the project with rsync: a `C:\` path names no directory on another computer, and Git for Windows ships no rsync. Move it with `!cd <dir>`, then use `/worktree` to pick a branch or a worktree there.
 
 The project is the host's: `@` file completion, `!` commands, git status and diffs all come from the host. What you do on your own computer stays there: Ctrl+V pastes an image from your clipboard, a file you drag into the terminal is read from your disk, and `/copy`, copied selections and links you click use your clipboard and your browser.
 

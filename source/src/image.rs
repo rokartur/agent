@@ -142,8 +142,14 @@ fn shrunk(bytes: &[u8], media_type: &'static str, side: u32) -> Result<(&'static
     let output = dir.join(format!("{nonce}-out.{format}"));
     std::fs::write(&input, bytes).map_err(|e| format!("Cannot write {}: {e}", input.display()))?;
     let side = side.to_string();
-    // ImageMagick 6, as Ubuntu ships it, has `convert` and no `magick`.
-    let programs: &[&str] = if cfg!(target_os = "macos") { &["sips"] } else { &["magick", "convert"] };
+    // ImageMagick 6, as Ubuntu ships it, has `convert` and no `magick`; on Windows `convert` is System32's disk converter.
+    let programs: &[&str] = if cfg!(target_os = "macos") {
+        &["sips"]
+    } else if cfg!(windows) {
+        &["magick"]
+    } else {
+        &["magick", "convert"]
+    };
     let mut program = programs[0];
     let mut result = Err(std::io::ErrorKind::NotFound.into());
     for &candidate in programs {
@@ -181,15 +187,27 @@ pub(crate) fn sniffed_media_type(bytes: &[u8]) -> Option<&'static str> {
     }
 }
 
-const CLIPBOARD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+pub(crate) const CLIPBOARD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// Reads the clipboard image into an API image block: `osascript` on macOS, `wl-paste` on Wayland, `xclip` on X11.
+/// GDI+ cannot write a PNG to the unseekable stdout, so the image goes through a memory stream; exit 1 means no image.
+const WINDOWS_CLIPBOARD_PNG: &str = "Add-Type -AssemblyName System.Windows.Forms, System.Drawing; \
+    $image = [Windows.Forms.Clipboard]::GetImage(); if (-not $image) { exit 1 }; \
+    $png = New-Object IO.MemoryStream; $image.Save($png, [Drawing.Imaging.ImageFormat]::Png); \
+    $out = [Console]::OpenStandardOutput(); $png.WriteTo($out); $out.Flush()";
+
+/// Reads the clipboard image into an API image block: `osascript` on macOS, PowerShell on Windows, `wl-paste` on Wayland,
+/// `xclip` on X11.
 pub fn from_clipboard() -> Result<Value, String> {
     if cfg!(target_os = "macos") {
         return from_macos_clipboard();
     }
-    let (program, args): (&str, &[&str]) =
-        if std::env::var_os("WAYLAND_DISPLAY").is_some() { ("wl-paste", &["--type", "image/png"]) } else { ("xclip", &["-selection", "clipboard", "-target", "image/png", "-out"]) };
+    let (program, args): (&str, &[&str]) = if cfg!(windows) {
+        ("powershell", &["-NoProfile", "-NonInteractive", "-STA", "-Command", WINDOWS_CLIPBOARD_PNG])
+    } else if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+        ("wl-paste", &["--type", "image/png"])
+    } else {
+        ("xclip", &["-selection", "clipboard", "-target", "image/png", "-out"])
+    };
     // Runs on the UI thread; a clipboard owner that never answers would freeze the TUI.
     let output = crate::process::output_within(crate::process::command(program).args(args), CLIPBOARD_TIMEOUT).map_err(|e| format!("Cannot run {program}: {e}"))?.ok_or("Clipboard read timed out.")?;
     if !output.status.success() || sniffed_media_type(&output.stdout).is_none() {
@@ -299,8 +317,12 @@ pub(crate) mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("capture screen (1) & co.png");
         std::fs::write(&file, b"png").unwrap();
-        let escaped = file.display().to_string().replace(' ', "\\ ").replace('(', "\\(").replace(')', "\\)").replace('&', "\\&");
-        assert_eq!(pasted_path(&escaped), Some(file.clone()));
+        // Terminals escape a dropped path with backslashes only on macOS and Linux, where they are not separators.
+        #[cfg(unix)]
+        {
+            let escaped = file.display().to_string().replace(' ', "\\ ").replace('(', "\\(").replace(')', "\\)").replace('&', "\\&");
+            assert_eq!(pasted_path(&escaped), Some(file.clone()));
+        }
         assert_eq!(pasted_path(&format!("'{}'", file.display())), Some(file.clone()));
         assert_eq!(pasted_path(&format!("\"{}\"", file.display())), Some(file.clone()));
         assert_eq!(pasted_path("just some text"), None);
@@ -336,7 +358,7 @@ pub(crate) mod tests {
             command.args(["-z", "1920", "3840"]).arg(&file);
             command
         } else {
-            let mut command = crate::process::command("convert");
+            let mut command = crate::process::command(if cfg!(windows) { "magick" } else { "convert" });
             command.arg(&file).args(["-resize", "3840x1920!"]).arg(&file);
             command
         };

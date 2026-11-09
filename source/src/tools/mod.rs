@@ -2,8 +2,6 @@ use serde_json::Value;
 use std::collections::BTreeSet;
 use std::fs::File;
 use std::io::{Read, Write};
-use std::os::unix::fs::OpenOptionsExt;
-use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -156,7 +154,7 @@ fn bash(input: &Value, cwd: &Path, rtk: &Rtk, abort: &AtomicBool, terminal: Opti
             (code, killed)
         }
         None => {
-            let child = process::command("bash").arg("-c").arg(script).current_dir(cwd).stdout(Stdio::piped()).spawn().map_err(|e| format!("Cannot start bash: {e}"))?;
+            let child = process::command(process::shell("bash")?).arg("-c").arg(script).current_dir(cwd).stdout(Stdio::piped()).spawn().map_err(|e| format!("Cannot start bash: {e}"))?;
             let (status, killed) = wait_streaming(child, abort, deadline, |chunk| capture.push(chunk))?;
             (exit_code(status), killed)
         }
@@ -174,7 +172,7 @@ fn bash(input: &Value, cwd: &Path, rtk: &Rtk, abort: &AtomicBool, terminal: Opti
 }
 
 fn exit_code(status: ExitStatus) -> i32 {
-    status.code().unwrap_or_else(|| 128 + status.signal().expect("no exit code means a signal ended it"))
+    status.code().unwrap_or_else(|| 128 + process::signal_of(status).expect("no exit code means a signal ended it"))
 }
 
 /// How long output may keep arriving after the command exits, so `server &` cannot hold the call.
@@ -297,7 +295,7 @@ fn write(input: &Value, cwd: &Path, editor: Option<&dyn hashline::EditorFiles>) 
         None => hashline::replace_file(&path, content.as_bytes())?,
     }
     // An editor may keep a new file as an unsaved buffer, which canonicalize cannot find on disk.
-    let path = path.canonicalize().unwrap_or(path);
+    let path = crate::process::canonicalize(&path).unwrap_or(path);
     // No echo of the content: it is already in the call, and every later turn would pay for it twice.
     Ok(format!("Wrote {} lines to {}.", content.lines().count(), path.display()))
 }
@@ -391,7 +389,7 @@ fn rg_rows(json: &str, cwd: &Path, anchors: &mut Anchors) -> Result<String, Stri
         let separator = match event["type"].as_str() {
             Some("begin") => {
                 let in_budget = rows.len() < MAX_LINES && anchors.minted() - minted_before < SEARCH_ANCHOR_BUDGET;
-                tracked = if in_budget { cwd.join(path).canonicalize().ok().filter(|file| anchors.track(file, MAX_LINES).is_ok()) } else { None };
+                tracked = if in_budget { crate::process::canonicalize(cwd.join(path)).ok().filter(|file| anchors.track(file, MAX_LINES).is_ok()) } else { None };
                 continue;
             }
             Some("match") => ':',
@@ -559,7 +557,11 @@ impl SpillFile {
 }
 
 pub(crate) fn spill_dir() -> PathBuf {
-    std::env::temp_dir().join(format!("agent-{}", std::process::id()))
+    spill_dir_of(std::process::id())
+}
+
+pub(crate) fn spill_dir_of(pid: u32) -> PathBuf {
+    std::env::temp_dir().join(format!("agent-{pid}"))
 }
 
 /// A new owner-only `{stem}-{n}.{extension}` in this run's spill dir.
@@ -568,13 +570,29 @@ fn private_file(stem: &str, extension: &str) -> Result<(File, PathBuf), String> 
     let dir = spill_dir();
     crate::process::private_dir(&dir)?;
     let path = dir.join(format!("{stem}-{}.{extension}", CREATED.fetch_add(1, Ordering::Relaxed)));
-    let file = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path).map_err(|e| format!("Cannot create {}: {e}", path.display()))?;
+    let file = crate::process::private_file().write(true).create_new(true).open(&path).map_err(|e| format!("Cannot create {}: {e}", path.display()))?;
     Ok((file, path))
 }
 
 /// Spill files are only for this run, so quitting removes them.
 pub fn remove_spills() {
     let _ = std::fs::remove_dir_all(spill_dir());
+}
+
+/// Removes the spill and web store dirs of agents no longer running: a stop on Windows is TerminateProcess, so no
+/// agent there cleans up after itself.
+#[cfg(windows)]
+pub fn remove_dead_agents_spills() {
+    let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else { return };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let pid = name.to_str().and_then(|name| name.strip_prefix("agent-web-").or(name.strip_prefix("agent-"))).and_then(|pid| pid.parse().ok());
+        if let Some(pid) = pid
+            && !crate::process::alive(pid)
+        {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
 }
 
 pub fn format_size(bytes: usize) -> String {
@@ -605,7 +623,7 @@ mod tests {
     }
 
     fn run_bash(input: Value, abort: &Arc<AtomicBool>) -> (String, bool) {
-        run("Bash", &input, Path::new("/tmp"), &mut Anchors::new("t"), &Rtk::OFF, abort)
+        run("Bash", &input, &std::env::temp_dir(), &mut Anchors::new("t"), &Rtk::OFF, abort)
     }
 
     #[test]
@@ -714,6 +732,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn spills_get_their_own_owner_only_files() {
         use std::os::unix::fs::PermissionsExt;
         let (first, second) = (spill("one", "test"), spill("two", "test"));
@@ -765,7 +784,7 @@ mod tests {
 
     #[test]
     fn rg_reports_a_missing_path_instead_of_no_matches() {
-        let error = rg(&json!({"pattern": "needle", "path": "/nonexistent-agent-path"}), Path::new("/tmp"), &mut Anchors::new("t"), &AtomicBool::new(false)).unwrap_err();
+        let error = rg(&json!({"pattern": "needle", "path": "/nonexistent-agent-path"}), &std::env::temp_dir(), &mut Anchors::new("t"), &AtomicBool::new(false)).unwrap_err();
         assert!(error.starts_with("rg failed"), "{error}");
     }
 
@@ -774,7 +793,7 @@ mod tests {
         // About 68 KB in 1500 lines: under the line cap, over the 50 KB byte cap.
         let pad = "x".repeat(32);
         let command = format!("awk 'BEGIN {{ for (i = 1; i <= 1500; i++) print \"line\", i, \"{pad}\" }}'");
-        let (out, _) = run("Bash", &json!({ "command": command }), Path::new("/tmp"), &mut Anchors::new("t"), &Rtk::ON, &Arc::default());
+        let (out, _) = run("Bash", &json!({ "command": command }), &std::env::temp_dir(), &mut Anchors::new("t"), &Rtk::ON, &Arc::default());
         assert!(out.contains(&format!("\nline 1500 {pad}\n")), "{}", &out[out.len().saturating_sub(300)..]);
         let path = out.rsplit("Full output: ").next().unwrap().trim_end_matches(']');
         assert_eq!(std::fs::read_to_string(path).unwrap(), (1..=1500).map(|i| format!("line {i} {pad}\n")).collect::<String>());
@@ -834,6 +853,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn write_refuses_to_replace_a_file_it_cannot_read() {
         use std::os::unix::fs::PermissionsExt;
         let dir = std::env::temp_dir().join(format!("agent-write-unreadable-{}", std::process::id()));

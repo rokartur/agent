@@ -22,7 +22,9 @@ agent
 
 Type `/login` and pick Claude, ChatGPT or GitHub Copilot. You already pay for one; that's the setup. Google Antigravity signs in too, once `ANTIGRAVITY_CLIENT_SECRET` holds the app's OAuth client secret; Google has banned accounts that use the Antigravity sign-in outside Antigravity. Prefer pay as you go? Paste an Anthropic or OpenRouter API key, and every OpenRouter model is in `/model`.
 
-macOS and Linux. Updates itself. `agent --help` for the rest.
+macOS, Linux and Windows. Updates itself. `agent --help` for the rest.
+
+Windows 10 1803 or later: download `agent-windows-x86_64.exe` from the [latest release](https://github.com/rokartur/agent/releases/latest), rename it to `agent.exe` and move it to a folder of its own on your `PATH`, such as `%LOCALAPPDATA%\Programs\agent`. The exe is not code-signed, so SmartScreen stops its first run: choose More info, then Run anyway. Windows runs a tool such as `git.exe` from the agent's folder before `PATH`. Install [Git for Windows](https://git-scm.com/download/win), whose bash runs the shell tools. `agent service` is macOS and Linux only; run `agent serve --tailnet` instead, or `agent service install --on <host>` to set it up on a Mac or Linux host. `/voice` does not work on Windows yet. The Windows console reports a paste as typed keys, so each line of pasted text sends on its own; paste one line at a time. A sign-in link opens in your browser. If no browser is running yet and the terminal runs the agent in a job object its children cannot leave, the browser the agent starts closes when the agent exits; open your browser first.
 
 ## Switch computers with /env
 

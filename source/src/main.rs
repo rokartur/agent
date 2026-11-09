@@ -6,6 +6,7 @@ mod agent;
 mod api;
 mod headroom;
 mod image;
+mod local_socket;
 mod mcp;
 mod plugins;
 mod process;
@@ -223,9 +224,19 @@ fn plugin_command(args: &[String]) -> Result<(), String> {
 }
 
 fn main() {
+    // Windows sets no HOME outside Git Bash, and the tools and the bash they start read it.
+    #[cfg(windows)]
+    if std::env::var_os("HOME").is_none()
+        && let Some(home) = std::env::home_dir()
+    {
+        // SAFETY: no other thread runs yet.
+        unsafe { std::env::set_var("HOME", home) };
+    }
     process::exit_on_signal(clean_up_on_signal);
     // An earlier agent with this pid that crashed left files that the spill and bg log `create_new` would refuse.
     tools::remove_spills();
+    #[cfg(windows)]
+    tools::remove_dead_agents_spills();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let command = match args.first().map(String::as_str) {
         Some("plugin") => Some(plugin_command(&args[1..])),
@@ -441,6 +452,8 @@ fn open_session(options: &Options, args: &[String]) -> Result<(), String> {
         }
         // Started before the screen, so "Reading the message from stdin..." stays visible.
         let stream = serve::Stream::Local(local_session(&home, options, &args, &cwd, piped, None)?);
+        // crossterm on Windows reads keys from the console's `CONIN$`, whatever stdin is.
+        #[cfg(unix)]
         read_keys_from_the_terminal()?;
         return serve::show(&home, &environment, || Ok(stream));
     }
@@ -454,6 +467,7 @@ fn open_session(options: &Options, args: &[String]) -> Result<(), String> {
 
 /// Points stdin at the terminal on stdout once the session server holds the piped message. With stdin not a terminal
 /// crossterm reads keys from `/dev/tty`, which kqueue on macOS cannot watch, so no key arrived.
+#[cfg(unix)]
 fn read_keys_from_the_terminal() -> Result<(), String> {
     use std::os::fd::AsRawFd;
     // SAFETY: ttyname returns null or a NUL-terminated name in a static buffer, copied out before any other call.
@@ -472,7 +486,7 @@ fn read_keys_from_the_terminal() -> Result<(), String> {
 
 /// The running session `-r` or `-c` names in `cwd`, or a new session server for `args` there. `agent serve
 /// --tailnet` calls it for the computers that start sessions on this one.
-fn local_session(home: &std::path::Path, options: &Options, args: &[String], cwd: &std::path::Path, piped: bool, user_device: Option<&str>) -> Result<std::os::unix::net::UnixStream, String> {
+fn local_session(home: &std::path::Path, options: &Options, args: &[String], cwd: &std::path::Path, piped: bool, user_device: Option<&str>) -> Result<local_socket::Stream, String> {
     let resumed = match &options.resume {
         Some(Resume::Id(id)) => Some(id.clone()),
         Some(Resume::Latest) => Some(Session::latest(&home.join(".agents/sessions"), cwd)?),

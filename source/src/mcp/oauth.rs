@@ -381,12 +381,14 @@ mod tests {
             Ok(())
         })
         .unwrap();
+        #[cfg(unix)]
         let mode = std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(path(&home)).unwrap().permissions());
         let token = bearer(&home, "https://x/mcp", None);
         let other = bearer(&home, "https://y/mcp", None);
         assert!(logged_in(&read(&home).unwrap(), "https://x/mcp"));
         assert!(!logged_in(&read(&home).unwrap(), "https://z/mcp"));
         std::fs::remove_dir_all(&home).unwrap();
+        #[cfg(unix)]
         assert_eq!(mode & 0o777, 0o600);
         assert_eq!(token.unwrap().as_deref(), Some("tok"));
         assert_eq!(other.unwrap(), None);

@@ -1,7 +1,6 @@
 use serde_json::Value;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
-use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -95,7 +94,14 @@ impl Terminals {
         let title: String = label.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(MAX_TITLE_CHARS).collect();
         let (stdout_file, stdout) = super::private_file("bg", "stdout")?;
         let (stderr_file, stderr) = super::private_file("bg", "stderr")?;
-        let pid = crate::process::command("sh").args(["-c", command]).current_dir(cwd).stdout(stdout_file).stderr(stderr_file).spawn().map_err(|e| format!("Cannot start sh: {e}"))?.id();
+        let child = crate::process::command(crate::process::shell("sh")?)
+            .args(["-c", command])
+            .current_dir(cwd)
+            .stdout(stdout_file)
+            .stderr(stderr_file)
+            .spawn()
+            .map_err(|e| format!("Cannot start sh: {e}"))?;
+        let pid = child.id();
         self.counter += 1;
         let id = format!("bt-{}", self.counter);
         let terminal = Arc::new(Terminal { id, title, cwd: cwd.to_path_buf(), pid, started: Instant::now(), stdout, stderr, state: Mutex::default() });
@@ -106,13 +112,15 @@ impl Terminals {
             // shortcut: every settled `sh` stays a zombie until the agent exits, so `stop` and `kill_all` never signal a
             // reused group; reap once the group is empty if a session starts thousands of terminals.
             let status = crate::process::wait_unreaped(pid);
+            // Held until here: on Windows its handle is all that keeps a fast `sh`'s pid from being reused before the wait opens one.
+            drop(child);
             // follow_ups before state, the order TaskOutput and TaskStop use, so neither sees the exit before its report is queued.
             let mut queued = follow_ups.lock().unwrap();
             let mut state = watched.state.lock().unwrap();
             let exit = match status {
-                Ok(status) if state.killed && status.signal().is_some() => (Status::Killed, exit_text(status.code(), status.signal())),
+                Ok(status) if state.killed && !status.success() => (Status::Killed, exit_text(status.code(), crate::process::signal_of(status))),
                 Ok(status) if status.success() => (Status::Done, "exit 0".to_string()),
-                Ok(status) => (Status::Failed, exit_text(status.code(), status.signal())),
+                Ok(status) => (Status::Failed, exit_text(status.code(), crate::process::signal_of(status))),
                 Err(e) => (Status::Failed, format!("wait failed: {e}")),
             };
             state.exit = Some(exit);
@@ -345,12 +353,28 @@ mod tests {
         terminals.start(&json!({"command": "sleep 30 &\n sleep 30"}), &dir, &follow_ups).unwrap();
         let targets = [terminals.find("bt-1").unwrap()];
         let abort = AtomicBool::new(false);
-        assert_eq!(kill(&targets, &follow_ups, &abort), "Killed bt-1 \"sleep 30 & sleep 30\" (SIGTERM).");
+        let how = if cfg!(windows) { "exit 1" } else { "SIGTERM" };
+        assert_eq!(kill(&targets, &follow_ups, &abort), format!("Killed bt-1 \"sleep 30 & sleep 30\" ({how})."));
         assert!(follow_ups.lock().unwrap().is_empty());
-        assert_eq!(kill(&targets, &follow_ups, &abort), "bt-1 \"sleep 30 & sleep 30\" was already killed (SIGTERM).");
+        assert_eq!(kill(&targets, &follow_ups, &abort), format!("bt-1 \"sleep 30 & sleep 30\" was already killed ({how})."));
     }
 
     #[test]
+    fn a_terminal_that_exits_at_once_is_done() {
+        let dir = std::env::temp_dir();
+        let follow_ups = Arc::default();
+        let mut terminals = Terminals::default();
+        for _ in 0..5 {
+            terminals.start(&json!({"command": "exit 0"}), &dir, &follow_ups).unwrap();
+        }
+        wait_until(|| follow_ups.lock().unwrap().len() == 5);
+        for terminal in &terminals.list {
+            assert!(terminal.status() == Status::Done, "{}", terminal.result_text());
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn kill_reaches_children_that_outlive_the_shell() {
         let dir = std::env::temp_dir();
         let follow_ups = Arc::default();
@@ -371,6 +395,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn alive(pid: &str) -> bool {
         crate::process::command("kill").args(["-0", pid]).stderr(std::process::Stdio::null()).status().unwrap().success()
     }

@@ -1,6 +1,5 @@
 use serde_json::{Value, json};
 use std::io::Write;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use super::oauth::Tokens;
@@ -93,15 +92,20 @@ fn save(home: &Path, accounts: &[Account]) -> Result<(), String> {
     write_private(&path(home), &format!("{file:#}\n"))
 }
 
-/// Writes `text` through a 0600 temp file and a rename, so a crash never leaves half a file.
+/// Writes `text` through a temp file private to this user (0600 on Unix, the profile's ACL on Windows) and a rename, so a crash never leaves half a file.
 pub(crate) fn write_private(path: &Path, text: &str) -> Result<(), String> {
     // Renaming over a symlink would replace a dotfiles link with a plain file.
-    let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let path = crate::process::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     // Per process: two agents sharing one temp name would rename each other's half-written file into place.
     let temp = path.with_extension(format!("json.{}.tmp", std::process::id()));
-    let mut out = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&temp).map_err(|e| format!("Cannot write {}: {e}", temp.display()))?;
+    let mut out = crate::process::private_file().write(true).create(true).truncate(true).open(&temp).map_err(|e| format!("Cannot write {}: {e}", temp.display()))?;
     // mode() applies only on create, so a leftover temp file is made private before the secrets go in.
-    let written = out.set_permissions(std::fs::Permissions::from_mode(0o600)).and_then(|()| out.write_all(text.as_bytes())).and_then(|()| out.sync_all()).and_then(|()| std::fs::rename(&temp, &path));
+    // On the open file, not the path, which another process could have swapped by now.
+    #[cfg(unix)]
+    let restricted = out.set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o600));
+    #[cfg(windows)]
+    let restricted = std::io::Result::Ok(());
+    let written = restricted.and_then(|()| out.write_all(text.as_bytes())).and_then(|()| out.sync_all()).and_then(|()| std::fs::rename(&temp, &path));
     written.map_err(|e| {
         let _ = std::fs::remove_file(&temp);
         format!("Cannot write {}: {e}", path.display())
@@ -122,7 +126,7 @@ pub fn update(home: &Path, change: impl FnOnce(&mut Vec<Account>) -> Result<(), 
 pub(crate) fn locked<T>(path: &Path, change: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
     let lock_path = path.with_extension("json.lock");
     std::fs::create_dir_all(lock_path.parent().expect("stores sit in ~/.agents")).map_err(|e| format!("Cannot create {}: {e}", lock_path.display()))?;
-    let lock = std::fs::OpenOptions::new().write(true).create(true).truncate(false).mode(0o600).open(&lock_path).map_err(|e| format!("Cannot open {}: {e}", lock_path.display()))?;
+    let lock = crate::process::private_file().write(true).create(true).truncate(false).open(&lock_path).map_err(|e| format!("Cannot open {}: {e}", lock_path.display()))?;
     lock.lock().map_err(|e| format!("Cannot lock {}: {e}", lock_path.display()))?;
     change()
 }
@@ -373,7 +377,8 @@ mod tests {
         let mut loaded = load(&home).unwrap();
         loaded.sort_by(|a, b| a.provider.cmp(&b.provider));
         assert_eq!(loaded, [accounts[1].clone(), accounts[0].clone()]);
-        assert_eq!(std::fs::metadata(path(&home)).unwrap().permissions().mode() & 0o777, 0o600);
+        #[cfg(unix)]
+        assert_eq!(std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(path(&home)).unwrap().permissions()) & 0o777, 0o600);
         std::fs::remove_dir_all(&home).unwrap();
     }
 

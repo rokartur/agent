@@ -1626,6 +1626,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn a_stalled_stream_times_out_and_esc_ends_it_as_aborted() {
         use std::io::Write;
         use std::os::unix::net::UnixStream;

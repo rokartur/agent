@@ -19,8 +19,10 @@ pub use wire::{PROTOCOL, Place, SILENCE};
 
 use crossterm::event::{
     DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste, EnableFocusChange, EnableMouseCapture, Event as Input, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
-    KeyboardEnhancementFlags, MouseButton, MouseEvent, MouseEventKind, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    MouseButton, MouseEvent, MouseEventKind,
 };
+#[cfg(unix)]
+use crossterm::event::{KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags};
 use crossterm::execute;
 use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
 use serde_json::{Value, json};
@@ -867,12 +869,21 @@ fn enter(out: &mut Stdout) -> std::io::Result<()> {
     terminal::enable_raw_mode()?;
     // Keys typed before raw mode sit in the tty cooked, Enter as the LF raw mode reads as Ctrl+J, so they go.
     // Fails harmlessly with ENOTTY when stdin is a pipe.
-    unsafe { libc::tcflush(libc::STDIN_FILENO, libc::TCIFLUSH) };
-    execute!(out, EnterAlternateScreen, EnableBracketedPaste, EnableMouseCapture, EnableFocusChange, PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES))
+    #[cfg(unix)]
+    unsafe {
+        libc::tcflush(libc::STDIN_FILENO, libc::TCIFLUSH)
+    };
+    execute!(out, EnterAlternateScreen, EnableBracketedPaste, EnableMouseCapture, EnableFocusChange)?;
+    // crossterm 0.29 answers Unsupported on Windows, whose console API reports keys without escape codes anyway.
+    #[cfg(unix)]
+    execute!(out, PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES))?;
+    Ok(())
 }
 
 pub(crate) fn leave(out: &mut Stdout) {
-    let _ = execute!(out, PopKeyboardEnhancementFlags, DisableMouseCapture, DisableFocusChange, DisableBracketedPaste, LeaveAlternateScreen);
+    #[cfg(unix)]
+    let _ = execute!(out, PopKeyboardEnhancementFlags);
+    let _ = execute!(out, DisableMouseCapture, DisableFocusChange, DisableBracketedPaste, LeaveAlternateScreen);
     let _ = terminal::disable_raw_mode();
 }
 
@@ -1110,10 +1121,11 @@ fn spawn_on_start(commands: Vec<String>, events: Sender<Msg>) {
     for command in commands {
         let events = events.clone();
         std::thread::spawn(move || {
-            let failure = match crate::process::command("sh").args(["-c", &command]).output() {
+            let output = crate::process::shell("sh").and_then(|sh| crate::process::command(sh).args(["-c", &command]).output().map_err(|e| e.to_string()));
+            let failure = match output {
                 Ok(output) if output.status.success() => return,
                 Ok(output) => tail(&String::from_utf8_lossy(&output.stderr)),
-                Err(e) => e.to_string(),
+                Err(e) => e,
             };
             let _ = events.send(Msg::Agent(Event::Notice(format!("on_start \"{command}\" failed: {failure}"))));
         });
@@ -2343,14 +2355,8 @@ impl App {
             KeyCode::Char('x') if !sessions.is_empty() && stopping => {
                 let peer = sessions.remove(*index);
                 *index = (*index).min(sessions.len().saturating_sub(1));
-                // The server ends its turn and children on SIGTERM, as on a closed terminal (`process::exit_on_signal`).
-                // A pid of 0 or past i32 from a broken card would become kill(0) or kill(-1): this group or every process.
-                let Some(pid) = i32::try_from(peer.pid).ok().filter(|&pid| pid > 0) else {
-                    return self.push(Item::Error(format!("Cannot stop session {}: its card names pid {}.", peer.session, peer.pid)));
-                };
-                // SAFETY: kill only sends a signal.
-                if unsafe { libc::kill(pid, libc::SIGTERM) } == -1 {
-                    self.push(Item::Error(format!("Cannot stop session {}: {}", peer.session, std::io::Error::last_os_error())));
+                if let Err(e) = crate::serve::stop(&self.home, peer.pid) {
+                    self.push(Item::Error(format!("Cannot stop session {}: {e}", peer.session)));
                 }
             }
             KeyCode::Char('x') if !sessions.is_empty() => *confirm = true,
@@ -5877,7 +5883,7 @@ fn matching_paths(cwd: &Path, query: &str) -> Vec<(String, String)> {
 /// fd is killed after 150 ms, so a huge tree (a home directory takes 7 s) lists nothing deeper instead of freezing typing.
 fn nested_paths(cwd: &Path, prefix: &str) -> Vec<(bool, String)> {
     let mut fd = crate::process::command("fd");
-    fd.args(["--color=never", "--ignore-case", "--glob", "--hidden", "--exclude=.git", "--min-depth=2", "--max-results=50"]).current_dir(cwd);
+    fd.args(["--color=never", "--ignore-case", "--glob", "--hidden", "--exclude=.git", "--min-depth=2", "--max-results=50", "--path-separator=/"]).current_dir(cwd);
     fd.stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null());
     let Ok(mut child) = fd.arg(format!("{{{prefix}*,.{prefix}*}}")).spawn() else { return Vec::new() };
     let started = Instant::now();

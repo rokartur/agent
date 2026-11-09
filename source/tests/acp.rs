@@ -24,7 +24,11 @@ impl Home {
         let dir = std::env::temp_dir().join(format!("agent-acp-e2e-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("project")).unwrap();
-        Home { dir: dir.canonicalize().unwrap() }
+        #[allow(clippy::disallowed_methods)]
+        let dir = dir.canonicalize().unwrap();
+        // The agent drops the \\?\ prefix Windows' canonicalize adds.
+        let dir = dir.to_str().unwrap().strip_prefix(r"\\?\").map_or(dir.clone(), PathBuf::from);
+        Home { dir }
     }
 
     fn project(&self) -> PathBuf {
@@ -148,7 +152,7 @@ impl Editor {
         } else {
             command.env("ANTHROPIC_API_KEY", api_key);
         }
-        let mut child = command
+        command
             .arg("acp")
             .current_dir(home.project())
             .env("HOME", &home.dir)
@@ -158,9 +162,11 @@ impl Editor {
             .env_remove("OPENROUTER_API_KEY")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
+            .stderr(Stdio::null());
+        // As from PowerShell or cmd, which set no HOME; the agent takes the profile directory.
+        #[cfg(windows)]
+        command.env_remove("HOME").env("USERPROFILE", &home.dir);
+        let mut child = command.spawn().unwrap();
         let stdin = child.stdin.take().unwrap();
         let stdout = child.stdout.take().unwrap();
         let (sent, lines) = mpsc::channel();
@@ -525,7 +531,8 @@ fn a_session_loaded_closed_or_open_keeps_the_editors_directories_and_makes_no_co
         editor.request("session/load", load.clone()).unwrap();
         editor.prompt(&session_id, "Again.").unwrap();
         let system = api.requests.try_iter().last().unwrap()["system"].to_string();
-        assert!(system.contains(&other.display().to_string()), "closed first: {close_first}; {system}");
+        let other_in_json = json!(other).to_string();
+        assert!(system.contains(other_in_json.trim_matches('"')), "closed first: {close_first}; {system}");
     }
     let listed = editor.request("session/list", json!({"cwd": home.project()})).unwrap();
     assert_eq!(listed["sessions"].as_array().unwrap().len(), 1, "{listed}");
@@ -539,8 +546,10 @@ fn a_session_open_in_another_process_does_not_load_into_a_copy() {
     let session_id = editor.new_session(&home.project());
     editor.prompt(&session_id, "Hi.").unwrap();
     editor.request("session/close", json!({"sessionId": session_id})).unwrap();
-    // As the TUI holds a session it has open.
-    let held = std::fs::File::open(home.dir.join(format!(".agents/sessions/{session_id}.jsonl"))).unwrap();
+    // As the TUI holds a session it has open; on Windows, whose locks block reads, through a file beside it.
+    let session = home.dir.join(format!(".agents/sessions/{session_id}.jsonl"));
+    let lock = if cfg!(windows) { session.with_extension("lock") } else { session };
+    let held = std::fs::File::options().read(true).write(true).create(true).truncate(false).open(lock).unwrap();
     held.lock().unwrap();
 
     let error = editor.request("session/load", json!({"sessionId": session_id, "cwd": home.project(), "mcpServers": []})).unwrap_err();
@@ -606,6 +615,8 @@ fn closing_a_session_cancels_its_running_turn() {
     assert_eq!(editor.answer(close, "session/close")["result"], json!({}));
 }
 
+// Git Bash's `$PPID` is an MSYS pid, not the Windows one `kill` would need.
+#[cfg(unix)]
 #[test]
 fn a_prompt_gets_an_error_when_its_session_process_dies() {
     let home = Home::new("dies");
@@ -820,6 +831,21 @@ fn a_file_outside_the_editors_project_is_read_and_edited_on_disk() {
     assert_eq!(std::fs::read_to_string(home.dir.join("written.txt")).unwrap(), "new\n");
     let asked_the_editor = editor.seen.iter().any(|message| message["method"].as_str().is_some_and(|method| method.starts_with("fs/")));
     assert!(!asked_the_editor, "{:#?}", editor.seen);
+}
+
+#[test]
+fn a_tilde_path_reads_from_the_home_directory() {
+    let home = Home::new("tilde");
+    std::fs::write(home.dir.join("notes.txt"), "in home\n").unwrap();
+    let api = fake_api(vec![reply(&[tool_use("toolu_read", "Read", json!({"file_path": "~/notes.txt"}))], "tool_use"), reply(&[text("Read.")], "end_turn")]);
+    let mut editor = Editor::start(&home, &api);
+    let session_id = editor.new_session(&home.project());
+
+    editor.prompt(&session_id, "Read my notes.").unwrap();
+
+    let read = api.requests.try_iter().nth(1).unwrap();
+    let result = read["messages"].as_array().unwrap().last().unwrap()["content"][0]["content"].to_string();
+    assert!(result.contains("in home"), "{result}");
 }
 
 #[test]

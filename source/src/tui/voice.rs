@@ -1,5 +1,4 @@
 use std::io::Write;
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Stdio};
 use std::time::Instant;
@@ -12,11 +11,15 @@ pub struct Recording {
 }
 
 pub fn start(home: &Path) -> Result<Recording, String> {
+    // ffmpeg's dshow input has no default microphone; it takes a device name.
+    if cfg!(windows) {
+        return Err("/voice does not work on Windows yet.".into());
+    }
     let model = crate::tools::video::whisper_model(&home.join(".agents"))?;
     // Unique per recording, and created here so ffmpeg -y overwrites our own file, never a planted link.
     let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).expect("clock is after 1970").as_nanos();
     let wav = std::env::temp_dir().join(format!("agent-voice-{}-{nonce}.wav", std::process::id()));
-    std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&wav).map_err(|e| format!("Cannot create {}: {e}", wav.display()))?;
+    crate::process::private_file().write(true).create_new(true).open(&wav).map_err(|e| format!("Cannot create {}: {e}", wav.display()))?;
     let ffmpeg = crate::process::command("ffmpeg")
         .args(["-loglevel", "error", "-y"])
         .args(if cfg!(target_os = "macos") { ["-f", "avfoundation", "-i", ":default"] } else { ["-f", "pulse", "-i", "default"] })
@@ -76,5 +79,11 @@ mod tests {
         assert_eq!(spoken_text(" Cześć,\n sprawdź testy.\n").unwrap(), "Cześć, sprawdź testy.");
         assert!(spoken_text("\n [BLANK_AUDIO]\n").is_err());
         assert!(spoken_text("").is_err());
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn voice_is_refused_on_windows() {
+        assert_eq!(start(&std::env::temp_dir()).err().unwrap(), "/voice does not work on Windows yet.");
     }
 }

@@ -360,7 +360,7 @@ pub fn save(script: &str, name: &str, dir: &Path, project: bool) -> Result<PathB
 /// The closest `.agents/workflows` that exists between `cwd` and the project root, else the root's.
 pub fn project_save_dir(cwd: &Path) -> PathBuf {
     let root = super::prompt::project_root(cwd);
-    let cwd = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
+    let cwd = crate::process::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
     let mut dirs = cwd.ancestors().take_while(|dir| dir.starts_with(&root)).map(|dir| dir.join(".agents").join("workflows"));
     dirs.find(|dir| dir.is_dir()).unwrap_or_else(|| root.join(".agents").join("workflows"))
 }
@@ -967,13 +967,21 @@ return { audits, prefix: args.prefix, clock }"#;
     }
 
     #[test]
-    fn saving_refuses_names_that_leave_the_directory_and_symlinked_project_dirs() {
-        let root = temp_dir("save");
-        let personal = root.join("personal");
+    fn saving_refuses_names_that_leave_the_directory() {
+        let personal = temp_dir("save-names");
         assert_eq!(save("x", "audit", &personal, false).unwrap(), personal.join("audit.js"));
         assert_eq!(std::fs::read_to_string(personal.join("audit.js")).unwrap(), "x");
         assert!(save("x", "../escape", &personal, false).is_err());
         assert!(save("x", ".hidden", &personal, false).is_err());
+        std::fs::remove_dir_all(personal).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn saving_refuses_symlinked_project_dirs() {
+        let root = temp_dir("save");
+        let personal = root.join("personal");
+        std::fs::create_dir_all(&personal).unwrap();
         let linked = root.join("project").join(".agents");
         std::fs::create_dir_all(&linked).unwrap();
         std::os::unix::fs::symlink(&personal, linked.join("workflows")).unwrap();

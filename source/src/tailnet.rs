@@ -13,7 +13,6 @@
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{IpAddr, Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
-use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Stdio};
 use std::time::Duration;
@@ -43,10 +42,6 @@ const MAX_REQUEST_BYTES: u64 = 1 << 20;
 const UNKNOWN_REQUEST: &str = "This computer's agent does not know that request.";
 /// A relay that cannot write to its peer for this long gives up, so the session server sees the terminal detach.
 const RELAY_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
-/// A peer that went away without closing, asleep or off the network, is dropped after about 30 + 3 * 10 s.
-const KEEPALIVE_IDLE_SECS: libc::c_int = 30;
-const KEEPALIVE_INTERVAL_SECS: libc::c_int = 10;
-const KEEPALIVE_PROBES: libc::c_int = 3;
 
 /// `local` first, then the computers in `environments`, then this user's other computers online on the tailnet.
 pub fn environments(settings: &Settings) -> Vec<String> {
@@ -62,13 +57,13 @@ pub fn environments(settings: &Settings) -> Vec<String> {
 }
 
 /// The peers in `tailscale status --json` a listener there would admit this computer from, as `owned_by` decides,
-/// that are online and run macOS or Linux, named by the first label of their MagicDNS name.
+/// that are online and run macOS, Linux or Windows, named by the first label of their MagicDNS name.
 fn discovered(status: &Value) -> Vec<String> {
     let Some(owner) = status["Self"]["UserID"].as_u64().filter(|_| status["BackendState"] == "Running") else { return Vec::new() };
     let mut names = Vec::new();
     for peer in status["Peer"].as_object().into_iter().flat_map(|peers| peers.values()) {
         let tagged = peer["Tags"].as_array().is_some_and(|tags| !tags.is_empty());
-        let desktop = matches!(peer["OS"].as_str(), Some("macOS" | "linux"));
+        let desktop = matches!(peer["OS"].as_str(), Some("macOS" | "linux" | "windows"));
         if peer["Online"] != true || peer["UserID"].as_u64() != Some(owner) || tagged || !desktop {
             continue;
         }
@@ -92,10 +87,11 @@ pub fn check(settings: &Settings, name: &str) -> Result<(), String> {
 }
 
 /// A new session on `environment` in `cwd`. When `cwd` does not exist there, the user picks between copying it
-/// over with rsync and starting in the host's home.
+/// over with rsync and starting in the host's home. From Windows it starts in the home: rsync reads a `C:` path as a
+/// host, and Git for Windows ships no rsync.
 pub fn start(settings: &Settings, environment: &str, cwd: &Path, args: &[String]) -> Result<Stream, String> {
     let (_, _, listed) = request(settings, environment, json!({"list": true, "cwd": cwd}), LIST_TIMEOUT)?;
-    if listed["has_cwd"] == false && crate::tui::confirm(&format!("{} is not on {environment}. Copy it there with rsync? y/n", cwd.display()))? {
+    if !cfg!(windows) && listed["has_cwd"] == false && crate::tui::confirm(&format!("{} is not on {environment}. Copy it there with rsync? y/n", cwd.display()))? {
         crate::tui::notice(&format!("Copying {} to {environment}...", cwd.display()))?;
         copy_to(environment, cwd)?;
     }
@@ -130,12 +126,12 @@ pub fn message(settings: &Settings, environment: &str, to: &str, from: &str, fro
 }
 
 /// A subagent on `environment`: `agent` there with `args` in `cwd`. A git project missing there is copied over first,
-/// as an interactive start's copy does; any other missing `cwd` leaves the child in that computer's home. The
-/// connection carries the child's stdin and stdout; closing it stops the child.
+/// as an interactive start's copy does, except from Windows; any other missing `cwd` leaves the child in that
+/// computer's home. The connection carries the child's stdin and stdout; closing it stops the child.
 pub fn subagent(settings: &Settings, environment: &str, cwd: &Path, args: &[&str]) -> Result<(BufReader<TcpStream>, TcpStream), String> {
     let (_, _, listed) = request(settings, environment, json!({"list": true, "cwd": cwd}), LIST_TIMEOUT)?;
     // Only a project: its .gitignore leaves build output behind, where a plain directory such as Downloads goes whole.
-    if listed["has_cwd"] == false && crate::agent::prompt::project_root(cwd).join(".git").exists() {
+    if !cfg!(windows) && listed["has_cwd"] == false && crate::agent::prompt::project_root(cwd).join(".git").exists() {
         copy_to(environment, cwd).map_err(|e| format!("{} is not on {environment}, and copying it there failed: {e}", cwd.display()))?;
     }
     let body = json!({"subagent": {"cwd": cwd, "args": args}});
@@ -169,7 +165,8 @@ pub fn place(settings: &Settings, cwd: &Path) -> (String, String) {
     (chosen.clone(), format!("Auto placement started this session on {chosen}, the least loaded computer with {}; load per CPU: {}.", cwd.display(), shown.join(", ")))
 }
 
-/// The first of `loads` with the lowest load, so `local`, listed first, wins a tie.
+/// The first of `loads` with the lowest load, so `local`, listed first, wins a tie. A Unix load is the 1-minute load
+/// average per CPU and passes 1.0 when overloaded; a Windows one is the busy share of 100 ms, at most 1.0.
 fn least_loaded(loads: &[(String, f64)]) -> &(String, f64) {
     let mut least = &loads[0];
     for candidate in &loads[1..] {
@@ -181,11 +178,32 @@ fn least_loaded(loads: &[(String, f64)]) -> &(String, f64) {
 }
 
 /// This computer's 1-minute load average per CPU.
+#[cfg(unix)]
 fn load() -> f64 {
     let mut averages = [0.0];
     // SAFETY: getloadavg writes at most the one sample asked for into `averages`.
     unsafe { libc::getloadavg(averages.as_mut_ptr(), 1) };
     averages[0] / std::thread::available_parallelism().map_or(1, usize::from) as f64
+}
+
+/// The share of CPU time spent busy over the next 100 ms: Windows keeps no load average. A failed reading counts as
+/// fully busy, so `--on auto` does not pick this computer for it.
+#[cfg(windows)]
+fn load() -> f64 {
+    unsafe extern "system" {
+        fn GetSystemTimes(idle: *mut u64, kernel: *mut u64, user: *mut u64) -> i32;
+    }
+    let sample = || {
+        let (mut idle, mut kernel, mut user) = (0, 0, 0);
+        // SAFETY: each FILETIME is two u32s in the layout of one little-endian u64; kernel time includes idle time.
+        let read = unsafe { GetSystemTimes(&mut idle, &mut kernel, &mut user) } != 0;
+        read.then_some((idle, kernel + user))
+    };
+    let Some((idle_before, total_before)) = sample() else { return 1.0 };
+    std::thread::sleep(Duration::from_millis(100));
+    let Some((idle, total)) = sample() else { return 1.0 };
+    let elapsed = total.saturating_sub(total_before).max(1);
+    1.0 - idle.saturating_sub(idle_before) as f64 / elapsed as f64
 }
 
 pub fn attach(settings: &Settings, environment: &str, session: &str) -> Result<Stream, String> {
@@ -417,7 +435,7 @@ fn handle(stream: TcpStream, home: &Path, device: &str) {
 
 enum Answer {
     Reply(Value),
-    Session(UnixStream),
+    Session(crate::local_socket::Stream),
     Subagent(Child),
 }
 
@@ -429,7 +447,7 @@ fn answer(home: &Path, device: &str, request: &Value) -> Result<Answer, String> 
         let sessions: Vec<Value> = serve::live(home).into_iter().map(|peer| json!({"session": peer.session, "title": peer.title, "cwd": peer.cwd, "busy": peer.busy})).collect();
         let mut listed = json!({"sessions": sessions, "load": load()});
         if let Some(cwd) = request["cwd"].as_str() {
-            listed["has_cwd"] = json!(Path::new(cwd).is_absolute() && Path::new(cwd).is_dir());
+            listed["has_cwd"] = json!(usable_cwd(Path::new(cwd)));
         }
         return Ok(Answer::Reply(listed));
     }
@@ -464,7 +482,7 @@ fn deliver_here(home: &Path, device: &str, message: &Value) -> Result<String, St
     peers::send(&peer, &from, Path::new(message["from_cwd"].as_str().unwrap_or("unknown")), text, None)
 }
 
-fn start_here(home: &Path, device: &str, start: &Value) -> Result<UnixStream, String> {
+fn start_here(home: &Path, device: &str, start: &Value) -> Result<crate::local_socket::Stream, String> {
     let args: Vec<String> = start["args"].as_array().into_iter().flatten().filter_map(|arg| Some(arg.as_str()?.to_string())).collect();
     // parse_args prints and exits the process for these, which would end this listener.
     if args.iter().any(|arg| matches!(arg.as_str(), "-h" | "--help" | "--version")) {
@@ -507,10 +525,20 @@ fn subagent_here(home: &Path, device: &str, subagent: &Value) -> Result<Child, S
 
 /// Where a remote start runs: the directory it asked for, or home and the asked one when that is not on this computer.
 fn start_dir(home: &Path, asked: Option<&str>) -> (PathBuf, Option<PathBuf>) {
-    match asked.map(PathBuf::from).filter(|cwd| cwd.is_absolute()) {
-        Some(cwd) if cwd.is_dir() => (cwd, None),
-        missing => (home.to_path_buf(), missing),
+    let Some(asked) = asked else { return (home.to_path_buf(), None) };
+    let cwd = PathBuf::from(asked);
+    if usable_cwd(&cwd) {
+        return (cwd, None);
     }
+    // Absolute on some computer, `/x` or `C:\x`, is a directory missing here; a relative path names nothing.
+    let drive = asked.as_bytes().first().is_some_and(u8::is_ascii_alphabetic) && asked.as_bytes().get(1) == Some(&b':');
+    (home.to_path_buf(), (cwd.has_root() || drive).then_some(cwd))
+}
+
+/// Whether `cwd` is a directory on this computer. A Unix path on Windows has no drive and is not one: it would
+/// resolve against the current drive.
+fn usable_cwd(cwd: &Path) -> bool {
+    cwd.is_absolute() && cwd.is_dir()
 }
 
 fn reply(stream: &TcpStream, mut message: Value) {
@@ -520,7 +548,7 @@ fn reply(stream: &TcpStream, mut message: Value) {
 }
 
 /// Copies both ways between the connection and the session's socket; the end of either direction closes both.
-fn relay(mut from_peer: BufReader<TcpStream>, peer: TcpStream, session: UnixStream) {
+fn relay(mut from_peer: BufReader<TcpStream>, peer: TcpStream, session: crate::local_socket::Stream) {
     let (Ok(mut to_peer), Ok(mut from_session)) = (peer.try_clone(), session.try_clone()) else { return };
     let _ = peer.set_write_timeout(Some(RELAY_WRITE_TIMEOUT));
     let mut to_session = session;
@@ -540,21 +568,32 @@ fn relay_subagent(mut from_parent: BufReader<TcpStream>, parent: TcpStream, mut 
     let mut from_child = child.stdout.take().expect("stdout is piped");
     if let Ok(mut to_parent) = parent.try_clone() {
         let _ = to_parent.set_write_timeout(Some(RELAY_WRITE_TIMEOUT));
-        // Not joined: a process the child started can keep its stdout open after the child exits.
+        let (one_side_ended, ended) = std::sync::mpsc::channel();
+        let output_ended = one_side_ended.clone();
+        // Neither copy is joined, the first to end ends the relay: a process the child started can keep its stdout
+        // open after the child exits, and Windows' shutdown does not wake a recv blocked on the same socket.
         std::thread::spawn(move || {
             // `dyn Read` keeps std off splice, which on Linux holds the pipe's lock while it waits on the other end,
             // leaving the child stuck uninterruptibly in its read or write.
             let _ = std::io::copy(&mut from_child as &mut dyn Read, &mut to_parent);
             let _ = to_parent.shutdown(Shutdown::Both);
+            let _ = output_ended.send(());
         });
-        let _ = std::io::copy(&mut from_parent as &mut dyn Read, &mut to_child);
+        std::thread::spawn(move || {
+            let _ = std::io::copy(&mut from_parent as &mut dyn Read, &mut to_child);
+            let _ = one_side_ended.send(());
+        });
+        let _ = ended.recv();
     }
     if let Ok(None) = child.try_wait() {
-        // SIGTERM, as a local stop sends: the child's handler then ends its own commands.
+        // SIGTERM, as a local stop sends: on Unix the child's handler then ends its own commands; Windows kills the tree.
         crate::process::signal_group(child.id(), crate::process::SIGTERM);
         // On macOS a process forked as the signal goes out can miss it; the unreaped child keeps the group id ours.
-        let _ = crate::process::wait_unreaped(child.id());
-        crate::process::signal_group(child.id(), crate::process::SIGTERM);
+        #[cfg(unix)]
+        {
+            let _ = crate::process::wait_unreaped(child.id());
+            crate::process::signal_group(child.id(), crate::process::SIGTERM);
+        }
     }
     let _ = child.wait();
 }
@@ -592,21 +631,44 @@ fn tailscale(args: &[&str]) -> Result<Value, String> {
     serde_json::from_slice(&output.stdout).map_err(|e| format!("tailscale {} printed no JSON: {e}", args.join(" ")))
 }
 
-/// Sends each keystroke and frame at once, not held back by Nagle's algorithm, and turns on TCP keepalive, so a
-/// read on a connection whose peer vanished fails instead of waiting forever.
+/// Sends each keystroke and frame at once, not held back by Nagle's algorithm, and turns on TCP keepalive.
 fn for_keystrokes(stream: &TcpStream) {
     let _ = stream.set_nodelay(true);
+    keep_alive(stream);
+}
+
+/// A read on a connection whose peer went away without closing, asleep or off the network, fails after about
+/// 30 + 3 * 10 s instead of waiting forever. Windows takes these options from 10 version 1709 on; older ones ignore them.
+#[cfg(windows)]
+fn keep_alive(stream: &TcpStream) {
+    use std::os::windows::io::AsRawSocket;
+    #[link(name = "ws2_32")]
+    unsafe extern "system" {
+        fn setsockopt(socket: usize, level: i32, name: i32, value: *const i32, length: i32) -> i32;
+    }
+    const SOL_SOCKET: i32 = 0xffff;
+    const SO_KEEPALIVE: i32 = 8;
+    const IPPROTO_TCP: i32 = 6;
+    const TCP_KEEPIDLE: i32 = 3;
+    const TCP_KEEPINTVL: i32 = 17;
+    const TCP_KEEPCNT: i32 = 16;
+    let options = [(SOL_SOCKET, SO_KEEPALIVE, 1), (IPPROTO_TCP, TCP_KEEPIDLE, 30), (IPPROTO_TCP, TCP_KEEPINTVL, 10), (IPPROTO_TCP, TCP_KEEPCNT, 3)];
+    for (level, name, value) in options {
+        // SAFETY: setsockopt reads 4 bytes from `value`, which lives across the call; the socket is open for `stream`'s life.
+        unsafe { setsockopt(stream.as_raw_socket() as usize, level, name, &raw const value, 4) };
+    }
+}
+
+/// A read on a connection whose peer went away without closing, asleep or off the network, fails after about
+/// 30 + 3 * 10 s instead of waiting forever.
+#[cfg(unix)]
+fn keep_alive(stream: &TcpStream) {
     use std::os::fd::AsRawFd;
     #[cfg(target_os = "macos")]
     const IDLE: libc::c_int = libc::TCP_KEEPALIVE;
     #[cfg(not(target_os = "macos"))]
     const IDLE: libc::c_int = libc::TCP_KEEPIDLE;
-    let options = [
-        (libc::SOL_SOCKET, libc::SO_KEEPALIVE, 1),
-        (libc::IPPROTO_TCP, IDLE, KEEPALIVE_IDLE_SECS),
-        (libc::IPPROTO_TCP, libc::TCP_KEEPINTVL, KEEPALIVE_INTERVAL_SECS),
-        (libc::IPPROTO_TCP, libc::TCP_KEEPCNT, KEEPALIVE_PROBES),
-    ];
+    let options = [(libc::SOL_SOCKET, libc::SO_KEEPALIVE, 1), (libc::IPPROTO_TCP, IDLE, 30), (libc::IPPROTO_TCP, libc::TCP_KEEPINTVL, 10), (libc::IPPROTO_TCP, libc::TCP_KEEPCNT, 3)];
     for (level, name, value) in options {
         // SAFETY: setsockopt reads size_of::<c_int>() bytes from `value`, which lives across the call.
         unsafe { libc::setsockopt(stream.as_raw_fd(), level, name, (&raw const value).cast(), std::mem::size_of::<libc::c_int>() as libc::socklen_t) };
@@ -622,6 +684,7 @@ mod tests {
         let home = std::env::temp_dir();
         assert_eq!(start_dir(&home, home.to_str()), (home.clone(), None));
         assert_eq!(start_dir(&home, Some("/no/such/agent/dir")), (home.clone(), Some(PathBuf::from("/no/such/agent/dir"))));
+        assert_eq!(start_dir(&home, Some(r"C:\no\such\agent\dir")), (home.clone(), Some(PathBuf::from(r"C:\no\such\agent\dir"))));
         assert_eq!(start_dir(&home, Some("relative")), (home.clone(), None));
         assert_eq!(start_dir(&home, None), (home, None));
         assert_eq!(crate::parse_args(vec!["serve".into(), "--missing-cwd".into(), "/x".into()]).unwrap().missing_cwd, Some(PathBuf::from("/x")));
@@ -633,6 +696,18 @@ mod tests {
         assert_eq!(least_loaded(&loads(&[("local", 0.9), ("studio", 0.2), ("box", 0.5)])).0, "studio");
         assert_eq!(least_loaded(&loads(&[("local", 0.3), ("studio", 0.3)])).0, "local");
         assert_eq!(least_loaded(&loads(&[("local", 0.0)])).0, "local");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn a_busy_windows_computer_reports_a_load_above_zero() {
+        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let spinning = done.clone();
+        let spinner = std::thread::spawn(move || while !spinning.load(std::sync::atomic::Ordering::Relaxed) {});
+        let busy = load();
+        done.store(true, std::sync::atomic::Ordering::Relaxed);
+        spinner.join().unwrap();
+        assert!(busy > 0.0 && busy <= 1.0, "{busy}");
     }
 
     #[test]
@@ -651,6 +726,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn a_message_from_another_computer_reaches_a_session_here_named_by_that_computer() {
         let home = std::env::temp_dir().join(format!("agent-tailnet-message-{}", std::process::id()));
         let follow_ups = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -676,7 +752,7 @@ mod tests {
         let home = std::env::temp_dir().join(format!("agent-reattach-{}", std::process::id()));
         let socket = serve::socket(&home, 4242);
         std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
-        let _server = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let _server = crate::local_socket::bind(&socket).unwrap();
         assert!(matches!(answer(&home, "laptop", &json!({"protocol": PROTOCOL, "reattach": 4242})), Ok(Answer::Session(_))));
         let ended = |server: u64| answer(&home, "laptop", &json!({"protocol": PROTOCOL, "reattach": server})).err();
         assert_eq!(ended(4243), Some("The session ended: its server 4243 no longer runs.".into()));
@@ -727,7 +803,7 @@ mod tests {
             "k6": peer("phone.tail1.ts.net.", "iOS", 7, true, Value::Null),
             "k7": peer("pc.tail1.ts.net.", "windows", 7, true, Value::Null),
         }});
-        assert_eq!(discovered(&status), ["box", "studio"]);
+        assert_eq!(discovered(&status), ["box", "pc", "studio"]);
         let mut stopped = status.clone();
         stopped["BackendState"] = json!("Stopped");
         assert!(discovered(&stopped).is_empty());
