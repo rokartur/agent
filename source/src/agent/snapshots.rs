@@ -153,7 +153,7 @@ impl Snapshots {
         if !output.status.success() {
             return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
         }
-        std::fs::write(path, output.stdout).map_err(|e| format!("Cannot write {}: {e}", path.display()))
+        crate::tools::hashline::replace_file(path, &output.stdout)
     }
 
     /// Hashes the bytes the edit tools read, so a symlink hashes its target like Write follows it.
