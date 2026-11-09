@@ -535,7 +535,10 @@ impl Commands {
     }
 
     fn update(&self) -> Value {
-        let skills = self.skills.iter().map(|skill| json!({"name": format!("skill:{}", skill.name), "description": skill.description, "input": {"hint": "what to do"}}));
+        let skills = self
+            .skills
+            .iter()
+            .map(|skill| json!({"name": format!("skill:{}", skill.name), "description": skill.description, "input": {"hint": skill.argument_hint.as_deref().unwrap_or("what to do")}}));
         let workflows = self.workflows.iter().map(|saved| json!({"name": saved.meta.name, "description": saved.meta.description, "input": {"hint": "input"}}));
         json!({"sessionUpdate": "available_commands_update", "availableCommands": skills.chain(workflows).collect::<Vec<_>>()})
     }

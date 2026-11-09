@@ -675,8 +675,16 @@ mod tests {
 
     #[test]
     fn a_skill_a_profile_holds_loads_only_while_one_of_its_profiles_is_active() {
-        let skill =
-            |name: &str, source: Option<&str>| Skill { name: name.into(), description: String::new(), path: PathBuf::new(), model_invocable: true, shadows: None, source: source.map(Into::into) };
+        let skill = |name: &str, source: Option<&str>| Skill {
+            name: name.into(),
+            description: String::new(),
+            path: PathBuf::new(),
+            model_invocable: true,
+            shadows: None,
+            source: source.map(Into::into),
+            arguments: Vec::new(),
+            argument_hint: None,
+        };
         let (seo, copywriting, tdd) = (skill("seo-audit", Some("coreyhaines31/marketingskills")), skill("copywriting", None), skill("tdd", Some("mattpocock/skills")));
         let mut settings = load(Path::new("/nonexistent")).unwrap();
         settings.skill_profiles.insert("marketing".into(), vec!["coreyhaines31/marketingskills".into()]);
@@ -695,7 +703,16 @@ mod tests {
 
     #[test]
     fn a_profile_takes_skills_by_name_and_by_repo() {
-        let skill = |name: &str, source: &str| Skill { name: name.into(), description: String::new(), path: PathBuf::new(), model_invocable: true, shadows: None, source: Some(source.into()) };
+        let skill = |name: &str, source: &str| Skill {
+            name: name.into(),
+            description: String::new(),
+            path: PathBuf::new(),
+            model_invocable: true,
+            shadows: None,
+            source: Some(source.into()),
+            arguments: Vec::new(),
+            argument_hint: None,
+        };
         let skills = [skill("seo-audit", "coreyhaines31/marketingskills"), skill("ads", "coreyhaines31/marketingskills"), skill("tdd", "mattpocock/skills")];
         let mut settings = load(Path::new("/nonexistent")).unwrap();
         let entries = |settings: &Settings| settings.skill_profiles["work"].clone();

@@ -4536,7 +4536,12 @@ impl App {
                     .enabled_skills()
                     .map(|skill| {
                         let name = if commands.iter().any(|(command, _)| *command == skill.name) { format!("skill:{}", skill.name) } else { skill.name.clone() };
-                        (name, skill.description.split_whitespace().collect::<Vec<_>>().join(" "))
+                        let description = skill.description.split_whitespace().collect::<Vec<_>>().join(" ");
+                        let description = match &skill.argument_hint {
+                            Some(hint) => format!("{hint} {description}"),
+                            None => description,
+                        };
+                        (name, description)
                     })
                     .collect();
                 if let Some(word) = self.skill_query() {
