@@ -26,9 +26,9 @@ Indexes in `rewind`, `tool_checkpoint` and `compaction` are message indexes. Two
 
 ## Resume, continue, clone, import
 
-`-c` opens the newest session whose `cwd` is the current directory; `-r [id]` any session by id prefix or from a list. `/clone` copies the file to a new id at the current position. `/import file.jsonl` reads any journal, Claude Code exports included where the block shape matches. `/export` writes `.jsonl` or `.md`.
+`-c` opens the newest session whose `cwd` is the current directory; `-r [id]` any session by id prefix or from a list. `/clone` copies the file to a new id at the current position, with the session's pages. `/import file.jsonl` reads any journal, Claude Code exports included where the block shape matches. `/export` writes `.jsonl` or `.md`.
 
-`prune_sessions` in settings deletes files untouched this long at start; an open session holds its lock and stays.
+`prune_sessions` in settings deletes files untouched this long at start, with the session's folder of pages and workflow runs; an open session holds its lock and stays.
 
 ## Rewind
 

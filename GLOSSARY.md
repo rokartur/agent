@@ -98,6 +98,10 @@ _Avoid_: Pipeline, swarm
 Another interactive session on this or another of the user's computers, reachable with `SendMessage`; one on another computer is addressed `<environment>:<session>`.
 _Avoid_: Sibling, neighbour
 
+**Page**:
+An HTML page the model writes with the `Page` tool: a document or a choice between UI mocks, saved in the session's folder (with `--no-session`, in the run's temp folder, removed on exit) and served by its session server to the user's browser, which can answer back.
+_Avoid_: Generative UI, artifact, canvas
+
 ## Remote sessions
 
 **Session server**:
