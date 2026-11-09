@@ -21,6 +21,8 @@ pub enum Status {
 pub enum AfterTurn {
     Continue(String),
     Paused(String),
+    /// Still active, but the next prompt waits for running background work to report back.
+    Waiting(String),
     Idle,
 }
 
@@ -44,7 +46,8 @@ impl Goal {
     }
 
     /// What follows a finished turn; Esc and a spent budget pause the goal.
-    pub fn after_turn(&mut self, aborted: bool) -> AfterTurn {
+    /// While background work runs, re-prompting would only make the model poll it every turn.
+    pub fn after_turn(&mut self, aborted: bool, background_running: bool) -> AfterTurn {
         if self.status != Status::Active {
             return AfterTurn::Idle;
         }
@@ -55,6 +58,9 @@ impl Goal {
         if let Some(budget) = self.token_budget.filter(|budget| self.tokens_used >= *budget) {
             self.status = Status::Paused;
             return AfterTurn::Paused(format!("Goal paused: its token budget of {budget} is used up ({} tokens).", self.tokens_used));
+        }
+        if background_running {
+            return AfterTurn::Waiting("Goal waits for background work and continues when it reports back. /goal resume continues now.".into());
         }
         AfterTurn::Continue(self.prompt())
     }
@@ -98,12 +104,14 @@ mod tests {
     #[test]
     fn continues_until_paused_by_esc_or_budget() {
         let mut goal = Goal::new("ship it.", Some(100));
-        assert_eq!(goal.after_turn(false), AfterTurn::Continue("Continue working toward the goal: ship it. Call goal(action: complete) when done criteria are met.".into()));
-        assert_eq!(goal.after_turn(true), AfterTurn::Paused("Goal paused. Resume with /goal resume.".into()));
-        assert_eq!(goal.after_turn(false), AfterTurn::Idle);
+        assert_eq!(goal.after_turn(false, false), AfterTurn::Continue("Continue working toward the goal: ship it. Call goal(action: complete) when done criteria are met.".into()));
+        assert!(matches!(goal.after_turn(false, true), AfterTurn::Waiting(_)));
+        assert_eq!(goal.status, Status::Active);
+        assert_eq!(goal.after_turn(true, true), AfterTurn::Paused("Goal paused. Resume with /goal resume.".into()));
+        assert_eq!(goal.after_turn(false, false), AfterTurn::Idle);
         goal.status = Status::Active;
         goal.tokens_used = 120;
-        assert_eq!(goal.after_turn(false), AfterTurn::Paused("Goal paused: its token budget of 100 is used up (120 tokens).".into()));
+        assert_eq!(goal.after_turn(false, true), AfterTurn::Paused("Goal paused: its token budget of 100 is used up (120 tokens).".into()));
         assert_eq!(Goal::from_entry(&Goal::entry(Some(&goal))), Some(goal));
         assert_eq!(Goal::from_entry(&Goal::entry(None)), None);
         assert_eq!(Goal::from_entry(&json!({"type": "goal", "goal": {"objective": "old", "status": "paused"}})).unwrap().evidence, None);

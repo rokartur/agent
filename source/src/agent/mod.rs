@@ -1356,14 +1356,20 @@ impl Agent {
         self.abort.store(false, Ordering::Relaxed);
         let mut answer = self.prompt(text, emit)?;
         loop {
+            // A finished run queues a follow-up, and the idle TUI turns it into a turn that pursues the goal again.
+            let background_running = self.has_background_work() || self.terminals.lock().unwrap().running() > 0;
             let next = match self.goal.lock().unwrap().as_mut() {
-                Some(goal) => goal.after_turn(self.abort.load(Ordering::Relaxed)),
+                Some(goal) => goal.after_turn(self.abort.load(Ordering::Relaxed), background_running),
                 None => AfterTurn::Idle,
             };
             match next {
                 AfterTurn::Idle => return Ok(answer),
                 AfterTurn::Paused(note) => {
                     self.save_goal()?;
+                    emit(Event::Notice(note));
+                    return Ok(answer);
+                }
+                AfterTurn::Waiting(note) => {
                     emit(Event::Notice(note));
                     return Ok(answer);
                 }
