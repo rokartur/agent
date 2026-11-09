@@ -10,6 +10,7 @@ pub mod accounts;
 pub mod codex;
 pub mod copilot;
 pub mod google;
+pub mod images;
 pub mod models;
 pub mod oauth;
 pub mod openai_chat;
@@ -851,14 +852,19 @@ impl Client {
 
     /// Name and provider account id of the account the next request is likely to use: the current pick, the pinned one, or the first.
     pub fn account(&self, provider: &str) -> Option<(String, Option<String>)> {
+        let account = self.likely_account(provider)?;
+        Some((account.name.clone(), account.account_id().map(String::from)))
+    }
+
+    fn likely_account(&self, provider: &str) -> Option<Account> {
         let state = self.state.lock().unwrap();
         let name = state.current.get(provider).or_else(|| state.pinned.get(provider));
         let mut candidates = state.accounts.iter().filter(|a| a.provider == provider);
-        let account = match name {
+        match name {
             Some(name) => candidates.find(|a| &a.name == name),
             None => candidates.next(),
-        }?;
-        Some((account.name.clone(), account.account_id().map(String::from)))
+        }
+        .cloned()
     }
 
     /// The account's last fetched subscription windows; None for API keys and before the first fetch.

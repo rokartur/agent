@@ -650,5 +650,19 @@
       "required": ["source"],
       "additionalProperties": false
     }
+  },
+  {
+    "name": "ImageGenerate",
+    "description": "Generate an image with an image model (gpt-image-2 on a ChatGPT login, a Gemini image model on Antigravity) and write it to `file_path`. Pass `images` to edit them: the prompt then says what to change. The result shows the written image.",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "prompt": { "type": "string", "description": "What the image shows, or for an edit what to change." },
+        "file_path": { "type": "string", "description": "Where the image is written, normally a .png; parent directories are created." },
+        "images": { "type": "array", "items": { "type": "string" }, "description": "Paths of PNG, JPEG, GIF or WebP files to edit or draw from." }
+      },
+      "required": ["prompt", "file_path"],
+      "additionalProperties": false
+    }
   }
 ]

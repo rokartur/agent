@@ -246,7 +246,7 @@ pub fn from_base64(data: &str) -> Result<Value, String> {
     bytes_block(unbase64(data).ok_or("The image is not valid base64")?)
 }
 
-fn unbase64(text: &str) -> Option<Vec<u8>> {
+pub(crate) fn unbase64(text: &str) -> Option<Vec<u8>> {
     let mut out = Vec::with_capacity(text.len() / 4 * 3);
     let (mut acc, mut bits) = (0u32, 0);
     for ch in text.bytes().take_while(|&ch| ch != b'=') {

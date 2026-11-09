@@ -811,7 +811,7 @@ fn tool_kind(name: &str) -> &'static str {
         "Read" | "Video" => "read",
         "Grep" => "search",
         "Bash" => "execute",
-        "Write" | "ReplaceLines" | "Edit" | "InsertLines" => "edit",
+        "Write" | "ReplaceLines" | "Edit" | "InsertLines" | "ImageGenerate" => "edit",
         "WebSearch" | "WebFetch" | "GetSearchContent" => "fetch",
         _ => "other",
     }

@@ -225,6 +225,8 @@ pub struct Agent {
     pub cheap_model: String,
     /// Auto-mode reviews: `reviewer_model` from settings, else `cheap_model`.
     pub reviewer_model: String,
+    /// ImageGenerate's model, the `image_model` setting; empty lets `Client::generate_image` pick.
+    image_model: String,
     /// One of `SPEEDS`; anything but "standard" goes out as the request's `speed`, which `api` maps per provider.
     pub speed: String,
     pub cache_ttl: String,
@@ -438,6 +440,7 @@ impl Agent {
             max_tokens: 0,
             cheap_model: String::new(),
             reviewer_model: String::new(),
+            image_model: String::new(),
             speed: settings.speed.clone(),
             cache_ttl: settings.cache_ttl.clone(),
             auto_compact: settings.auto_compact,
@@ -829,6 +832,7 @@ impl Agent {
             "WebSearch" | "WebFetch" | "GetSearchContent" => self.web.run(name, input),
             "AskUserQuestion" => self.ask_user(input, emit),
             "Video" => self.video(id, input, emit),
+            "ImageGenerate" => self.generate_image(input),
             _ => return self.plugins.tool(name, input, &self.plugin_context(), &self.abort).or_else(|| self.mcp.tool(name, input, &self.abort)).unwrap_or_else(|| self.run_file_tool(id, name, input)),
         };
         match result {
@@ -1437,6 +1441,30 @@ impl Agent {
         Ok(text)
     }
 
+    /// Writes the generated image to `file_path` and attaches it, read back like a Read of an image.
+    fn generate_image(&mut self, input: &Value) -> Result<String, String> {
+        let prompt = tools::hashline::str_arg(input, "prompt")?;
+        let path = tools::hashline::resolve(&self.cwd, tools::hashline::str_arg(input, "file_path")?);
+        let mut inputs = Vec::new();
+        for image in input["images"].as_array().into_iter().flatten().filter_map(Value::as_str) {
+            inputs.push(crate::image::block(&tools::hashline::resolve(&self.cwd, image))?);
+        }
+        let bytes = self.client.generate_image(&self.image_model, prompt, &inputs, &self.abort)?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("Cannot create {}: {e}", parent.display()))?;
+        }
+        std::fs::write(&path, &bytes).map_err(|e| format!("Cannot write {}: {e}", path.display()))?;
+        let block = crate::image::block(&path)?;
+        let media_type = block["source"]["media_type"].as_str().unwrap_or_default().to_string();
+        self.result_blocks = vec![block];
+        let mut text = format!("Wrote {} ({media_type}) to {}; it is attached as an image.", tools::format_size(bytes.len()), path.display());
+        // A Gemini image model answers in the format it likes, which need not be the one the path's extension names.
+        if let Some(named) = crate::image::media_type(&path).filter(|named| *named != media_type) {
+            text.push_str(&format!(" The extension says {named}: rename the file if that matters."));
+        }
+        Ok(text)
+    }
+
     /// Names a fresh session from its first prompt on a background thread; `prompt` emits the title once it is ready.
     pub fn start_naming(&mut self, text: &str) {
         let request = self.naming_request(text);
@@ -1592,7 +1620,7 @@ impl Agent {
     /// Snapshots around a tool that can change files, so a rewind touches only what this session changed.
     /// A file another session edits while this call runs still counts as this session's.
     fn run_tool_with_checkpoint(&mut self, id: &str, name: &str, input: &Value, targets: &[PathBuf], user_request: &str, emit: &mut dyn FnMut(Event)) -> Result<(String, bool), String> {
-        const CHANGES_FILES: [&str; 6] = ["Write", "ReplaceLines", "Edit", "InsertLines", "Bash", "Agent"];
+        const CHANGES_FILES: [&str; 7] = ["Write", "ReplaceLines", "Edit", "InsertLines", "ImageGenerate", "Bash", "Agent"];
         // Before the snapshot: the move swaps the snapshot repo, so before and after would come from different checkouts.
         if name == "Bash"
             && let Some(dir) = tools::cd_target(input["command"].as_str().unwrap_or_default())
@@ -1706,6 +1734,7 @@ impl Agent {
         self.max_tokens = model.max_tokens;
         self.cheap_model = cheap_model.to_string();
         self.reviewer_model = if settings.reviewer_model.is_empty() { cheap_model.to_string() } else { settings.reviewer_model.clone() };
+        self.image_model = settings.image_model.clone();
         self.auto_compact = settings.auto_compact;
         self.reserve_tokens = settings.reserve_tokens;
         self.keep_recent_tokens = settings.keep_recent_tokens;
@@ -1939,7 +1968,11 @@ impl Agent {
     fn tool_schemas(&self) -> Value {
         // Condensed batches of a resumed session keep their originals reachable after condense is turned off.
         let context_tree_query = self.condense.enabled || !self.condensed.is_empty();
-        tools::schemas(&subagent::swarm_prompt(&self.agent_dir, &self.cwd, prompt::is_trusted(&self.trusted_projects, &self.cwd), &self.subagent_effort), context_tree_query)
+        tools::schemas(
+            &subagent::swarm_prompt(&self.agent_dir, &self.cwd, prompt::is_trusted(&self.trusted_projects, &self.cwd), &self.subagent_effort),
+            context_tree_query,
+            self.client.generates_images(),
+        )
     }
 
     /// Replaces the conversation state with a saved (or empty) session's.
@@ -2915,6 +2948,35 @@ mod tests {
         let real_home = PathBuf::from(std::env::var("HOME").unwrap()).canonicalize().unwrap();
         assert_eq!(added, Ok(format!("Added {}.", real_home.display())));
         assert_eq!(agent.extra_dirs, [real_home]);
+    }
+
+    #[test]
+    fn image_generate_writes_the_png_and_attaches_it() {
+        let home = std::env::temp_dir().join(format!("agent-image-tool-{}", std::process::id()));
+        let cwd = home.join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let reply = json!({"data": [{"b64_json": crate::image::base64(&crate::image::tests::PIXEL)}]}).to_string();
+        let (client, requests) = crate::api::images::tests::fake_codex_client(&home, &reply);
+        let settings = crate::settings::load(&home).unwrap();
+        let session = Session::start(&home.join("sessions"), false, &cwd, "m").unwrap();
+        let mut agent = Agent::new(client, &settings, home.clone(), cwd.clone(), session, home.join("sessions"), None);
+        *agent.permission_mode.lock().unwrap() = Mode::FullAccess;
+        assert!(agent.tool_schemas().as_array().unwrap().iter().any(|tool| tool["name"] == "ImageGenerate"));
+
+        let input = json!({"prompt": "a red dot", "file_path": "art/logo.png"});
+        let (output, is_error) = agent.run_tool("t1", "ImageGenerate", &input, &[cwd.join("art/logo.png")], "draw", &mut |_| {});
+        let written = std::fs::read(cwd.join("art/logo.png"));
+        let misnamed = json!({"prompt": "a red dot", "file_path": "art/logo.jpg"});
+        let (misnamed_output, _) = agent.run_tool("t2", "ImageGenerate", &misnamed, &[cwd.join("art/logo.jpg")], "draw", &mut |_| {});
+        std::fs::remove_dir_all(&home).ok();
+
+        assert!(!is_error, "{output}");
+        assert_eq!(written.unwrap(), crate::image::tests::PIXEL);
+        assert!(output.starts_with("Wrote 70B (image/png) to "), "{output}");
+        assert!(output.ends_with("; it is attached as an image."), "{output}");
+        assert_eq!(agent.result_blocks[0]["source"]["media_type"], "image/png");
+        assert_eq!(requests.recv().unwrap().2["prompt"], "a red dot");
+        assert!(misnamed_output.ends_with(" The extension says image/jpeg: rename the file if that matters."), "{misnamed_output}");
     }
 
     #[test]

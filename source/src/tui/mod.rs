@@ -3165,7 +3165,8 @@ impl App {
         }
     }
 
-    /// Lists the models again after /login or /logout changed the accounts, so /model shows them without a restart.
+    /// Lists the models again after /login or /logout changed the accounts, so /model shows them without a restart,
+    /// and has the agent apply the settings again, so ImageGenerate follows the accounts that can draw.
     fn reload_models(&self) {
         let (client, events) = (self.client.clone(), self.events.clone());
         std::thread::spawn(move || {
@@ -3173,6 +3174,7 @@ impl App {
                 let _ = events.send(Msg::Agent(Event::Notice(format!("Model list failed: {failure}"))));
             }
         });
+        let _ = self.commands.send(Command::Apply(Box::new(self.settings.clone())));
     }
 
     /// /goal: no argument shows the goal, a keyword manages it, anything else sets a new goal and starts on it.

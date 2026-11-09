@@ -102,7 +102,7 @@ pub fn request_for(tool: &str, input: &Value, files: &[PathBuf]) -> Option<Reque
             let command = input["command"].as_str().unwrap_or("<missing command>").to_string();
             Some(Request { kind: Kind::Command, question: "Would you like to run the following command?", grant: format!("bash:{command}"), detail: command })
         }
-        "Write" | "ReplaceLines" | "Edit" | "InsertLines" => {
+        "Write" | "ReplaceLines" | "Edit" | "InsertLines" | "ImageGenerate" => {
             // One per line: a file named `a, b` must not share a grant with the files `a` and `b`.
             let files = files.iter().map(|path| path.display().to_string()).collect::<Vec<_>>().join("\n");
             // Unresolved anchors get a grant for this exact call, so one "don't ask again" cannot cover every later bad anchor.
