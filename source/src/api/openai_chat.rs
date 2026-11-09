@@ -146,7 +146,8 @@ pub fn parse_stream(reader: &mut dyn BufRead, abort: &AtomicBool, on_delta: &mut
             text.push_str(piece);
         }
         for call in delta["tool_calls"].as_array().into_iter().flatten() {
-            let index = call["index"].as_u64().unwrap_or(calls.len() as u64) as usize;
+            // The index comes from the server; a huge one must not grow the list without bound.
+            let index = call["index"].as_u64().unwrap_or(calls.len() as u64).min(1023) as usize;
             if calls.len() <= index {
                 calls.resize(index + 1, (String::new(), String::new(), String::new()));
             }
@@ -169,6 +170,10 @@ pub fn parse_stream(reader: &mut dyn BufRead, abort: &AtomicBool, on_delta: &mut
     }
     if stop_reason != "aborted" {
         for (index, (call_id, name, arguments)) in calls.into_iter().enumerate() {
+            // A slot no chunk named is padding below a sparse or capped index.
+            if name.is_empty() {
+                continue;
+            }
             // llama.cpp and some Ollama versions send no call id.
             let call_id = if call_id.is_empty() { format!("call_{index}") } else { call_id };
             let input = if arguments.trim().is_empty() { json!({}) } else { parse_tool_input(&call_id, &arguments, &mut bad_tool_inputs) };
@@ -258,6 +263,17 @@ mod tests {
         assert_eq!(reply.usage, Usage { input: 20, output: 30, cache_read: 100, cache_write: 0 });
         assert_eq!(reply.context_tokens, 150);
         assert_eq!(reply.billed, Some(0.0123));
+    }
+
+    #[test]
+    fn a_huge_tool_call_index_does_not_grow_the_call_list() {
+        let stream = [
+            r#"data: {"id":"c1","choices":[{"index":0,"delta":{"tool_calls":[{"index":18446744073709551615,"id":"call_1","type":"function","function":{"name":"read","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}"#,
+            "data: [DONE]",
+        ]
+        .join("\n\n");
+        let reply = parse_stream(&mut stream.as_bytes(), &AtomicBool::new(false), &mut |_| ()).unwrap_or_else(|e| panic!("{}", e.message));
+        assert_eq!(reply.message["content"], json!([{"type": "tool_use", "id": "call_1", "name": "read", "input": {}}]));
     }
 
     #[test]
