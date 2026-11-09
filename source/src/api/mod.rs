@@ -29,7 +29,7 @@ const MESSAGE_THREADS_BETA: &str = "message-threads-2026-08-12";
 const THREAD_IDLE: Duration = Duration::from_secs(290);
 const ANTHROPIC_API: &str = "https://api.anthropic.com";
 /// pi-ai sends OAuth requests as Claude Code: this user agent, its beta flags and its identity as the first system block.
-pub const CLAUDE_CODE_USER_AGENT: &str = "claude-cli/2.1.280";
+pub const CLAUDE_CODE_USER_AGENT: &str = "claude-cli/2.1.321";
 const CLAUDE_CODE_IDENTITY: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
 const USAGE_TTL: Duration = Duration::from_secs(60);
 /// How long an account that answered 429 is skipped.
