@@ -107,7 +107,16 @@ pub fn request_for(tool: &str, input: &Value, files: &[PathBuf]) -> Option<Reque
             let files = files.iter().map(|path| path.display().to_string()).collect::<Vec<_>>().join("\n");
             // Unresolved anchors get a grant for this exact call, so one "don't ask again" cannot cover every later bad anchor.
             let files = if files.is_empty() { format!("unresolved {input}") } else { files };
-            Some(Request { kind: Kind::Edit, question: "Would you like to make the following edit?", detail: format!("{tool} in {files}"), grant: format!("edit:{files}") })
+            let (mut detail, mut grant) = (format!("{tool} in {files}"), format!("edit:{files}"));
+            // ImageGenerate sends its prompt and input images to another provider; a grant for the target must not cover other uploads.
+            if tool == "ImageGenerate" {
+                detail.push_str(&format!("\nprompt: {}", input["prompt"].as_str().unwrap_or_default()));
+                for image in input["images"].as_array().into_iter().flatten().filter_map(Value::as_str) {
+                    detail.push_str(&format!("\nuploads {image}"));
+                    grant.push_str(&format!("\nupload:{image}"));
+                }
+            }
+            Some(Request { kind: Kind::Edit, question: "Would you like to make the following edit?", detail, grant })
         }
         "Agent" => Some(Request {
             kind: Kind::Subagent,
@@ -306,7 +315,12 @@ mod tests {
         let request = request_for("InsertLines", &json!({"anchor": "a"}), &files).unwrap();
         assert_eq!(request.detail, "InsertLines in /p/dest.rs\n/p/source.rs");
         let image = request_for("ImageGenerate", &json!({"prompt": "a logo", "file_path": "a.png"}), &[PathBuf::from("/p/a.png")]).unwrap();
-        assert_eq!((image.detail.as_str(), image.grant.as_str()), ("ImageGenerate in /p/a.png", "edit:/p/a.png"));
+        assert_eq!((image.detail.as_str(), image.grant.as_str()), ("ImageGenerate in /p/a.png\nprompt: a logo", "edit:/p/a.png"));
+        let edit = request_for("ImageGenerate", &json!({"prompt": "recolor", "file_path": "a.png", "images": ["b.png"]}), &[PathBuf::from("/p/a.png")]).unwrap();
+        assert_eq!((edit.detail.as_str(), edit.grant.as_str()), ("ImageGenerate in /p/a.png\nprompt: recolor\nuploads b.png", "edit:/p/a.png\nupload:b.png"));
+        let mut grants = Grants::default();
+        grants.add(&image);
+        assert!(!grants.allows(&edit));
         let mut grants = Grants::default();
         grants.add(&request_for("InsertLines", &json!({"anchor": "bogus1"}), &[]).unwrap());
         assert!(!grants.allows(&request_for("InsertLines", &json!({"anchor": "bogus2"}), &[]).unwrap()));
