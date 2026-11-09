@@ -258,6 +258,12 @@ impl Editor {
         self.move_to_row(&spots, row, here.x);
     }
 
+    /// Moves the cursor to the spot closest to screen column `x` on wrapped row `row`, as `render` lays it out.
+    pub fn click(&mut self, width: usize, row: usize, x: usize) {
+        let (_, spots) = self.wrap(width);
+        self.move_to_row(&spots, row, x);
+    }
+
     pub fn home(&mut self) {
         self.col = 0;
     }
@@ -674,5 +680,19 @@ mod tests {
         editor.scroll(80, -1);
         editor.scroll(80, 1);
         assert_eq!((editor.text(), editor.render(80).1), ("1\n2\n3".into(), (3, 1)));
+    }
+
+    #[test]
+    fn click_puts_the_cursor_at_the_nearest_spot_on_the_row() {
+        let mut editor = Editor::new();
+        editor.insert("abc\nde");
+        editor.click(80, 0, 3);
+        assert_eq!(editor.render(80).1, (3, 0));
+        editor.insert("X");
+        assert_eq!(editor.text(), "aXbc\nde");
+        editor.click(80, 1, 40);
+        assert_eq!(editor.render(80).1, (4, 1));
+        editor.click(80, 0, 0);
+        assert_eq!(editor.render(80).1, (2, 0));
     }
 }
