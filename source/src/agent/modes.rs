@@ -9,6 +9,15 @@ pub const PONYTAIL_LEVELS: [&str; 4] = ["off", "lite", "full", "ultra"];
 pub const CAVEMAN_LEVELS: [&str; 4] = ["off", "full", "ultra", "wenyan"];
 pub const PONYTAIL_BANNER: &str = "PONYTAIL MODE ACTIVE — level: ";
 pub const CAVEMAN_BANNER: &str = "CAVEMAN MODE ACTIVE — mode: ";
+/// Claude Code's built-in `outputStyle` names.
+pub const OUTPUT_STYLES: [&str; 5] = ["default", "Proactive", "Concise", "Explanatory", "Learning"];
+// Claude Code 2.1.309's built-in style prompts, word for word.
+const OUTPUT_STYLE_PROMPTS: [(&str, &str); 4] = [
+    ("Proactive", include_str!("output-styles/Proactive.md")),
+    ("Concise", include_str!("output-styles/Concise.md")),
+    ("Explanatory", include_str!("output-styles/Explanatory.md")),
+    ("Learning", include_str!("output-styles/Learning.md")),
+];
 // Pinned to commits: the rules go into every system prompt, so upstream changes land only through a reviewed bump here.
 const PONYTAIL_URL: &str = "https://raw.githubusercontent.com/DietrichGebert/ponytail/09c434ab73ca43761c5d8b0c5d341926c2fba710/skills/ponytail/SKILL.md";
 const CAVEMAN_SKILLS_URL: &str = "https://raw.githubusercontent.com/JuliusBrussee/caveman/bad48a0e1df55e05e3f52249afa35ecc1909ee76/skills";
@@ -50,9 +59,12 @@ pub fn fetch(home: &Path, ponytail: &str, caveman: &str, refresh: bool) -> Resul
     Ok(())
 }
 
-/// The system prompt section for the active levels, built from the cached rules.
-pub fn prompt(home: &Path, ponytail: &str, caveman: &str) -> String {
+/// The system prompt section for the active levels, built from the cached rules, and the output style.
+pub fn prompt(home: &Path, ponytail: &str, caveman: &str, output_style: &str) -> String {
     let mut sections = Vec::new();
+    if let Some((_, style)) = OUTPUT_STYLE_PROMPTS.iter().find(|(name, _)| *name == output_style) {
+        sections.push(style.trim_end().to_string());
+    }
     if ponytail != "off"
         && let Some(rules) = read(home, "ponytail")
     {
@@ -156,8 +168,13 @@ mod tests {
         fs::create_dir_all(home.join(".agents/modes")).unwrap();
         fs::write(cache_path(&home, "ponytail"), "---\nname: ponytail\n---\nBe lazy.").unwrap();
         fs::write(cache_path(&home, "ultracave"), "---\nname: ultracave\n---\nFew word.").unwrap();
-        let prompt = prompt(&home, "full", "ultra");
+        let prompt = prompt(&home, "full", "ultra", "default");
+        let styles = OUTPUT_STYLES.map(|style| super::prompt(&home, "off", "off", style));
         fs::remove_dir_all(&home).unwrap();
+        assert_eq!(styles[0], "");
+        for (style, prompt) in OUTPUT_STYLES.iter().zip(&styles).skip(1) {
+            assert!(prompt.contains(&format!("\n# {style} Style Active\n")), "{style}");
+        }
         assert_eq!(prompt, "<ponytail>\nPONYTAIL MODE ACTIVE — level: full\n\nBe lazy.\n</ponytail>\n\n<caveman>\nCAVEMAN MODE ACTIVE — mode: ultracave\n\nFew word.\n</caveman>");
     }
 

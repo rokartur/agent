@@ -432,7 +432,7 @@ impl Agent {
             text_to_stdout: false,
             system: prompt::system_prompt(&agent_dir, &cwd, settings.trusts(&cwd), |skill| settings.skill_enabled(skill), settings.prefer_global()),
             trusted_projects: settings.trusted_projects.clone(),
-            modes: modes::prompt(&home, &settings.ponytail, &settings.caveman),
+            modes: modes::prompt(&home, &settings.ponytail, &settings.caveman, &settings.output_style),
             // agent.load fills it, with the session's swarm prompt.
             tools: Value::Null,
             anchors: Anchors::new(&session.id),
@@ -1841,7 +1841,7 @@ impl Agent {
         self.tools = self.tool_schemas();
         *self.permission_mode.lock().unwrap() = settings.permission_mode;
         self.rtk = if settings.rtk { Rtk::ON } else { Rtk::OFF };
-        self.modes = modes::prompt(&self.home, &settings.ponytail, &settings.caveman);
+        self.modes = modes::prompt(&self.home, &settings.ponytail, &settings.caveman, &settings.output_style);
         self.system = prompt::system_prompt(&self.agent_dir, &self.cwd, settings.trusts(&self.cwd), |skill| settings.skill_enabled(skill), settings.prefer_global());
     }
 

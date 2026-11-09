@@ -43,6 +43,7 @@
     "plugin_settings": { "type": "object", "default": {} },
     "ponytail": { "enum": ["off", "lite", "full", "ultra"], "default": "full" },
     "caveman": { "enum": ["off", "full", "ultra", "wenyan"], "default": "off" },
+    "output_style": { "enum": ["default", "Proactive", "Concise", "Explanatory", "Learning"], "default": "default", "description": "Claude Code's built-in outputStyle, added to the system prompt." },
     "rtk": { "type": "boolean", "default": true },
     "headroom": { "type": "boolean", "default": false, "description": "Route model requests through a headroom proxy." },
     "headroom_url": { "type": "string", "default": "", "description": "A remote headroom proxy, e.g. https://headroom.example.com. Empty uses the local one." },

@@ -85,6 +85,8 @@ pub struct Settings {
     pub ponytail: String,
     /// One of `modes::CAVEMAN_LEVELS`.
     pub caveman: String,
+    /// One of `modes::OUTPUT_STYLES`, as Claude Code's `outputStyle`.
+    pub output_style: String,
     pub rtk: bool,
     /// Send model requests through `headroom proxy`.
     pub headroom: bool,
@@ -434,6 +436,7 @@ fn from_json(own: &Value) -> Settings {
         plugin_settings: if own["plugin_settings"].is_object() { own["plugin_settings"].clone() } else { serde_json::json!({}) },
         ponytail: level(&own["ponytail"], &crate::agent::modes::PONYTAIL_LEVELS, "full"),
         caveman: level(&own["caveman"], &crate::agent::modes::CAVEMAN_LEVELS, "off"),
+        output_style: level(&own["output_style"], &crate::agent::modes::OUTPUT_STYLES, "default"),
         rtk: own["rtk"].as_bool().unwrap_or(true),
         headroom: own["headroom"].as_bool().unwrap_or(false),
         headroom_url: own["headroom_url"].as_str().unwrap_or_default().trim_end_matches('/').to_string(),
@@ -566,6 +569,7 @@ fn to_json(settings: &Settings) -> Value {
         "plugin_settings": settings.plugin_settings,
         "ponytail": settings.ponytail,
         "caveman": settings.caveman,
+        "output_style": settings.output_style,
         "rtk": settings.rtk,
         "headroom": settings.headroom,
         "headroom_url": settings.headroom_url,
@@ -772,6 +776,7 @@ mod tests {
         settings.plugin_settings = serde_json::json!({"usagefleet": {"token": "x"}});
         settings.ponytail = "ultra".into();
         settings.caveman = "wenyan".into();
+        settings.output_style = "Concise".into();
         settings.rtk = false;
         settings.subagent_effort = "low".into();
         settings.subagent_model = "claude-sonnet-5-5".into();
@@ -842,6 +847,7 @@ mod tests {
         assert_eq!(properties["accounts"]["properties"]["when_all_over_limit"]["enum"], json!(Policy::ALL.map(|policy| policy.label())));
         assert_eq!(properties["ponytail"]["enum"], json!(crate::agent::modes::PONYTAIL_LEVELS));
         assert_eq!(properties["caveman"]["enum"], json!(crate::agent::modes::CAVEMAN_LEVELS));
+        assert_eq!(properties["output_style"]["enum"], json!(crate::agent::modes::OUTPUT_STYLES));
         assert_eq!(properties["update_channel"]["enum"], json!(crate::update::CHANNELS));
         assert_eq!(properties["prune_sessions"]["enum"], json!(PRUNE_SESSIONS));
         assert_eq!(properties["mid_turn"]["enum"], json!(MID_TURN));

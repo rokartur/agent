@@ -31,7 +31,7 @@ Looked up in `cwd` and its parents up to the git root, nearest first. A project 
 
 ## System prompt
 
-`agent/prompt::system` assembles, in order: the preamble (`SYSTEM.md` or the built-in), `APPEND_SYSTEM.md`, the project context (`AGENTS.override.md`, `AGENTS.md` or `AGENTS.MD` in cwd, wrapped in `<project_instructions path=...>`), the skills list, then the ponytail and caveman section. The cwd section goes after the cached system block so a `/worktree` move keeps the prompt cache.
+`agent/prompt::system` assembles, in order: the preamble (`SYSTEM.md` or the built-in), `APPEND_SYSTEM.md`, the project context (`AGENTS.override.md`, `AGENTS.md` or `AGENTS.MD` in cwd, wrapped in `<project_instructions path=...>`), the skills list, then the output style (`output_style`: Claude Code's built-in `outputStyle` prompts in `agent/output-styles/`), ponytail and caveman section. The cwd section goes after the cached system block so a `/worktree` move keeps the prompt cache.
 
 An `AGENTS.md` below cwd is attached to the first `Read` result that reaches its directory, once per session (`nested_instructions`): the file closest to the code applies.
 
