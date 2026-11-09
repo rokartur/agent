@@ -1636,6 +1636,10 @@ impl Agent {
             return None;
         }
         if mode == Mode::Auto {
+            // ImageGenerate counts as an edit but also uploads its prompt and images, so it stays reviewed.
+            if tool != "ImageGenerate" && request.kind == permissions::Kind::Edit && permissions::edits_inside_workspace(files, &self.cwd, &self.extra_dirs) {
+                return None;
+            }
             return self.review(&request, input, emit);
         }
         let (reply, answer) = mpsc::channel();
@@ -1655,7 +1659,7 @@ impl Agent {
 
     /// Auto mode: a small model allows or denies the call; a failed review or a call too long to show whole denies it.
     fn review(&mut self, request: &Request, input: &Value, emit: &mut dyn FnMut(Event)) -> Option<String> {
-        let (allowed, reason) = match permissions::review_prompt(&self.user_request, self.follow_up.as_deref(), &self.cwd, request, input) {
+        let (allowed, reason) = match permissions::review_prompt(&self.user_request, self.follow_up.as_deref(), &self.cwd, &self.extra_dirs, request, input) {
             Some(prompt) => self.ask_reviewer(&prompt),
             None => (false, format!("the call is over {} characters, too long to review", permissions::REVIEW_DETAIL_CHARS)),
         };
