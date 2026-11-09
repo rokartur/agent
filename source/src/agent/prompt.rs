@@ -712,7 +712,7 @@ mod tests {
         let (deploy, review, summarize) = (body("/skill:deploy prod \"v1 rc\""), body("/skill:review main"), body("/skill:summarize \"$ARGUMENTS from yesterday\""));
         let hints: Vec<Option<String>> = skills.iter().map(|s| s.argument_hint.clone()).collect();
         std::fs::remove_dir_all(&root).unwrap();
-        let dir = root.join("skills/deploy");
+        let dir = root.join("skills").join("deploy");
         assert_eq!(deploy, format!("Deploy v1 rc to prod. First prod, second v1 rc, none $2, $tag. Price $1.00, kept \\\\prod. Dir {}. All: prod \"v1 rc\"\n</skill>", dir.display()));
         assert_eq!(review, "Review.\n</skill>\n\nARGUMENTS: main");
         assert_eq!(summarize, "Summarize $ARGUMENTS from yesterday\n</skill>");
