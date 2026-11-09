@@ -19,6 +19,12 @@ main() {
   staged="$dir/.agent-install-$$"
   trap 'rm -f "$staged"' EXIT
   curl -fsSL "https://github.com/rokartur/agent/releases/latest/download/agent-$os-$arch" -o "$staged"
+  want="$(curl -fsSL "https://github.com/rokartur/agent/releases/latest/download/SHA256SUMS" | awk -v name="agent-$os-$arch" '$2 == name { print $1 }')"
+  if command -v sha256sum >/dev/null 2>&1; then got="$(sha256sum "$staged" | cut -d' ' -f1)"; else got="$(shasum -a 256 "$staged" | cut -d' ' -f1)"; fi
+  if [ -z "$want" ] || [ "$want" != "$got" ]; then
+    echo "agent: the download does not match its published SHA-256." >&2
+    exit 1
+  fi
   chmod 755 "$staged"
   mv "$staged" "$dir/agent"
   echo "Installed $("$dir/agent" --version) to $dir/agent"

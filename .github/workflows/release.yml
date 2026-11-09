@@ -43,8 +43,11 @@ jobs:
           name: ${{ matrix.asset }}
           path: source/${{ matrix.asset }}
 
+  ci:
+    uses: ./.github/workflows/ci.yml
+
   publish:
-    needs: build
+    needs: [build, ci]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -58,4 +61,6 @@ jobs:
         # A semver pre-release tag (v0.3.0-beta.1) must stay off the latest channel.
         run: |
           case "$GITHUB_REF_NAME" in *-*) prerelease=--prerelease ;; *) prerelease= ;; esac
-          gh release create "$GITHUB_REF_NAME" agent-* --repo "$GITHUB_REPOSITORY" --generate-notes $prerelease
+          # The updater and install.sh check a download against this file.
+          sha256sum agent-* > SHA256SUMS
+          gh release create "$GITHUB_REF_NAME" agent-* SHA256SUMS --repo "$GITHUB_REPOSITORY" --generate-notes $prerelease

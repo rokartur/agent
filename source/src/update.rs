@@ -173,7 +173,29 @@ fn download(version: &str, path: &Path, report: &dyn Fn(Progress)) -> Result<(),
         received += read as u64;
         report(Progress::Downloading { version, received, total });
     }
+    drop(file);
+    let sums_url = format!("{RELEASES}/download/v{version}/SHA256SUMS");
+    let sums = http.get(&sums_url).call().and_then(|mut response| response.body_mut().with_config().limit(64 << 10).read_to_string()).map_err(|e| format!("Cannot download {sums_url}: {e}"))?;
+    let bytes = std::fs::read(path).map_err(|e| format!("Cannot read {}: {e}", path.display()))?;
+    check_sum(&sums, &asset, &bytes)?;
     process::make_executable(path).map_err(|e| format!("Cannot make {} executable: {e}", path.display()))
+}
+
+/// `sums` is the release's SHA256SUMS, one `<hex digest>  <name>` line per asset, as sha256sum prints.
+fn check_sum(sums: &str, asset: &str, bytes: &[u8]) -> Result<(), String> {
+    let line = |line: &str| {
+        let mut parts = line.split_whitespace();
+        let (digest, name) = (parts.next()?, parts.next()?);
+        // sha256sum marks binary mode with a leading star.
+        (name.strip_prefix('*').unwrap_or(name) == asset).then(|| digest.to_lowercase())
+    };
+    let published = sums.lines().find_map(line).ok_or(format!("SHA256SUMS of the release does not list {asset}."))?;
+    let digest = ring::digest::digest(&ring::digest::SHA256, bytes);
+    let actual: String = digest.as_ref().iter().map(|byte| format!("{byte:02x}")).collect();
+    if published != actual {
+        return Err(format!("The downloaded {asset} does not match its published SHA-256."));
+    }
+    Ok(())
 }
 
 /// A truncated or wrong download must never replace a working binary.
@@ -237,6 +259,17 @@ mod tests {
         assert_eq!(installed, "new");
         let aside = format!(".agent-old-{}.exe", std::process::id());
         assert_eq!(left, [aside.as_str(), "agent.exe"]);
+    }
+
+    #[test]
+    fn a_download_that_differs_from_the_published_sum_is_refused() {
+        let hex = |bytes: &[u8]| ring::digest::digest(&ring::digest::SHA256, bytes).as_ref().iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+        let asset = "agent-linux-x86_64";
+        let sums = format!("{}  agent-macos-aarch64\n{}  *{asset}\n", hex(b"mac"), hex(b"binary").to_uppercase());
+        assert_eq!(check_sum(&sums, asset, b"binary"), Ok(()));
+        assert_eq!(check_sum(&sums, asset, b"other"), Err("The downloaded agent-linux-x86_64 does not match its published SHA-256.".into()));
+        let only_exe = format!("{}  {asset}.exe\n", hex(b"binary"));
+        assert_eq!(check_sum(&only_exe, asset, b"binary"), Err("SHA256SUMS of the release does not list agent-linux-x86_64.".into()));
     }
 
     #[test]
