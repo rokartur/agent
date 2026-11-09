@@ -20,7 +20,7 @@ cd your-project
 agent
 ```
 
-Type `/login` and pick Claude, ChatGPT or GitHub Copilot. You already pay for one; that's the setup. Google Gemini (as the Gemini CLI) and Antigravity sign in too, once `GEMINI_CLI_CLIENT_SECRET` or `ANTIGRAVITY_CLIENT_SECRET` holds the app's OAuth client secret; Google has banned accounts that use the Antigravity sign-in outside Antigravity. Prefer pay as you go? Paste an Anthropic or OpenRouter API key, and every OpenRouter model is in `/model`.
+Type `/login` and pick Claude, ChatGPT or GitHub Copilot. You already pay for one; that's the setup. Google Antigravity signs in too, once `ANTIGRAVITY_CLIENT_SECRET` holds the app's OAuth client secret; Google has banned accounts that use the Antigravity sign-in outside Antigravity. Prefer pay as you go? Paste an Anthropic or OpenRouter API key, and every OpenRouter model is in `/model`.
 
 macOS and Linux. Updates itself. `agent --help` for the rest.
 
