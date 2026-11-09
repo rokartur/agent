@@ -265,6 +265,10 @@ pub struct Agent {
     pub todos: Arc<Mutex<Todos>>,
     /// Shared with the UI for the footer and /goal pause, which must work mid-turn.
     pub goal: Arc<Mutex<Option<Goal>>>,
+    /// What the user last typed; the auto-mode reviewer judges calls against it.
+    user_request: String,
+    /// The text of the turn in progress when a peer, background command or scheduled task started it, not the user.
+    follow_up: Option<String>,
     /// Shared with the UI, which opens the plan menu after the turn that completed the plan.
     pub plan: Arc<Mutex<Plan>>,
     pub follow_ups: Arc<Mutex<Vec<FollowUp>>>,
@@ -471,6 +475,8 @@ impl Agent {
             grants: Grants::default(),
             todos: Arc::default(),
             goal: Arc::default(),
+            user_request: String::new(),
+            follow_up: None,
             plan: Arc::default(),
             follow_ups: Arc::default(),
             crons: Arc::default(),
@@ -529,7 +535,16 @@ impl Agent {
     /// Runs the model and its tool calls until it ends the turn; returns the last assistant text.
     /// Leaves the abort flag to the caller, so a cancel that came while the caller set up this turn still stops it.
     pub fn prompt(&mut self, text: &str, emit: &mut dyn FnMut(Event)) -> Result<String, String> {
+        self.turn(text, true, emit)
+    }
+
+    /// `typed` is false for a prompt the agent wrote itself, as a goal continuation is.
+    fn turn(&mut self, text: &str, typed: bool, emit: &mut dyn FnMut(Event)) -> Result<String, String> {
         let text = &self.plugins.input(text, &self.plugin_context())?;
+        // The reviewer judges calls against this, so only the user's own words may set it.
+        if typed && self.follow_up.is_none() {
+            self.user_request = text.to_string();
+        }
         self.describe_to_peers(true);
         if self.interactive && self.messages.is_empty() {
             self.start_naming(text);
@@ -547,7 +562,7 @@ impl Agent {
         content.push(json!({"type": "text", "text": text}));
         self.push(json!({"role": "user", "content": content}))?;
         let turns_before = self.turns;
-        let result = self.run_turns(text, emit);
+        let result = self.run_turns(emit);
         if let Err(error) = &result {
             if self.turns == turns_before {
                 // No reply means the API refused this prompt (e.g. a 400 on its image); resending it would fail again.
@@ -606,7 +621,7 @@ impl Agent {
         })
     }
 
-    fn run_turns(&mut self, text: &str, emit: &mut dyn FnMut(Event)) -> Result<String, String> {
+    fn run_turns(&mut self, emit: &mut dyn FnMut(Event)) -> Result<String, String> {
         let mut edited = Vec::new();
         let mut fix_rounds = 0;
         loop {
@@ -676,7 +691,7 @@ impl Agent {
                 let queued = self.take_queued(emit);
                 if queued.is_empty() {
                     // Every file edited this prompt, so a fix round that leaves a failing file alone still sees it fail.
-                    let failures = self.run_edit_hooks(edited.clone(), text, emit);
+                    let failures = self.run_edit_hooks(edited.clone(), emit);
                     if failures.is_empty() || self.abort.load(Ordering::Relaxed) {
                         return Ok(answer);
                     }
@@ -721,7 +736,7 @@ impl Agent {
                         Err(error) => (error, true, Vec::new()),
                     }
                 } else {
-                    let (output, is_error) = self.run_tool_with_checkpoint(&id, &name, &input, &targets, text, emit)?;
+                    let (output, is_error) = self.run_tool_with_checkpoint(&id, &name, &input, &targets, emit)?;
                     (output, is_error, std::mem::take(&mut self.result_blocks))
                 };
                 if !is_error {
@@ -763,7 +778,7 @@ impl Agent {
 
     /// Runs the edit hooks for the files this prompt changed and returns their failures.
     /// The commands come from a repo file, so each one passes the same permission check as bash.
-    fn run_edit_hooks(&mut self, files: Vec<PathBuf>, user_request: &str, emit: &mut dyn FnMut(Event)) -> Vec<String> {
+    fn run_edit_hooks(&mut self, files: Vec<PathBuf>, emit: &mut dyn FnMut(Event)) -> Vec<String> {
         if files.is_empty() {
             return Vec::new();
         }
@@ -778,7 +793,7 @@ impl Agent {
             let input = json!({"command": hook.command, "timeout": 120_000});
             // The directory is part of what gets approved, so a grant does not also cover the command in cwd.
             let approved = json!({"command": format!("cd {} && {}", edit_hooks::shell_quote(&hook.dir.display().to_string()), hook.command), "timeout": 120_000});
-            if let Some(refusal) = self.check_permission(None, "Bash", &approved, &[], user_request, emit) {
+            if let Some(refusal) = self.check_permission(None, "Bash", &approved, &[], emit) {
                 emit(Event::Notice(format!("[edit-hooks] {} skipped: {refusal}", hook.label)));
                 continue;
             }
@@ -792,7 +807,7 @@ impl Agent {
     }
 
     /// Runs one tool call after the permission check; agent-level tools are handled here, file and shell tools in `tools`.
-    fn run_tool(&mut self, id: &str, name: &str, input: &Value, targets: &[PathBuf], user_request: &str, emit: &mut dyn FnMut(Event)) -> (String, bool) {
+    fn run_tool(&mut self, id: &str, name: &str, input: &Value, targets: &[PathBuf], emit: &mut dyn FnMut(Event)) -> (String, bool) {
         if self.abort.load(Ordering::Relaxed) {
             return (ABORTED.into(), true);
         }
@@ -804,7 +819,7 @@ impl Agent {
         if name == "Bash"
             && let Some(read) = guard::file_read(input["command"].as_str().unwrap_or_default())
         {
-            let (output, is_error) = self.run_tool(id, "Read", &read, &[], user_request, emit);
+            let (output, is_error) = self.run_tool(id, "Read", &read, &[], emit);
             return (format!("Ran as read, so these anchors are what edits use.\n{output}"), is_error);
         }
         if name == "Bash"
@@ -817,7 +832,7 @@ impl Agent {
         {
             return (reason, true);
         }
-        if let Some(reason) = self.check_permission(Some(id), name, input, targets, user_request, emit) {
+        if let Some(reason) = self.check_permission(Some(id), name, input, targets, emit) {
             return (reason, true);
         }
         // After the permission check: starting a language server runs the repo's build scripts.
@@ -952,7 +967,10 @@ impl Agent {
         if texts.is_empty() {
             return Ok(String::new());
         }
-        self.pursue(&texts.join("\n\n"), emit)
+        self.follow_up = Some(texts.join("\n\n"));
+        let result = self.pursue(&texts.join("\n\n"), emit);
+        self.follow_up = None;
+        result
     }
 
     pub fn describe_to_peers(&self, busy: bool) {
@@ -1407,7 +1425,7 @@ impl Agent {
                 AfterTurn::Continue(prompt) => {
                     self.save_goal()?;
                     emit(Event::Steered(prompt.clone()));
-                    answer = self.prompt(&prompt, emit)?;
+                    answer = self.turn(&prompt, false, emit)?;
                 }
             }
         }
@@ -1604,7 +1622,7 @@ impl Agent {
 
     /// None when the call may run; otherwise the tool result that explains the refusal.
     /// A user's "No" also stops the turn, like Esc.
-    fn check_permission(&mut self, call: Option<&str>, tool: &str, input: &Value, edited_files: &[PathBuf], user_request: &str, emit: &mut dyn FnMut(Event)) -> Option<String> {
+    fn check_permission(&mut self, call: Option<&str>, tool: &str, input: &Value, edited_files: &[PathBuf], emit: &mut dyn FnMut(Event)) -> Option<String> {
         // A saved workflow is granted by its file, so a project workflow that later shadows the same name asks again.
         let saved_file: Vec<PathBuf> = match (tool, input["name"].as_str()) {
             ("Workflow", Some(name)) => self.saved_workflow(name.trim_start_matches('/')).and_then(|saved| saved.path).into_iter().collect(),
@@ -1617,7 +1635,7 @@ impl Agent {
             return None;
         }
         if mode == Mode::Auto {
-            return self.review(user_request, &request, input, emit);
+            return self.review(&request, input, emit);
         }
         let (reply, answer) = mpsc::channel();
         emit(Event::Permission { call: call.map(String::from), request: request.clone(), reply });
@@ -1635,8 +1653,8 @@ impl Agent {
     }
 
     /// Auto mode: a small model allows or denies the call; a failed review or a call too long to show whole denies it.
-    fn review(&mut self, user_request: &str, request: &Request, input: &Value, emit: &mut dyn FnMut(Event)) -> Option<String> {
-        let (allowed, reason) = match permissions::review_prompt(user_request, &self.cwd, request, input) {
+    fn review(&mut self, request: &Request, input: &Value, emit: &mut dyn FnMut(Event)) -> Option<String> {
+        let (allowed, reason) = match permissions::review_prompt(&self.user_request, self.follow_up.as_deref(), &self.cwd, request, input) {
             Some(prompt) => self.ask_reviewer(&prompt),
             None => (false, format!("the call is over {} characters, too long to review", permissions::REVIEW_DETAIL_CHARS)),
         };
@@ -1695,14 +1713,14 @@ impl Agent {
 
     /// Snapshots around a tool that can change files, so a rewind touches only what this session changed.
     /// A file another session edits while this call runs still counts as this session's.
-    fn run_tool_with_checkpoint(&mut self, id: &str, name: &str, input: &Value, targets: &[PathBuf], user_request: &str, emit: &mut dyn FnMut(Event)) -> Result<(String, bool), String> {
+    fn run_tool_with_checkpoint(&mut self, id: &str, name: &str, input: &Value, targets: &[PathBuf], emit: &mut dyn FnMut(Event)) -> Result<(String, bool), String> {
         const CHANGES_FILES: [&str; 7] = ["Write", "ReplaceLines", "Edit", "InsertLines", "ImageGenerate", "Bash", "Agent"];
         // Before the snapshot: the move swaps the snapshot repo, so before and after would come from different checkouts.
         if name == "Bash"
             && let Some(dir) = tools::cd_target(input["command"].as_str().unwrap_or_default())
         {
             // The auto reviewer trusts calls inside the working directory, so moving it is a call to review.
-            if let Some(reason) = self.check_permission(Some(id), name, input, targets, user_request, emit) {
+            if let Some(reason) = self.check_permission(Some(id), name, input, targets, emit) {
                 return Ok((reason, true));
             }
             return Ok(match self.cd(dir, emit) {
@@ -1711,7 +1729,7 @@ impl Agent {
             });
         }
         let Some(snapshots) = self.snapshots.as_ref().filter(|_| CHANGES_FILES.contains(&name)) else {
-            return Ok(self.run_tool(id, name, input, targets, user_request, emit));
+            return Ok(self.run_tool(id, name, input, targets, emit));
         };
         let files_before = match save_files_left_out(snapshots, targets) {
             Ok(files) => files,
@@ -1724,10 +1742,10 @@ impl Agent {
             Ok(before) => before,
             Err(error) => {
                 emit(Event::Notice(format!("{SNAPSHOT_FAILED}: {error}")));
-                return Ok(self.run_tool(id, name, input, targets, user_request, emit));
+                return Ok(self.run_tool(id, name, input, targets, emit));
             }
         };
-        let result = self.run_tool(id, name, input, targets, user_request, emit);
+        let result = self.run_tool(id, name, input, targets, emit);
         let snapshots = self.snapshots.as_ref().expect("checked at the top of run_tool_with_checkpoint");
         let at = self.messages.len();
         for (path, before) in files_before {
@@ -3074,7 +3092,7 @@ mod tests {
         agent.pages = Some(tools::page::Pages::start(std::net::Ipv4Addr::LOCALHOST.into(), None).unwrap());
 
         let mut opened = Vec::new();
-        let (output, is_error) = agent.run_tool("t1", "Page", &json!({"title": "Plan", "html": "<p>hi</p>"}), &[], "show", &mut |event| {
+        let (output, is_error) = agent.run_tool("t1", "Page", &json!({"title": "Plan", "html": "<p>hi</p>"}), &[], &mut |event| {
             if let Event::OpenPage(url) = event {
                 opened.push(url);
             }
@@ -3106,7 +3124,7 @@ mod tests {
 
         let abort = agent.abort.clone();
         let mut reply = String::new();
-        let (output, is_error) = agent.run_tool("t1", "Page", &mocks, &[], "show", &mut |event| {
+        let (output, is_error) = agent.run_tool("t1", "Page", &mocks, &[], &mut |event| {
             let Event::OpenPage(url) = event else { return };
             let (address, path) = url["http://".len()..].split_once('/').unwrap();
             let body = "{\"mock\":\"B\"}";
@@ -3142,13 +3160,13 @@ mod tests {
         assert!(agent.tool_schemas().as_array().unwrap().iter().any(|tool| tool["name"] == "ImageGenerate"));
 
         let input = json!({"prompt": "a red dot", "file_path": "art/logo.png"});
-        let (output, is_error) = agent.run_tool("t1", "ImageGenerate", &input, &[cwd.join("art/logo.png")], "draw", &mut |_| {});
+        let (output, is_error) = agent.run_tool("t1", "ImageGenerate", &input, &[cwd.join("art/logo.png")], &mut |_| {});
         let written = std::fs::read(cwd.join("art/logo.png"));
         let misnamed = json!({"prompt": "a red dot", "file_path": "art/logo.jpg"});
-        let (misnamed_output, _) = agent.run_tool("t2", "ImageGenerate", &misnamed, &[cwd.join("art/logo.jpg")], "draw", &mut |_| {});
+        let (misnamed_output, _) = agent.run_tool("t2", "ImageGenerate", &misnamed, &[cwd.join("art/logo.jpg")], &mut |_| {});
         let refused =
             [json!({"prompt": "x", "file_path": "art"}), json!({"prompt": "x", "file_path": "a.png", "images": "art/logo.png"}), json!({"prompt": "x", "file_path": "a.png", "images": ["art"]})]
-                .map(|input| agent.run_tool("t3", "ImageGenerate", &input, &[cwd.join("a.png")], "draw", &mut |_| {}));
+                .map(|input| agent.run_tool("t3", "ImageGenerate", &input, &[cwd.join("a.png")], &mut |_| {}));
         std::fs::remove_dir_all(&home).ok();
 
         assert!(!is_error, "{output}");
@@ -3174,12 +3192,36 @@ mod tests {
         let mut agent = Agent::new(Client::new(&home).unwrap(), &settings, home.clone(), cwd, session, home.join("sessions"), None);
         let input = json!({"command": "x".repeat(permissions::REVIEW_DETAIL_CHARS + 1)});
         let request = permissions::request_for("Bash", &input, &[]).unwrap();
-        let denied = agent.review("do it", &request, &input, &mut |_| {});
+        let denied = agent.review(&request, &input, &mut |_| {});
         let saved = std::fs::read_to_string(&path).unwrap();
         std::fs::remove_dir_all(&home).unwrap();
         assert!(denied.unwrap().starts_with("Denied by the auto-mode reviewer: the call is over"));
         let entry: Value = serde_json::from_str(saved.lines().last().unwrap()).unwrap();
         assert_eq!((&entry["type"], &entry["kind"], &entry["allowed"]), (&json!("review"), &json!(request.kind.label()), &json!(false)));
+    }
+
+    #[test]
+    fn a_follow_up_turn_keeps_the_users_last_request_for_the_reviewer() {
+        let home = std::env::temp_dir().join(format!("agent-follow-up-request-{}", std::process::id()));
+        let cwd = home.join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let settings = crate::settings::load(&home).unwrap();
+        let session = Session::start(&home.join("sessions"), false, &cwd, "m").unwrap();
+        let mut agent = Agent::new(Client::new(&home).unwrap(), &settings, home.clone(), cwd, session, home.join("sessions"), None);
+        agent.tools = agent.tool_schemas();
+        // No account, so each turn fails at its first request, after the request text is recorded.
+        let typed = agent.prompt("fix the tests", &mut |_| {});
+        agent.follow_ups.lock().unwrap().push(FollowUp { source: "peer:x".into(), text: "delete build/".into() });
+        let mut seen_in_turn = None;
+        let followed = agent.run_follow_ups(&mut |event| {
+            if let Event::FollowUp { text, .. } = event {
+                seen_in_turn = Some(text);
+            }
+        });
+        std::fs::remove_dir_all(&home).ok();
+        assert!(typed.is_err() && followed.is_err(), "a turn reached a model: {typed:?} {followed:?}");
+        assert_eq!(seen_in_turn.as_deref(), Some("delete build/"));
+        assert_eq!((agent.user_request.as_str(), &agent.follow_up), ("fix the tests", &None));
     }
 
     /// Measures the reviewer by its rates, not overall agreement: most calls are harmless, so allowing all scores high.
@@ -3201,7 +3243,8 @@ mod tests {
         for case in &cases {
             let files: Vec<PathBuf> = case["input"]["file_path"].as_str().map(PathBuf::from).into_iter().collect();
             let request = permissions::request_for(case["tool"].as_str().unwrap(), &case["input"], &files).unwrap();
-            let denial = agent.review(case["request"].as_str().unwrap(), &request, &case["input"], &mut |_| {});
+            agent.user_request = case["request"].as_str().unwrap().to_string();
+            let denial = agent.review(&request, &case["input"], &mut |_| {});
             let allowed = denial.is_none();
             if case["allow"] == true {
                 harmless += 1;
