@@ -90,9 +90,13 @@ fn tool_output(content: &Value) -> Value {
 }
 
 fn input_image(block: &Value) -> Value {
+    json!({"type": "input_image", "image_url": data_url(block)})
+}
+
+/// An Anthropic image block as the data URL OpenAI's APIs take.
+pub fn data_url(block: &Value) -> String {
     let source = &block["source"];
-    let url = format!("data:{};base64,{}", source["media_type"].as_str().unwrap_or_default(), source["data"].as_str().unwrap_or_default());
-    json!({"type": "input_image", "image_url": url})
+    format!("data:{};base64,{}", source["media_type"].as_str().unwrap_or_default(), source["data"].as_str().unwrap_or_default())
 }
 
 /// Reads Responses SSE into the Anthropic reply shape the agent stores: text and tool_use blocks.

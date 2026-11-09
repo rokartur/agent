@@ -10,6 +10,7 @@ pub mod accounts;
 pub mod codex;
 pub mod copilot;
 pub mod google;
+pub mod images;
 pub mod models;
 pub mod oauth;
 pub mod openai_chat;
@@ -55,6 +56,10 @@ pub struct Client {
 struct State {
     accounts: Vec<Account>,
     usage: HashMap<String, (Instant, Option<Windows>)>,
+    /// Why the last usage fetch failed, until one succeeds.
+    usage_errors: HashMap<String, String>,
+    /// The outcome of the last /account check, kept until the next one.
+    checks: HashMap<String, AccountStatus>,
     limited: HashMap<String, Instant>,
     pinned: HashMap<String, String>,
     current: HashMap<String, String>,
@@ -136,6 +141,17 @@ pub struct AccountView {
     pub usage: Option<Windows>,
     pub current: bool,
     pub pinned: bool,
+    pub status: AccountStatus,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum AccountStatus {
+    Unchecked,
+    Checking,
+    Working,
+    /// A recent 429 or failed token refresh moved requests off it for a while.
+    Limited,
+    Failed(String),
 }
 
 enum Choice {
@@ -255,13 +271,14 @@ impl Client {
                 }
                 return fetch_models(request, copilot::parse_models);
             }
-            (Secret::OAuth(tokens), provider @ (google::GEMINI_CLI | google::ANTIGRAVITY)) => return google::models(google::app(provider), tokens),
-            (Secret::OAuth(tokens), _) => http
+            (Secret::OAuth(tokens), google::ANTIGRAVITY) => return google::models(&google::ANTIGRAVITY_APP, tokens),
+            (Secret::OAuth(tokens), "openai-codex") => http
                 // An old client_version gets an empty list, a missing one a 400.
                 .get(format!("{}/codex/models?client_version=0.160.0", self.chatgpt_base))
                 .header("authorization", format!("Bearer {}", tokens.access))
                 .header("chatgpt-account-id", tokens.account_id.as_deref().unwrap_or_default()),
             (Secret::ApiKey(_), provider) => return Err(format!("{provider} accounts need /login, not an API key.")),
+            (Secret::OAuth(_), provider) => return Err(format!("{provider} accounts are no longer supported. Remove this account with /logout.")),
         };
         let parse = if account.provider == "anthropic" { models::parse_anthropic } else { models::parse_codex };
         fetch_models(request, parse)
@@ -483,7 +500,7 @@ impl Client {
         let stale: Vec<&Account> = accounts
             .iter()
             .filter(|account| {
-                if !account.is_oauth() {
+                if !accounts::has_usage(account) {
                     return false;
                 }
                 let mut state = self.state.lock().unwrap();
@@ -506,8 +523,13 @@ impl Client {
             let (client, account) = (self.clone(), account.clone());
             std::thread::spawn(move || {
                 let base = if account.provider == "anthropic" { &client.anthropic_base } else { &client.chatgpt_base };
-                let usage = client.fresh(account.clone()).ok().and_then(|fresh| accounts::fetch_usage(&fresh, base).ok());
-                client.state.lock().unwrap().usage.insert(key(&account), (Instant::now(), usage));
+                let fetched = client.fresh(account.clone()).and_then(|fresh| accounts::fetch_usage(&fresh, base));
+                let mut state = client.state.lock().unwrap();
+                match &fetched {
+                    Ok(_) => state.usage_errors.remove(&key(&account)),
+                    Err(error) => state.usage_errors.insert(key(&account), error.clone()),
+                };
+                state.usage.insert(key(&account), (Instant::now(), fetched.ok()));
             });
         }
     }
@@ -534,7 +556,7 @@ impl Client {
                     "anthropic" => oauth::refresh_claude(&tokens.refresh),
                     "openai-codex" => oauth::refresh_codex(&tokens.refresh),
                     copilot::PROVIDER => copilot::refresh(&tokens.refresh),
-                    provider @ (google::GEMINI_CLI | google::ANTIGRAVITY) => google::refresh(google::app(provider), &tokens.refresh),
+                    google::ANTIGRAVITY => google::refresh(&google::ANTIGRAVITY_APP, &tokens.refresh),
                     other => Err(format!("{other} has no OAuth refresh.")),
                 }
                 .map_err(|e| format!("Cannot refresh {}: {e} Use /login again.", slot.name))?;
@@ -611,7 +633,7 @@ impl Client {
         let custom = self.custom_provider(&account.provider);
         let without_google_thoughts;
         let has_google_thoughts = || request["messages"].as_array().into_iter().flatten().filter_map(|m| m["content"].as_array()).flatten().any(google::is_google_thought);
-        let request = if matches!(account.provider.as_str(), google::GEMINI_CLI | google::ANTIGRAVITY) || !has_google_thoughts() {
+        let request = if account.provider == google::ANTIGRAVITY || !has_google_thoughts() {
             request
         } else {
             without_google_thoughts = drop_google_thoughts(request);
@@ -703,15 +725,14 @@ impl Client {
                 }
                 (call, body)
             }
-            (provider @ (google::GEMINI_CLI | google::ANTIGRAVITY), Secret::OAuth(tokens)) => {
-                let app = google::app(provider);
+            (google::ANTIGRAVITY, Secret::OAuth(tokens)) => {
+                let app = &google::ANTIGRAVITY_APP;
                 let call_to = |base: &str| {
-                    let mut call =
-                        self.http.post(format!("{base}/v1internal:streamGenerateContent?alt=sse")).header("authorization", format!("Bearer {}", tokens.access)).header("accept", "text/event-stream");
-                    for (name, value) in google::headers(app, google::wire_model(request)) {
-                        call = call.header(name, value);
-                    }
-                    call
+                    self.http
+                        .post(format!("{base}/v1internal:streamGenerateContent?alt=sse"))
+                        .header("authorization", format!("Bearer {}", tokens.access))
+                        .header("accept", "text/event-stream")
+                        .header("user-agent", google::user_agent())
                 };
                 fallback = app.fallback.map(call_to);
                 (call_to(app.base), google::request(app, request, tokens.account_id.as_deref().unwrap_or_default(), &self.cache_key))
@@ -753,7 +774,7 @@ impl Client {
             _ if custom.as_ref().is_some_and(|custom| custom.api == CustomApi::OpenAi) => openai_chat::parse_stream(&mut reader, abort, on_delta),
             copilot::PROVIDER => openai_chat::parse_stream(&mut reader, abort, on_delta),
             "openai-codex" => codex::parse_stream(&mut reader, abort, on_delta),
-            provider @ (google::GEMINI_CLI | google::ANTIGRAVITY) => google::parse_stream(&mut reader, &google::signature_owner(provider, google::wire_model(request)), abort, on_delta),
+            google::ANTIGRAVITY => google::parse_stream(&mut reader, &google::signature_owner(google::ANTIGRAVITY, google::wire_model(request)), abort, on_delta),
             _ => parse_stream(&mut reader, abort, on_delta),
         }
     }
@@ -761,6 +782,7 @@ impl Client {
     /// Subscriptions, then API keys, by provider order, each provider's accounts in the priority order failover tries them.
     pub fn accounts(&self) -> Vec<AccountView> {
         let state = self.state.lock().unwrap();
+        let now = Instant::now();
         let mut views: Vec<AccountView> = state
             .accounts
             .iter()
@@ -772,6 +794,7 @@ impl Client {
                 usage: state.usage.get(&key(a)).and_then(|(_, u)| u.clone()),
                 current: state.current.get(&a.provider) == Some(&a.name),
                 pinned: state.pinned.get(&a.provider) == Some(&a.name),
+                status: status(&state, a, now),
             })
             .collect();
         let rank = |provider: &str| state.provider_order.iter().position(|listed| *listed == provider).unwrap_or(usize::MAX);
@@ -793,7 +816,11 @@ impl Client {
             list.push(account);
             Ok(())
         })?;
-        self.state.lock().unwrap().usage.remove(&usage_key);
+        let mut state = self.state.lock().unwrap();
+        state.usage.remove(&usage_key);
+        state.usage_errors.remove(&usage_key);
+        state.checks.remove(&usage_key);
+        drop(state);
         self.reload(saved);
         Ok(())
     }
@@ -823,15 +850,10 @@ impl Client {
         Ok(())
     }
 
-    /// Name and provider account id of the account the next request is likely to use: the current pick, the pinned one, or the first.
+    /// Name and provider account id of the account `likely_account` names.
     pub fn account(&self, provider: &str) -> Option<(String, Option<String>)> {
         let state = self.state.lock().unwrap();
-        let name = state.current.get(provider).or_else(|| state.pinned.get(provider));
-        let mut candidates = state.accounts.iter().filter(|a| a.provider == provider);
-        let account = match name {
-            Some(name) => candidates.find(|a| &a.name == name),
-            None => candidates.next(),
-        }?;
+        let account = likely_account(&state, provider)?;
         Some((account.name.clone(), account.account_id().map(String::from)))
     }
 
@@ -856,6 +878,29 @@ impl Client {
     pub fn doctor(&self, provider: Option<&str>) -> Vec<Result<String, String>> {
         let accounts: Vec<Account> = self.state.lock().unwrap().accounts.iter().filter(|a| provider.is_none_or(|p| a.provider == p)).cloned().collect();
         accounts.iter().map(|a| self.check(a).map(|line| format!("OK   {} {line}", key(a))).map_err(|error| format!("FAIL {} {error}", key(a)))).collect()
+    }
+
+    /// Runs `doctor`'s check on every account, each on its own thread, as their /account status; `on_done` runs after each.
+    pub fn check_accounts(&self, on_done: impl Fn() + Clone + Send + 'static) {
+        let accounts = self.state.lock().unwrap().accounts.clone();
+        for account in accounts {
+            self.state.lock().unwrap().checks.insert(key(&account), AccountStatus::Checking);
+            let (client, on_done) = (self.clone(), on_done.clone());
+            std::thread::spawn(move || {
+                let status = match client.check(&account) {
+                    Ok(_) => AccountStatus::Working,
+                    Err(error) => AccountStatus::Failed(error),
+                };
+                let mut state = client.state.lock().unwrap();
+                // A ping that went through outweighs an older 429.
+                if status == AccountStatus::Working {
+                    state.limited.remove(&key(&account));
+                }
+                state.checks.insert(key(&account), status);
+                drop(state);
+                on_done();
+            });
+        }
     }
 
     /// Refreshes an expired token, lists models and sends a one-token ping on the cheapest one.
@@ -902,8 +947,40 @@ fn moved_to(request: &mut Value, model: &Model) {
     request["max_tokens"] = json!(request["max_tokens"].as_u64().unwrap_or(model.max_tokens).min(model.max_tokens));
 }
 
+/// A running check first, then a rate limit, the last check, the last usage fetch.
+fn status(state: &State, account: &Account, now: Instant) -> AccountStatus {
+    let key = key(account);
+    let check = state.checks.get(&key);
+    if check == Some(&AccountStatus::Checking) {
+        return AccountStatus::Checking;
+    }
+    if state.limited.get(&key).is_some_and(|until| *until > now) {
+        return AccountStatus::Limited;
+    }
+    if let Some(check) = check {
+        return check.clone();
+    }
+    if let Some(error) = state.usage_errors.get(&key) {
+        return AccountStatus::Failed(error.clone());
+    }
+    match state.usage.get(&key) {
+        Some((_, Some(_))) => AccountStatus::Working,
+        _ => AccountStatus::Unchecked,
+    }
+}
+
 fn key(account: &Account) -> String {
     format!("{}/{}", account.provider, account.name)
+}
+
+/// The account the next request to `provider` is likely to use: the current pick, the pinned one, or the first.
+fn likely_account<'a>(state: &'a State, provider: &str) -> Option<&'a Account> {
+    let name = state.current.get(provider).or_else(|| state.pinned.get(provider));
+    let mut candidates = state.accounts.iter().filter(|a| a.provider == provider);
+    match name {
+        Some(name) => candidates.find(|a| &a.name == name),
+        None => candidates.next(),
+    }
 }
 
 pub(crate) fn models_agent() -> ureq::Agent {
@@ -1652,6 +1729,22 @@ mod tests {
     }
 
     #[test]
+    fn account_status_puts_a_running_check_over_a_rate_limit_over_the_last_result() {
+        let account = Account { provider: "anthropic".into(), name: "work".into(), secret: Secret::ApiKey("sk".into()) };
+        let now = Instant::now();
+        let mut state = State::default();
+        assert_eq!(status(&state, &account, now), AccountStatus::Unchecked);
+        state.usage_errors.insert(key(&account), "Usage request failed (401).".into());
+        assert_eq!(status(&state, &account, now), AccountStatus::Failed("Usage request failed (401).".into()));
+        state.checks.insert(key(&account), AccountStatus::Working);
+        assert_eq!(status(&state, &account, now), AccountStatus::Working);
+        state.limited.insert(key(&account), now + LIMITED_FOR);
+        assert_eq!(status(&state, &account, now), AccountStatus::Limited);
+        state.checks.insert(key(&account), AccountStatus::Checking);
+        assert_eq!(status(&state, &account, now), AccountStatus::Checking);
+    }
+
+    #[test]
     fn doctor_pings_openrouter_on_free_models_without_a_thinking_field() {
         let home = std::env::temp_dir().join(format!("agent-doctor-or-{}", std::process::id()));
         let mut client = Client::new(&home).unwrap();
@@ -1787,6 +1880,20 @@ mod tests {
         let sent = requests.recv_timeout(Duration::from_secs(5)).unwrap();
         assert_eq!(sent["model"], "MiniMax-M2");
         assert!(sent.get("thinking").is_none() && sent.get("speed").is_none(), "{sent}");
+    }
+
+    #[test]
+    fn a_saved_gemini_cli_account_lists_no_models_and_never_reaches_codex() {
+        let home = std::env::temp_dir().join(format!("agent-gemini-cli-{}", std::process::id()));
+        let mut client = Client::new(&home).unwrap();
+        let (base, requests) = mock_provider(&[(200, r#"{"models":[]}"#)]);
+        client.chatgpt_base = base;
+        let tokens = oauth::Tokens { access: "a".into(), refresh: "r".into(), expires: u64::MAX, account_id: None };
+        let listed = client.list_models(&Account { provider: "google-gemini-cli".into(), name: "gemini".into(), secret: Secret::OAuth(tokens) });
+        std::fs::remove_dir_all(&home).ok();
+
+        assert_eq!(listed.err().unwrap(), "google-gemini-cli accounts are no longer supported. Remove this account with /logout.");
+        assert!(requests.recv_timeout(std::time::Duration::from_millis(200)).is_err());
     }
 
     #[test]

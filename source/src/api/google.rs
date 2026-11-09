@@ -1,5 +1,5 @@
-//! Google Cloud Code Assist, signed in as Gemini CLI (Gemini models) or as Antigravity (Gemini and Claude): Google
-//! sign-in with a local callback or a pasted address, the account's project, its model list and the Gemini wire.
+//! Google Cloud Code Assist, signed in as the Antigravity app (Gemini and Claude): Google sign-in with a local
+//! callback or a pasted address, the account's project, its model list and the Gemini wire.
 use serde_json::{Map, Value, json};
 use std::collections::HashMap;
 use std::io::BufRead;
@@ -13,10 +13,8 @@ use super::models::Model;
 use super::oauth::{self, Pending, Tokens};
 use super::{ApiError, Delta, Reply, Usage, append};
 
-pub const GEMINI_CLI: &str = "google-gemini-cli";
 pub const ANTIGRAVITY: &str = "google-antigravity";
 
-/// What tells the two Google apps apart; the wire after sign-in is the same.
 pub struct App {
     pub provider: &'static str,
     client_id: &'static str,
@@ -31,21 +29,8 @@ pub struct App {
     pub fallback: Option<&'static str>,
 }
 
-// The Gemini CLI's own installed-app client (google-gemini/gemini-cli, code_assist/oauth2.ts).
-const GEMINI_CLI_APP: App = App {
-    provider: GEMINI_CLI,
-    client_id: "681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com",
-    client_secret_env: "GEMINI_CLI_CLIENT_SECRET",
-    redirect_uri: "http://localhost:8085/oauth2callback",
-    listen: "127.0.0.1:8085",
-    callback_path: "/oauth2callback?",
-    scopes: "https://www.googleapis.com/auth/cloud-platform https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/userinfo.profile",
-    base: "https://cloudcode-pa.googleapis.com",
-    fallback: None,
-};
-
 // The Antigravity app's client and wire, as pi-ai and oh-my-pi use them (google-antigravity.ts).
-const ANTIGRAVITY_APP: App = App {
+pub const ANTIGRAVITY_APP: App = App {
     provider: ANTIGRAVITY,
     client_id: "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com",
     client_secret_env: "ANTIGRAVITY_CLIENT_SECRET",
@@ -57,10 +42,6 @@ const ANTIGRAVITY_APP: App = App {
     fallback: Some("https://daily-cloudcode-pa.sandbox.googleapis.com"),
 };
 
-pub fn app(provider: &str) -> &'static App {
-    if provider == ANTIGRAVITY { &ANTIGRAVITY_APP } else { &GEMINI_CLI_APP }
-}
-
 const AUTHORIZE_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 const TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 /// Cloud Code Assist gates newer Antigravity models on the app version, so it follows the app's update manifest.
@@ -68,14 +49,10 @@ const ANTIGRAVITY_MANIFEST: &str = "https://antigravity-hub-auto-updater-9741690
 /// The version when the manifest does not answer.
 const ANTIGRAVITY_VERSION: &str = "2.26.0";
 static ANTIGRAVITY_LATEST: OnceLock<String> = OnceLock::new();
-const GEMINI_CLI_VERSION: &str = "0.46.0";
 /// Gemini 3 rejects a replayed function call without a thought signature unless the first one carries this.
 const SKIP_THOUGHT_SIGNATURE: &str = "skip_thought_signature_validator";
 /// Cloud Code Assist answers 400 to Claude requests over 64,000 output tokens, though its list says 65,536.
 const CLAUDE_MAX_TOKENS: u64 = 64_000;
-/// `retrieveUserQuota` names models only; these are the sizes of the Gemini 2.5 and 3 models it lists.
-const GEMINI_CONTEXT: u64 = 1_048_576;
-const GEMINI_MAX_TOKENS: u64 = 65_536;
 const ONBOARD_TIMEOUT: Duration = Duration::from_secs(60);
 
 pub fn start(app: &App) -> Pending {
@@ -166,10 +143,10 @@ fn pasted_code(pending: &Pending, pasted: &str) -> Result<String, String> {
 }
 
 /// The Cloud Code Assist project requests bill to. A new account is onboarded to the free tier; a paid (Workspace)
-/// tier needs its own project in `GOOGLE_CLOUD_PROJECT`, as in the Gemini CLI.
+/// tier needs its own project in `GOOGLE_CLOUD_PROJECT`.
 fn project(app: &App, access: &str) -> Result<String, String> {
     let own = ["GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_PROJECT_ID"].into_iter().find_map(|name| std::env::var(name).ok().filter(|id| !id.is_empty()));
-    let mut metadata = metadata(app);
+    let mut metadata = metadata();
     if let Some(own) = &own {
         metadata["duetProject"] = json!(own);
     }
@@ -201,11 +178,8 @@ fn project(app: &App, access: &str) -> Result<String, String> {
     project_id(&operation["response"]["cloudaicompanionProject"]).or(own).ok_or_else(|| "Google onboarded the account but gave it no Cloud Code Assist project. Start /login again.".into())
 }
 
-fn metadata(app: &App) -> Value {
-    if app.provider == ANTIGRAVITY {
-        return json!({"ideType": "ANTIGRAVITY"});
-    }
-    json!({"ideType": "IDE_UNSPECIFIED", "platform": "PLATFORM_UNSPECIFIED", "pluginType": "GEMINI"})
+fn metadata() -> Value {
+    json!({"ideType": "ANTIGRAVITY"})
 }
 
 /// A project given as `"id"` or `{"id": ...}`.
@@ -223,10 +197,7 @@ fn onboard(app: &App, access: &str, body: &Value) -> Result<Value, String> {
         }
         std::thread::sleep(Duration::from_secs(2));
         let name = operation["name"].as_str().filter(|name| !name.is_empty()).ok_or("Google onboarding returned no operation.")?;
-        let mut request = super::models_agent().get(format!("{}/v1internal/{name}", app.base)).header("authorization", format!("Bearer {access}"));
-        for (name, value) in headers(app, "") {
-            request = request.header(name, value);
-        }
+        let request = super::models_agent().get(format!("{}/v1internal/{name}", app.base)).header("authorization", format!("Bearer {access}")).header("user-agent", user_agent());
         operation = read(request.call(), "onboardUser")?;
     }
     match operation["error"]["message"].as_str() {
@@ -237,10 +208,11 @@ fn onboard(app: &App, access: &str, body: &Value) -> Result<Value, String> {
 
 /// POSTs to a `v1internal:{method}` endpoint.
 fn call(app: &App, access: &str, method: &str, body: &Value) -> Result<Value, String> {
-    let mut request = super::models_agent().post(format!("{}/v1internal:{method}", app.base)).header("authorization", format!("Bearer {access}")).header("content-type", "application/json");
-    for (name, value) in headers(app, "") {
-        request = request.header(name, value);
-    }
+    let request = super::models_agent()
+        .post(format!("{}/v1internal:{method}", app.base))
+        .header("authorization", format!("Bearer {access}"))
+        .header("content-type", "application/json")
+        .header("user-agent", user_agent());
     read(request.send(body.to_string()), method)
 }
 
@@ -255,27 +227,19 @@ fn read(response: Result<ureq::http::Response<ureq::Body>, ureq::Error>, method:
 }
 
 /// Third-party text bound for the terminal, without escapes.
-fn shown(text: &str) -> String {
+pub(crate) fn shown(text: &str) -> String {
     text.trim().chars().filter(|c| !c.is_control()).take(500).collect()
 }
 
-/// The headers each app's own client sends; Gemini CLI names the model, `model` is empty outside a request.
-pub fn headers(app: &App, model: &str) -> Vec<(&'static str, String)> {
-    if app.provider == ANTIGRAVITY {
-        // The app's own platform names: it ships arm64 on macOS and amd64 elsewhere.
-        let (os, arch) = match std::env::consts::OS {
-            "macos" => ("darwin", "arm64"),
-            "windows" => ("windows", "amd64"),
-            _ => ("linux", "amd64"),
-        };
-        return vec![("user-agent", format!("antigravity/hub/{} (aidev_client; os_type={os}; arch={arch}; cl=1005016104)", antigravity_version()))];
-    }
-    let model = if model.is_empty() { "gemini-2.5-pro" } else { model };
-    let arch = if std::env::consts::ARCH == "aarch64" { "arm64" } else { "x64" };
-    vec![
-        ("user-agent", format!("GeminiCLI/{GEMINI_CLI_VERSION}/{model} ({}; {arch}; terminal)", std::env::consts::OS)),
-        ("client-metadata", "ideType=IDE_UNSPECIFIED,platform=PLATFORM_UNSPECIFIED,pluginType=GEMINI".into()),
-    ]
+/// The user-agent the Antigravity app sends.
+pub fn user_agent() -> String {
+    // The app's own platform names: it ships arm64 on macOS and amd64 elsewhere.
+    let (os, arch) = match std::env::consts::OS {
+        "macos" => ("darwin", "arm64"),
+        "windows" => ("windows", "amd64"),
+        _ => ("linux", "amd64"),
+    };
+    format!("antigravity/hub/{} (aidev_client; os_type={os}; arch={arch}; cl=1005016104)", antigravity_version())
 }
 
 /// The newest Antigravity version, read once per process; a failed read keeps `ANTIGRAVITY_VERSION`.
@@ -299,27 +263,30 @@ fn manifest_version(yaml: &str) -> Option<String> {
 /// The account's model list; the project is kept as the account id.
 pub fn models(app: &App, tokens: &Tokens) -> Result<Vec<Model>, String> {
     let body = json!({"project": tokens.account_id});
-    if app.provider == ANTIGRAVITY {
-        return Ok(parse_antigravity_models(&call(app, &tokens.access, "fetchAvailableModels", &body)?));
-    }
-    Ok(parse_quota_models(&call(app, &tokens.access, "retrieveUserQuota", &body)?))
+    Ok(parse_antigravity_models(&call(app, &tokens.access, "fetchAvailableModels", &body)?))
+}
+
+/// The first image model `fetchAvailableModels` lists for an Antigravity account; `parse_antigravity_models` leaves them out.
+pub fn image_model(app: &App, tokens: &Tokens) -> Result<String, String> {
+    let listed = call(app, &tokens.access, "fetchAvailableModels", &json!({"project": tokens.account_id}))?;
+    let mut ids = listed["imageGenerationModelIds"].as_array().into_iter().flatten().filter_map(Value::as_str);
+    ids.find(|id| !id.is_empty()).map(String::from).ok_or("This Antigravity account lists no image model.".into())
 }
 
 /// The quota of each model, in percent used, from the same call as the model list.
 pub fn usage(app: &App, tokens: &Tokens) -> Result<Windows, String> {
     let body = json!({"project": tokens.account_id});
-    let data = call(app, &tokens.access, if app.provider == ANTIGRAVITY { "fetchAvailableModels" } else { "retrieveUserQuota" }, &body)?;
+    let data = call(app, &tokens.access, "fetchAvailableModels", &body)?;
     parse_usage(&data).ok_or("The quota response has no models.".into())
 }
 
-/// `retrieveUserQuota`'s `buckets` or `fetchAvailableModels`' `models.*.quotaInfo`, each with `remainingFraction` and ISO `resetTime`.
+/// `fetchAvailableModels`' `models.*.quotaInfo`, each with `remainingFraction` and ISO `resetTime`.
 /// Only the models the list keeps count: a spent image model does not stop the agent.
 fn parse_usage(data: &Value) -> Option<Windows> {
-    let listed: Vec<String> = parse_quota_models(data).into_iter().chain(parse_antigravity_models(data)).map(|m| m.id.split_once('/').map_or(m.id.clone(), |(_, id)| id.into())).collect();
-    let buckets = data["buckets"].as_array().into_iter().flatten().map(|b| (b["modelId"].as_str().unwrap_or_default().split('_').next().unwrap_or_default(), b));
+    let listed: Vec<String> = parse_antigravity_models(data).into_iter().map(|m| m.id.split_once('/').map_or(m.id.clone(), |(_, id)| id.into())).collect();
     let infos = data["models"].as_object().into_iter().flatten().map(|(id, m)| (id.as_str(), &m["quotaInfo"]));
     let mut models: Vec<ModelQuota> = Vec::new();
-    for (id, quota) in buckets.chain(infos) {
+    for (id, quota) in infos {
         let Some(remaining) = quota["remainingFraction"].as_f64().filter(|_| listed.iter().any(|l| l == id)) else { continue };
         let used = ((1.0 - remaining) * 100.0).clamp(0.0, 100.0);
         let resets_at = quota["resetTime"].as_str().and_then(super::accounts::iso_ms);
@@ -354,36 +321,8 @@ pub fn parse_antigravity_models(body: &Value) -> Vec<Model> {
     models
 }
 
-/// The Gemini models in `retrieveUserQuota`'s buckets, as `google-gemini-cli/<id>`.
-pub fn parse_quota_models(body: &Value) -> Vec<Model> {
-    let mut models: Vec<Model> = Vec::new();
-    for bucket in body["buckets"].as_array().into_iter().flatten() {
-        let Some(id) = bucket["modelId"].as_str().filter(|id| id.starts_with("gemini-") && !id.contains("image")) else { continue };
-        // Buckets per billing variant: "gemini-2.5-pro_vertex" is "gemini-2.5-pro".
-        let id = id.split('_').next().unwrap_or(id);
-        if models.iter().any(|m| m.id.ends_with(&format!("/{id}"))) {
-            continue;
-        }
-        models.push(model(GEMINI_CLI, id, &display_name(id), GEMINI_CONTEXT, GEMINI_MAX_TOKENS));
-    }
-    models.sort_by(|a, b| a.name.cmp(&b.name));
-    models
-}
-
 fn model(provider: &str, id: &str, name: &str, context_window: u64, max_tokens: u64) -> Model {
     Model { provider: provider.into(), id: format!("{provider}/{id}"), name: name.into(), context_window, max_tokens, accounts: Vec::new(), price: None }
-}
-
-/// "gemini-2.5-flash-lite" becomes "Gemini 2.5 Flash Lite".
-fn display_name(id: &str) -> String {
-    let mut name = String::new();
-    for word in id.split('-') {
-        let mut chars = word.chars();
-        name.extend(chars.next().map(|first| first.to_ascii_uppercase()));
-        name.extend(chars);
-        name.push(' ');
-    }
-    name.trim_end().to_string()
 }
 
 /// Turns an Anthropic Messages request into a Cloud Code Assist `streamGenerateContent` body.
@@ -391,7 +330,6 @@ fn display_name(id: &str) -> String {
 pub fn request(app: &App, anthropic: &Value, project: &str, session: &str) -> Value {
     let id = wire_model(anthropic);
     let owner = signature_owner(app.provider, id);
-    let antigravity = app.provider == ANTIGRAVITY;
     let mut tool_names = HashMap::new();
     let mut contents = Vec::new();
     for message in anthropic["messages"].as_array().into_iter().flatten() {
@@ -479,9 +417,6 @@ pub fn request(app: &App, anthropic: &Value, project: &str, session: &str) -> Va
     if !declarations.is_empty() {
         inner["tools"] = json!([{"functionDeclarations": declarations}]);
     }
-    if !antigravity {
-        return json!({"project": project, "model": id, "request": inner});
-    }
     // Antigravity's own client tags the system prompt as a user turn and validates tool calls against the schema.
     if !system.is_empty() {
         inner["systemInstruction"]["role"] = json!("user");
@@ -490,14 +425,35 @@ pub fn request(app: &App, anthropic: &Value, project: &str, session: &str) -> Va
         inner["toolConfig"] = json!({"functionCallingConfig": {"mode": "VALIDATED"}});
     }
     inner["sessionId"] = json!(session);
+    envelope(project, id, inner)
+}
+
+/// The Cloud Code Assist wrapper around a Gemini request.
+fn envelope(project: &str, model: &str, request: Value) -> Value {
     json!({
         "project": project,
-        "model": id,
-        "request": inner,
+        "model": model,
+        "request": request,
         "userAgent": "antigravity",
         "requestId": format!("agent-{}-{}", crate::process::now_ms(), oauth::random_hex(8)),
     })
 }
+
+/// A `streamGenerateContent` body for an Antigravity image model, as oh-my-pi sends it: the input images, then the
+/// prompt, answered with an image and nothing else.
+pub fn image_request(model: &str, project: &str, prompt: &str, inputs: &[Value]) -> Value {
+    let mut parts: Vec<Value> = inputs.iter().map(inline_data).collect();
+    parts.push(json!({"text": prompt}));
+    let request = json!({
+        "contents": [{"role": "user", "parts": parts}],
+        "systemInstruction": {"parts": [{"text": IMAGE_SYSTEM_INSTRUCTION}]},
+        "generationConfig": {"responseModalities": ["IMAGE"]},
+    });
+    envelope(project, model, request)
+}
+
+const IMAGE_SYSTEM_INSTRUCTION: &str =
+    "You are an AI image generator. Generate images based on user descriptions. Focus on creating high-quality, visually appealing images that match the user's request.";
 
 /// The model id Cloud Code Assist knows, without the provider prefix.
 pub fn wire_model(anthropic: &Value) -> &str {
@@ -589,7 +545,8 @@ pub fn signature_owner(provider: &str, model: &str) -> String {
 
 /// Anthropic-format endpoints reject a Google thought's signature, so they never get one.
 pub fn is_google_thought(block: &Value) -> bool {
-    block["type"] == "thinking" && block["signature"].as_str().is_some_and(|s| [GEMINI_CLI, ANTIGRAVITY].iter().any(|p| s.starts_with(&format!("{p}:"))))
+    // Sessions saved before the Gemini CLI login was removed still hold its signatures.
+    block["type"] == "thinking" && block["signature"].as_str().is_some_and(|s| ["google-gemini-cli", ANTIGRAVITY].iter().any(|p| s.starts_with(&format!("{p}:"))))
 }
 
 /// Reads the `data:` chunks of `streamGenerateContent?alt=sse` into the Anthropic reply shape: thinking, text and
@@ -679,9 +636,15 @@ pub fn parse_stream(reader: &mut dyn BufRead, owner: &str, abort: &AtomicBool, o
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::io::{Read, Write};
+
+    /// The Antigravity app on local endpoints; the built-in version stands, so no request goes to the update manifest.
+    pub(crate) fn app_at(base: &str, fallback: &str) -> App {
+        let _ = ANTIGRAVITY_LATEST.set(ANTIGRAVITY_VERSION.into());
+        App { base: base.to_string().leak(), fallback: Some(fallback.to_string().leak()), ..ANTIGRAVITY_APP }
+    }
 
     fn pending() -> Pending {
         Pending { url: String::new(), verifier: "v".into(), state: "s1".into() }
@@ -693,16 +656,15 @@ mod tests {
         assert_eq!(pasted_code(&pending(), "4/0Ab").unwrap(), "4/0Ab");
         assert_eq!(pasted_code(&pending(), "http://localhost:51121/oauth-callback?state=other&code=c").unwrap_err(), "OAuth state mismatch. Start /login again.");
         assert_eq!(pasted_code(&pending(), "http://localhost:51121/oauth-callback?error=access_denied").unwrap_err(), "Paste the whole address the browser shows after sign-in.");
-        for app in [&GEMINI_CLI_APP, &ANTIGRAVITY_APP] {
-            assert!(start(app).url.contains(&format!("redirect_uri={}", oauth::percent_encode(app.redirect_uri))));
-            assert!(app.redirect_uri.ends_with(app.callback_path.trim_end_matches('?')) && app.redirect_uri.contains(app.listen.split(':').nth(1).unwrap()));
-        }
+        let app = &ANTIGRAVITY_APP;
+        assert!(start(app).url.contains(&format!("redirect_uri={}", oauth::percent_encode(app.redirect_uri))));
+        assert!(app.redirect_uri.ends_with(app.callback_path.trim_end_matches('?')) && app.redirect_uri.contains(app.listen.split(':').nth(1).unwrap()));
     }
 
     #[test]
     fn a_taken_port_leaves_the_login_to_the_pasted_address() {
         let taken = TcpListener::bind("127.0.0.1:0").unwrap();
-        let app = App { listen: Box::leak(taken.local_addr().unwrap().to_string().into_boxed_str()), ..GEMINI_CLI_APP };
+        let app = App { listen: Box::leak(taken.local_addr().unwrap().to_string().into_boxed_str()), ..ANTIGRAVITY_APP };
         let abort = AtomicBool::new(false);
         std::thread::scope(|scope| {
             let waiting = scope.spawn(|| listen(&app, &pending(), &abort));
@@ -716,13 +678,13 @@ mod tests {
     #[test]
     fn the_browser_redirect_reaches_the_listener() {
         let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
-        let app = App { listen: Box::leak(format!("127.0.0.1:{port}").into_boxed_str()), ..GEMINI_CLI_APP };
+        let app = App { listen: Box::leak(format!("127.0.0.1:{port}").into_boxed_str()), ..ANTIGRAVITY_APP };
         let abort = AtomicBool::new(false);
         std::thread::scope(|scope| {
             let waiting = scope.spawn(|| listen(&app, &pending(), &abort));
             std::thread::sleep(Duration::from_millis(300));
             let mut browser = std::net::TcpStream::connect(app.listen).unwrap();
-            write!(browser, "GET /oauth2callback?state=s1&error=access_denied HTTP/1.1\r\n\r\n").unwrap();
+            write!(browser, "GET {}state=s1&error=access_denied HTTP/1.1\r\n\r\n", app.callback_path).unwrap();
             let mut page = String::new();
             browser.read_to_string(&mut page).unwrap();
             assert!(page.contains("Login finished"));
@@ -745,23 +707,6 @@ mod tests {
         });
         let listed: Vec<_> = parse_antigravity_models(&body).into_iter().map(|m| (m.id, m.context_window, m.max_tokens)).collect();
         assert_eq!(listed, [("google-antigravity/claude-sonnet-4-6".to_string(), 200_000, 64_000), ("google-antigravity/gemini-3-flash".to_string(), 1_048_576, 65_536)]);
-    }
-
-    #[test]
-    fn the_quota_buckets_list_each_gemini_model_once() {
-        let body = json!({"buckets": [
-            {"modelId": "gemini-2.5-pro", "tokenType": "REQUESTS"},
-            {"modelId": "gemini-2.5-pro_vertex", "tokenType": "REQUESTS"},
-            {"modelId": "gemini-3-flash-preview"},
-            {"modelId": "gemini-2.5-flash-image"},
-            {"modelId": "claude-x"},
-            {"tokenType": "REQUESTS"},
-        ]});
-        let listed: Vec<_> = parse_quota_models(&body).into_iter().map(|m| (m.id, m.name)).collect();
-        assert_eq!(
-            listed,
-            [("google-gemini-cli/gemini-2.5-pro".to_string(), "Gemini 2.5 Pro".to_string()), ("google-gemini-cli/gemini-3-flash-preview".to_string(), "Gemini 3 Flash Preview".to_string())]
-        );
     }
 
     #[test]
@@ -830,18 +775,14 @@ mod tests {
     }
 
     #[test]
-    fn gemini_cli_sends_the_plain_envelope() {
-        let mut anthropic = history();
-        anthropic["model"] = json!("google-gemini-cli/gemini-2.5-pro");
-        let body = request(&GEMINI_CLI_APP, &anthropic, "proj-1", "sess");
-        assert_eq!(body.as_object().unwrap().len(), 3);
-        assert_eq!(body["model"], "gemini-2.5-pro");
+    fn an_image_request_carries_the_inputs_then_the_prompt_and_asks_for_an_image_only() {
+        let input = json!({"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "iVBO"}});
+        let body = image_request("gemini-3-pro-image", "proj-1", "a red dot", &[input]);
+        assert_eq!((&body["project"], &body["model"]), (&json!("proj-1"), &json!("gemini-3-pro-image")));
         let inner = &body["request"];
-        assert_eq!(inner["systemInstruction"], json!({"parts": [{"text": "Be brief.\n\ncwd: /x"}]}));
-        assert!(inner.get("toolConfig").is_none() && inner.get("sessionId").is_none());
-        assert_eq!(inner["generationConfig"]["thinkingConfig"]["thinkingBudget"], 16_384);
-        let agent = &headers(&GEMINI_CLI_APP, "gemini-2.5-pro")[0].1;
-        assert!(agent.starts_with("GeminiCLI/0.46.0/gemini-2.5-pro ("), "{agent}");
+        assert_eq!(inner["contents"], json!([{"role": "user", "parts": [{"inlineData": {"mimeType": "image/png", "data": "iVBO"}}, {"text": "a red dot"}]}]));
+        assert_eq!(inner["generationConfig"], json!({"responseModalities": ["IMAGE"]}));
+        assert_eq!(inner["systemInstruction"]["parts"][0]["text"], IMAGE_SYSTEM_INSTRUCTION);
     }
 
     #[test]
@@ -853,7 +794,7 @@ mod tests {
         ];
         let body: String = chunks.iter().map(|c| format!("data: {c}\r\n\r\n")).collect();
         let mut streamed = String::new();
-        let owner = signature_owner(GEMINI_CLI, "gemini-3-flash");
+        let owner = signature_owner(ANTIGRAVITY, "gemini-3-flash");
         let reply = parse_stream(&mut body.as_bytes(), &owner, &AtomicBool::new(false), &mut |delta| match delta {
             Delta::Text(t) => streamed.push_str(t),
             Delta::Thinking(t) => streamed.push_str(&format!("[{t}]")),
@@ -865,9 +806,9 @@ mod tests {
         assert_eq!((reply.stop_reason.as_str(), reply.id.as_str()), ("tool_use", "r1"));
         assert_eq!((reply.usage.input, reply.usage.cache_read, reply.usage.output), (40, 60, 7));
         let content = &reply.message["content"];
-        assert_eq!(content[0], json!({"type": "thinking", "thinking": "plan", "signature": "google-gemini-cli:gemini-3-flash:"}));
+        assert_eq!(content[0], json!({"type": "thinking", "thinking": "plan", "signature": "google-antigravity:gemini-3-flash:"}));
         assert_eq!(content[1], json!({"type": "text", "text": "Hi there"}));
-        assert_eq!(content[2], json!({"type": "thinking", "thinking": "", "signature": "google-gemini-cli:gemini-3-flash:x"}));
+        assert_eq!(content[2], json!({"type": "thinking", "thinking": "", "signature": "google-antigravity:gemini-3-flash:x"}));
         assert_eq!((&content[3]["name"], &content[3]["input"]), (&json!("read"), &json!({"pattern": "a"})));
         assert!(content[3]["id"].as_str().unwrap().starts_with("toolu_"));
         let cut = parse_stream(&mut format!("data: {}\n", chunks[1]).as_bytes(), &owner, &AtomicBool::new(false), &mut |_| {}).err().unwrap();
@@ -918,24 +859,20 @@ mod tests {
 
     #[test]
     fn the_fullest_listed_model_quota_is_the_account_window() {
-        let quota = json!({"buckets": [
-            {"modelId": "gemini-2.5-flash", "remainingFraction": 0.75, "resetTime": "2026-01-02T00:00:00Z"},
-            {"modelId": "gemini-2.5-pro", "remainingFraction": 0.5, "resetTime": "2026-01-01T00:00:00Z"},
-            {"modelId": "gemini-2.5-pro_vertex", "remainingFraction": 0.25, "resetTime": "2026-01-01T00:00:00Z"},
-            {"modelId": "gemini-2.5-flash-image", "remainingFraction": 0.0},
-        ]});
-        let usage = parse_usage(&quota).unwrap();
-        let quotas: Vec<(&str, f64, Option<u64>)> = usage.models.iter().map(|q| (q.model.as_str(), q.used, q.resets_at)).collect();
-        assert_eq!(quotas, [("gemini-2.5-flash", 25.0, Some(1_767_312_000_000)), ("gemini-2.5-pro", 75.0, Some(1_767_225_600_000))]);
-        assert_eq!((usage.five_hour, usage.seven_day), (None, 75.0));
-        let flash = usage.for_model("google-gemini-cli/gemini-2.5-flash").unwrap();
-        assert_eq!((flash.seven_day, flash.resets_at), (25.0, Some(1_767_312_000_000)));
-        assert_eq!(usage.for_model("google-gemini-cli/gemini-3-pro-preview"), None);
-        let models = json!({"models": {
-            "gemini-3-flash": {"displayName": "Gemini 3 Flash", "quotaInfo": {"remainingFraction": 0.5}},
+        let quota = json!({"imageGenerationModelIds": ["gemini-3-pro-image"], "models": {
+            "gemini-3-flash": {"displayName": "Gemini 3 Flash", "quotaInfo": {"remainingFraction": 0.75, "resetTime": "2026-01-02T00:00:00Z"}},
+            "claude-sonnet-4-6": {"displayName": "Claude Sonnet 4.6", "quotaInfo": {"remainingFraction": 0.5, "resetTime": "2026-01-01T00:00:00Z"}},
+            "gemini-3-pro-image": {"quotaInfo": {"remainingFraction": 0.0}},
             "chat_20706": {"quotaInfo": {"remainingFraction": 0.0}},
         }});
-        assert_eq!(parse_usage(&models).map(|w| w.seven_day), Some(50.0));
+        let usage = parse_usage(&quota).unwrap();
+        let mut quotas: Vec<(&str, f64, Option<u64>)> = usage.models.iter().map(|q| (q.model.as_str(), q.used, q.resets_at)).collect();
+        quotas.sort_by(|a, b| a.0.cmp(b.0));
+        assert_eq!(quotas, [("claude-sonnet-4-6", 50.0, Some(1_767_225_600_000)), ("gemini-3-flash", 25.0, Some(1_767_312_000_000))]);
+        assert_eq!((usage.five_hour, usage.seven_day), (None, 50.0));
+        let flash = usage.for_model("google-antigravity/gemini-3-flash").unwrap();
+        assert_eq!((flash.seven_day, flash.resets_at), (25.0, Some(1_767_312_000_000)));
+        assert_eq!(usage.for_model("google-antigravity/gemini-3-pro"), None);
         assert_eq!(parse_usage(&json!({})), None);
     }
 }

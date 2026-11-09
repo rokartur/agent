@@ -710,7 +710,8 @@ impl Turn {
             Event::Thinking(chunk) => text("agent_thought_chunk", chunk),
             Event::ToolStart { id, name, input } => {
                 let path = input["file_path"].as_str().map(|path| self.cwd.join(path));
-                if let Some(path) = path.as_ref().filter(|_| tool_kind(name) == "edit") {
+                // An image is no text to diff, and an editor asked to read it may answer with megabytes of garbage.
+                if let Some(path) = path.as_ref().filter(|_| tool_kind(name) == "edit" && name != "ImageGenerate") {
                     self.before_edit.insert(id.clone(), (path.clone(), self.read_text(path)));
                 }
                 let locations: Vec<Value> = path.iter().map(|path| json!({"path": path, "line": input["offset"].as_u64()})).collect();
@@ -812,7 +813,7 @@ fn tool_kind(name: &str) -> &'static str {
         "Read" | "Video" => "read",
         "Grep" => "search",
         "Bash" => "execute",
-        "Write" | "ReplaceLines" | "Edit" | "InsertLines" => "edit",
+        "Write" | "ReplaceLines" | "Edit" | "InsertLines" | "ImageGenerate" => "edit",
         "WebSearch" | "WebFetch" | "GetSearchContent" => "fetch",
         _ => "other",
     }
@@ -865,6 +866,7 @@ mod tests {
         let (edited_at, edit) = run("t1", "Edit", "a.rs");
         let (_, write) = run("t2", "Write", "b.rs");
         let (_, read) = run("t3", "Read", "a.rs");
+        let (_, image) = run("t4", "ImageGenerate", "c.png");
         std::fs::remove_dir_all(&dir).unwrap();
 
         assert_eq!(edited_at, json!([{"path": dir.join("a.rs"), "line": null}]));
@@ -872,6 +874,7 @@ mod tests {
         assert_eq!(edit[1]["content"]["text"], "ok");
         assert_eq!(write[0], json!({"type": "diff", "path": dir.join("b.rs"), "oldText": null, "newText": "new"}));
         assert_eq!(read.as_array().unwrap().len(), 1);
+        assert_eq!(image.as_array().unwrap().len(), 1);
     }
 
     #[test]

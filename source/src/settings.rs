@@ -26,6 +26,9 @@ pub struct Settings {
     pub permission_mode: Mode,
     /// The auto-mode reviewer; empty means `small_model`.
     pub reviewer_model: String,
+    /// ImageGenerate's model: a Codex one (`gpt-image-2`, `openai-codex/` optional) or `google-antigravity/<id>`; empty takes
+    /// gpt-image-2 on a ChatGPT login, else the first image model an Antigravity account lists.
+    pub image_model: String,
     /// Session titles, long Video descriptions and compaction, and the reviewer and condense when theirs is empty;
     /// empty means the provider's small model.
     pub small_model: String,
@@ -384,6 +387,7 @@ fn from_json(own: &Value) -> Settings {
         message_threads: own["message_threads"].as_bool().unwrap_or(true),
         permission_mode: own["permission_mode"].as_str().and_then(Mode::parse).unwrap_or(Mode::Ask),
         reviewer_model: own["reviewer_model"].as_str().unwrap_or_default().to_string(),
+        image_model: own["image_model"].as_str().unwrap_or_default().to_string(),
         small_model: own["small_model"].as_str().unwrap_or_default().to_string(),
         auto_compact: own["auto_compact"].as_bool().unwrap_or(true),
         // Compaction asks for 4/5 of it as max_tokens; 0 is an API error and a few hundred cut the summary off.
@@ -526,6 +530,7 @@ fn to_json(settings: &Settings) -> Value {
         "message_threads": settings.message_threads,
         "permission_mode": settings.permission_mode.label(),
         "reviewer_model": settings.reviewer_model,
+        "image_model": settings.image_model,
         "small_model": settings.small_model,
         "auto_compact": settings.auto_compact,
         "reserve_tokens": settings.reserve_tokens,
@@ -741,6 +746,7 @@ mod tests {
         settings.subagent_effort = "low".into();
         settings.subagent_model = "claude-sonnet-5-5".into();
         settings.reviewer_model = "claude-haiku-5-5".into();
+        settings.image_model = "google-antigravity/gemini-3-pro-image".into();
         settings.small_model = "claude-haiku-4-5".into();
         settings.speed = "ultrafast".into();
         settings.custom_providers = vec![CustomProvider {

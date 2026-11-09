@@ -193,11 +193,16 @@ fn parse_codex_usage(data: &Value) -> Option<Usage> {
     Some(Usage { five_hour: Some(five_hour), seven_day, resets_at: if five_hour >= seven_day { five_reset } else { seven_reset }, models: Vec::new() })
 }
 
+/// Whether `fetch_usage` knows the account's provider; Copilot subscriptions have no usage endpoint.
+pub fn has_usage(account: &Account) -> bool {
+    account.is_oauth() && matches!(account.provider.as_str(), "anthropic" | "openai-codex" | super::google::ANTIGRAVITY)
+}
+
 /// Fetches an OAuth account's windows; `base` is the provider's API root.
 pub fn fetch_usage(account: &Account, base: &str) -> Result<Usage, String> {
     let Secret::OAuth(tokens) = &account.secret else { return Err("API keys have no usage windows.".into()) };
-    if let provider @ (super::google::GEMINI_CLI | super::google::ANTIGRAVITY) = account.provider.as_str() {
-        return super::google::usage(super::google::app(provider), tokens);
+    if account.provider == super::google::ANTIGRAVITY {
+        return super::google::usage(&super::google::ANTIGRAVITY_APP, tokens);
     }
     let agent = super::models_agent();
     let request = match account.provider.as_str() {
@@ -337,9 +342,9 @@ mod tests {
         let quota = |model: &str, used| ModelQuota { model: model.into(), used, resets_at: Some(used as u64) };
         let google = Usage { five_hour: None, seven_day: 100.0, resets_at: Some(100), models: vec![quota("gemini-2.5-flash", 10.0), quota("gemini-2.5-pro", 100.0)] };
         let candidates = |model: &str| [Candidate { usage: google.for_model(model), limited: false }];
-        assert_eq!(pick(&candidates("google-gemini-cli/gemini-2.5-flash"), 90.0, Policy::Block, None), Pick::Account(0));
-        assert_eq!(pick(&candidates("google-gemini-cli/gemini-2.5-pro"), 90.0, Policy::Block, None), Pick::Blocked { resets_at: Some(100) });
-        assert_eq!(pick(&candidates("google-gemini-cli/gemini-3-pro-preview"), 90.0, Policy::Block, None), Pick::Account(0), "an unknown quota does not block");
+        assert_eq!(pick(&candidates("google-antigravity/gemini-2.5-flash"), 90.0, Policy::Block, None), Pick::Account(0));
+        assert_eq!(pick(&candidates("google-antigravity/gemini-2.5-pro"), 90.0, Policy::Block, None), Pick::Blocked { resets_at: Some(100) });
+        assert_eq!(pick(&candidates("google-antigravity/gemini-3-pro-preview"), 90.0, Policy::Block, None), Pick::Account(0), "an unknown quota does not block");
         let claude = usage(95.0, 10.0).unwrap();
         assert_eq!(claude.for_model("anthropic/claude-opus-4-5"), Some(claude));
     }
