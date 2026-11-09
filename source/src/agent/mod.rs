@@ -126,6 +126,8 @@ pub enum Event {
     },
     /// PushNotification: a desktop notification the model asked for.
     Push(String),
+    /// A page the Page tool published, for the terminal that typed to open in its browser.
+    OpenPage(String),
     /// Finished background work handed to the model.
     FollowUp {
         source: String,
@@ -254,6 +256,8 @@ pub struct Agent {
     pub steering: Steering,
     /// Blocks the running call returns after its text: AskUserQuestion's pasted images, or Video's frames and the speech between them.
     result_blocks: Vec<Value>,
+    /// The Page tool's server, started by its first call.
+    pages: Option<tools::page::Pages>,
     /// Shared with the UI so a mode change applies to the next tool call.
     pub permission_mode: Arc<Mutex<Mode>>,
     pub grants: Grants,
@@ -462,6 +466,7 @@ impl Agent {
             abort: Arc::default(),
             steering: Arc::new(Mutex::new(Vec::new())),
             result_blocks: Vec::new(),
+            pages: None,
             permission_mode: Arc::new(Mutex::new(settings.permission_mode)),
             grants: Grants::default(),
             todos: Arc::default(),
@@ -849,6 +854,7 @@ impl Agent {
             "AskUserQuestion" => self.ask_user(input, emit),
             "Video" => self.video(id, input, emit),
             "ImageGenerate" => self.generate_image(input),
+            "Page" => self.page(id, input, emit),
             _ => return self.plugins.tool(name, input, &self.plugin_context(), &self.abort).or_else(|| self.mcp.tool(name, input, &self.abort)).unwrap_or_else(|| self.run_file_tool(id, name, input)),
         };
         match result {
@@ -1213,10 +1219,15 @@ impl Agent {
         self.saved_workflows().into_iter().find(|saved| saved.meta.name == name)
     }
 
+    /// `sessions/<id>/` beside the session file, for its pages and workflow runs; prune removes it with the file.
+    fn session_folder(&self) -> Option<PathBuf> {
+        self.session.path.as_ref().map(|path| path.with_extension(""))
+    }
+
     /// One directory per run next to the session file, so a resumed session can still relaunch its runs.
     fn workflow_runs_dir(&self) -> PathBuf {
-        match &self.session.path {
-            Some(path) => path.with_extension("").join("workflows"),
+        match self.session_folder() {
+            Some(folder) => folder.join("workflows"),
             None => std::env::temp_dir().join("agent-workflows").join(&self.session.id),
         }
     }
@@ -1424,6 +1435,40 @@ impl Agent {
         let message = input["message"].as_str().map(str::trim).filter(|m| !m.is_empty()).ok_or("message required.")?;
         emit(Event::Push(message.to_string()));
         Ok("Sent. It shows only while the terminal is in the background and notifications are on in /settings.".into())
+    }
+
+    /// Serves pages on this computer's tailnet address, so a terminal that attaches later from another device can open
+    /// them too, or on 127.0.0.1 without Tailscale or when that address cannot be bound.
+    fn page(&mut self, id: &str, input: &Value, emit: &mut dyn FnMut(Event)) -> Result<String, String> {
+        if !self.interactive {
+            return Err(ask::NO_UI.into());
+        }
+        let html = tools::page::render(input)?;
+        if self.pages.is_none() {
+            let tailnet = tailnet::self_address().and_then(|(ip, owner)| tools::page::Pages::start(ip, Some(owner)));
+            self.pages = Some(match tailnet {
+                Ok(pages) => pages,
+                Err(_) => tools::page::Pages::start(std::net::Ipv4Addr::LOCALHOST.into(), None)?,
+            });
+        }
+        let dir = match self.session_folder() {
+            Some(folder) => folder.join("pages"),
+            None => {
+                crate::process::private_dir(&tools::spill_dir())?;
+                tools::spill_dir().join("pages")
+            }
+        };
+        let pages = self.pages.as_ref().expect("started above");
+        let wait = input["wait"] == true;
+        let published = pages.publish(&dir, &html, wait)?;
+        emit(Event::OpenPage(published.url.clone()));
+        let shown = format!("Sent {} to the user's browser, saved as {}.", published.url, published.path.display());
+        if !wait {
+            return Ok(shown);
+        }
+        emit(Event::ToolProgress { id: id.into(), text: format!("waiting for {}, Esc cancels", published.url) });
+        let submitted = pages.wait(published.number, &self.abort).ok_or(ABORTED)?;
+        Ok(format!("{shown}\n{}", tools::truncate_head(tools::page::answer(input, &submitted), "page")))
     }
 
     fn ask_user(&mut self, input: &Value, emit: &mut dyn FnMut(Event)) -> Result<String, String> {
@@ -1963,7 +2008,7 @@ impl Agent {
         }
         // A one-shot run (-p, --headless, acp, a child) has no UI to notify or schedule in, and asks only through an editor: these tools only fail there.
         if !self.interactive {
-            const NEEDS_UI: [&str; 5] = ["PushNotification", "CronCreate", "CronDelete", "CronList", "ScheduleWakeup"];
+            const NEEDS_UI: [&str; 6] = ["PushNotification", "CronCreate", "CronDelete", "CronList", "ScheduleWakeup", "Page"];
             list.retain(|tool| !NEEDS_UI.contains(&tool["name"].as_str().unwrap_or_default()));
         }
         if !self.asks {
@@ -2192,13 +2237,23 @@ impl Session {
         Ok(copy)
     }
 
-    /// A new saved session holding every entry of `from` after its header.
+    /// A new saved session holding every entry of `from` after its header, and the pages it published.
     fn copy(dir: &Path, from: &Path, cwd: &Path, model: &str) -> Result<Session, String> {
         let session = Session::start(dir, true, cwd, model)?;
         let text = std::fs::read_to_string(from).map_err(|e| format!("Cannot read {}: {e}", from.display()))?;
         for line in text.lines().skip(1) {
             let entry: Value = serde_json::from_str(line).map_err(|e| format!("{}: {e}", from.display()))?;
             session.append(&entry)?;
+        }
+        let pages = from.with_extension("").join("pages");
+        if let Ok(files) = std::fs::read_dir(&pages) {
+            let copied = session.path.as_ref().expect("saved above").with_extension("").join("pages");
+            std::fs::create_dir_all(copied.parent().expect("a session file has a folder")).map_err(|e| format!("Cannot create {}: {e}", copied.display()))?;
+            crate::process::private_dir(&copied)?;
+            for file in files.flatten() {
+                // std::fs::copy keeps the 0600 of the page.
+                std::fs::copy(file.path(), copied.join(file.file_name())).map_err(|e| format!("Cannot copy {}: {e}", file.path().display()))?;
+            }
         }
         Ok(session)
     }
@@ -2323,6 +2378,8 @@ impl Session {
             if file.try_lock().is_ok() {
                 // A file that cannot be removed now is tried again at the next start.
                 let _ = std::fs::remove_file(&path);
+                // The session's folder: its pages and workflow runs.
+                let _ = std::fs::remove_dir_all(path.with_extension(""));
                 // Removed while still locked, so no resume can lock a session whose transcript is gone.
                 #[cfg(windows)]
                 let _ = std::fs::remove_file(path.with_extension("lock"));
@@ -3001,6 +3058,78 @@ mod tests {
     }
 
     #[test]
+    fn page_is_offered_only_to_an_interactive_session_and_saves_into_its_session() {
+        let home = std::env::temp_dir().join(format!("agent-page-tool-{}", std::process::id()));
+        let cwd = home.join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let (client, _) = crate::api::images::tests::fake_codex_client(&home, &[]);
+        let settings = crate::settings::load(&home).unwrap();
+        let session = Session::start(&home.join("sessions"), true, &cwd, "m").unwrap();
+        let mut agent = Agent::new(client, &settings, home.clone(), cwd, session, home.join("sessions"), None);
+        agent.tools = agent.tool_schemas();
+        let offers_page = |agent: &Agent| agent.system_and_tools().1.as_array().unwrap().iter().any(|tool| tool["name"] == "Page");
+        let headless = offers_page(&agent);
+        agent.interactive = true;
+        let interactive = offers_page(&agent);
+        agent.pages = Some(tools::page::Pages::start(std::net::Ipv4Addr::LOCALHOST.into(), None).unwrap());
+
+        let mut opened = Vec::new();
+        let (output, is_error) = agent.run_tool("t1", "Page", &json!({"title": "Plan", "html": "<p>hi</p>"}), &[], "show", &mut |event| {
+            if let Event::OpenPage(url) = event {
+                opened.push(url);
+            }
+        });
+        let saved = std::fs::read_to_string(home.join("sessions").join(&agent.session.id).join("pages/1.html"));
+        std::fs::remove_dir_all(&home).ok();
+
+        assert!(!headless, "a headless run, as ACP and subagents are, offers Page");
+        assert!(interactive);
+        assert!(!is_error, "{output}");
+        assert_eq!(opened.len(), 1);
+        assert!(output.starts_with(&format!("Sent {} to the user's browser, saved as ", opened[0])), "{output}");
+        assert!(saved.unwrap().contains("<h1>Plan</h1>\n<p>hi</p>"));
+    }
+
+    #[test]
+    fn a_waiting_page_returns_the_picked_mock_and_an_unsaved_session_keeps_pages_out_of_sessions() {
+        let home = std::env::temp_dir().join(format!("agent-page-wait-{}", std::process::id()));
+        let cwd = home.join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let (client, _) = crate::api::images::tests::fake_codex_client(&home, &[]);
+        let settings = crate::settings::load(&home).unwrap();
+        let session = Session::start(&home.join("sessions"), false, &cwd, "m").unwrap();
+        let mut agent = Agent::new(client, &settings, home.clone(), cwd, session, home.join("sessions"), None);
+        agent.tools = agent.tool_schemas();
+        agent.interactive = true;
+        agent.pages = Some(tools::page::Pages::start(std::net::Ipv4Addr::LOCALHOST.into(), None).unwrap());
+        let mocks = json!({"title": "Which?", "wait": true, "mocks": [{"name": "Dense", "html": "<i>a</i>"}, {"name": "Roomy", "html": "<i>b</i>"}]});
+
+        let abort = agent.abort.clone();
+        let mut reply = String::new();
+        let (output, is_error) = agent.run_tool("t1", "Page", &mocks, &[], "show", &mut |event| {
+            let Event::OpenPage(url) = event else { return };
+            let (address, path) = url["http://".len()..].split_once('/').unwrap();
+            let body = "{\"mock\":\"B\"}";
+            let mut stream = std::net::TcpStream::connect(address).unwrap();
+            write!(stream, "POST /{path} HTTP/1.1\r\nContent-Length: {}\r\n\r\n{body}", body.len()).unwrap();
+            std::io::Read::read_to_string(&mut stream, &mut reply).unwrap();
+            // A refused submit never arrives, so the wait would block forever.
+            abort.store(!reply.starts_with("HTTP/1.1 204 "), Ordering::Relaxed);
+        });
+        let saved = tools::spill_dir().join("pages/1.html");
+        let saved_exists = saved.exists();
+        std::fs::remove_dir_all(saved.parent().unwrap()).ok();
+        let sessions_has_pages = home.join("sessions").join(&agent.session.id).exists();
+        std::fs::remove_dir_all(&home).ok();
+
+        assert!(reply.starts_with("HTTP/1.1 204 "), "a page that is open may answer at once: {reply}");
+        assert!(!is_error, "{output}");
+        assert!(output.ends_with("\nThe user picked mock B: Roomy."), "{output}");
+        assert!(saved_exists, "{output}");
+        assert!(!sessions_has_pages, "--no-session wrote into the sessions folder");
+    }
+
+    #[test]
     fn image_generate_writes_the_png_and_attaches_it() {
         let home = std::env::temp_dir().join(format!("agent-image-tool-{}", std::process::id()));
         let cwd = home.join("project");
@@ -3098,8 +3227,12 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("agent-open-elsewhere-{}", std::process::id()));
         let open = Session::start(&dir, true, Path::new("/w"), "m").unwrap();
         open.append(&json!({"type": "message", "message": user("hi")})).unwrap();
+        let pages = open.path.as_ref().unwrap().with_extension("").join("pages");
+        std::fs::create_dir_all(&pages).unwrap();
+        std::fs::write(pages.join("1.html"), "<p>page</p>").unwrap();
         let (copy, history) = Session::resume(&dir, &open.id).unwrap();
         let copied = Session::history(copy.path.as_ref().unwrap()).unwrap();
+        let copied_page = std::fs::read_to_string(copy.path.as_ref().unwrap().with_extension("").join("pages/1.html"));
         let id = open.id.clone();
         drop(open);
         // A process other tests spawn holds a copy of the lock fd between its fork and exec on Linux, so retry briefly.
@@ -3115,6 +3248,7 @@ mod tests {
         assert_ne!(copy.id, id);
         assert_eq!(copy.forked_from.as_deref(), Some(id.as_str()));
         assert_eq!((history.messages, copied.messages), (vec![user("hi")], vec![user("hi")]));
+        assert_eq!(copied_page.unwrap(), "<p>page</p>", "the copy keeps the session's pages");
         assert_eq!((again.id, again.forked_from), (id, None));
     }
 
@@ -3127,14 +3261,17 @@ mod tests {
         drop(closed);
         let fresh = dir.join("fresh.jsonl");
         std::fs::write(&fresh, "").unwrap();
+        let (open_pages, closed_pages) = (open_path.with_extension("").join("pages"), closed_path.with_extension("").join("pages"));
+        std::fs::create_dir_all(&open_pages).unwrap();
+        std::fs::create_dir_all(&closed_pages).unwrap();
         let month_ago = std::time::SystemTime::now() - Duration::from_secs(30 * 24 * 3600);
         for path in [&open_path, &closed_path] {
             File::options().write(true).open(path).unwrap().set_modified(month_ago).unwrap();
         }
         Session::prune(&dir, Duration::from_secs(7 * 24 * 3600));
-        let left = (open_path.exists(), closed_path.exists(), fresh.exists());
+        let left = (open_path.exists(), closed_path.exists(), fresh.exists(), open_pages.exists(), closed_pages.exists());
         std::fs::remove_dir_all(&dir).unwrap();
-        assert_eq!(left, (true, false, true));
+        assert_eq!(left, (true, false, true, true, false));
     }
 
     #[test]

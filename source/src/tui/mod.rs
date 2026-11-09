@@ -670,6 +670,8 @@ struct App {
     clients: Vec<server::Client>,
     /// The client the last input came from, which /detach lets go.
     typing_client: Option<u64>,
+    /// A page published while no terminal was attached, for the next one that attaches to open.
+    pending_page: Option<String>,
     /// The frame size of the last draw, for mouse events and layout checks outside `frame`.
     size: (usize, usize),
     /// The OSC 0 sequence of the current title, sent again to each terminal that attaches.
@@ -1248,6 +1250,7 @@ impl App {
             transcribing: None,
             clients: Vec::new(),
             typing_client: None,
+            pending_page: None,
             size: (0, 0),
             title: String::new(),
             cmux: cmux::Cmux::detect(),
@@ -1551,6 +1554,9 @@ impl App {
             && let Some(sequence) = notify::program_status(status, |name| client.env(name))
         {
             client.queue(&sequence);
+        }
+        if let Some(url) = self.pending_page.take() {
+            client.send(json!({"open": url}));
         }
         self.clients.push(client);
         self.invalidate_screens();
@@ -4725,6 +4731,11 @@ impl App {
             // Only headless subagents emit it.
             Event::Outbox { .. } => {}
             Event::Push(text) => self.notify("", &text),
+            // The typing terminal may have detached, while a cron or wakeup turn still opens a page.
+            Event::OpenPage(url) => match self.clients.iter().find(|client| Some(client.id) == self.typing_client).or(self.clients.last()) {
+                Some(client) => client.send(json!({"open": url})),
+                None => self.pending_page = Some(url),
+            },
             // The output tail went to the model; /tasks shows it in full.
             Event::FollowUp { source, text } => self.system(&source, text.split_once('\n').map_or(text.as_str(), |(head, _)| head)),
             Event::TurnEnd { usage, context_tokens, .. } => {
@@ -5754,6 +5765,7 @@ fn tool_args(name: &str, input: &Value, cwd: &Path) -> String {
         }
         // Anchors mean nothing to the user; render_tool adds the +/- line counts instead.
         "Write" | "ReplaceLines" | "Edit" | "InsertLines" => relative(&field("file_path")),
+        "Page" => field("title"),
         "Grep" => match input["path"].as_str() {
             Some(path) => format!("{} in {}", field("pattern"), relative(path)),
             None => field("pattern"),
@@ -6598,6 +6610,31 @@ fn recording_line(elapsed: Duration) -> Line {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_page_published_with_no_terminal_attached_opens_in_the_next_one_that_attaches() {
+        let home = std::env::temp_dir().join(format!("agent-tui-page-{}", std::process::id()));
+        let cwd = home.join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let (client, _) = crate::api::images::tests::fake_codex_client(&home, &[]);
+        let settings = crate::settings::load(&home).unwrap();
+        let session = Session::start(&home.join("sessions"), false, &cwd, "m").unwrap();
+        let agent = Agent::new(client, &settings, home.clone(), cwd, session, home.join("sessions"), None);
+        let setup = Setup { home: home.clone(), settings, prompt: None, pick_session: false, modes_error: None, plugin_updates: Vec::new(), missing_cwd: None, placed: None };
+        let mut app = App::new(&agent, setup, mpsc::channel().0, mpsc::channel().0);
+
+        app.agent_event(Event::OpenPage("http://127.0.0.1:1/t/1".into()));
+        let (first, first_lines) = server::Client::fake(1);
+        app.add_client(first);
+        let (second, second_lines) = server::Client::fake(2);
+        app.add_client(second);
+        app.agent_event(Event::OpenPage("http://127.0.0.1:1/t/2".into()));
+        std::fs::remove_dir_all(&home).ok();
+
+        let opened = |lines: &mpsc::Receiver<String>| lines.try_iter().filter(|line| line.contains("\"open\"")).collect::<Vec<_>>();
+        assert_eq!(opened(&first_lines), [json!({"open": "http://127.0.0.1:1/t/1"}).to_string()]);
+        assert_eq!(opened(&second_lines), [json!({"open": "http://127.0.0.1:1/t/2"}).to_string()], "no terminal typed yet, so the last one attached opens it");
+    }
 
     #[test]
     fn bracketed_notice_prefix_becomes_the_source() {

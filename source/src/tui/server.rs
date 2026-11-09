@@ -82,6 +82,15 @@ impl Client {
     pub fn send(&self, message: Value) {
         let _ = self.lines.send(message.to_string());
     }
+
+    /// A client without a terminal, and the lines the session sends it.
+    #[cfg(test)]
+    pub fn fake(id: u64) -> (Client, Receiver<String>) {
+        let (lines, sent) = mpsc::channel();
+        let client =
+            Client { id, size: (80, 24), focused: None, place: wire::place(&json!({})), env: HashMap::new(), screen: Screen::new(), pending: String::new(), lines, writer: std::thread::spawn(|| {}) };
+        (client, sent)
+    }
 }
 
 /// Listens on `socket`, readable by this user only (on Windows, through the profile directory's ACL), and turns each connection into `Msg::Attached`,

@@ -599,11 +599,30 @@ fn relay_subagent(mut from_parent: BufReader<TcpStream>, parent: TcpStream, mut 
 }
 
 fn own_user() -> Result<u64, String> {
-    tailscale(&["status", "--json", "--peers=false"])?["Self"]["UserID"].as_u64().ok_or_else(|| "Tailscale reports no user for this computer.".into())
+    user_of(&tailscale(&["status", "--json", "--peers=false"])?)
+}
+
+fn user_of(status: &Value) -> Result<u64, String> {
+    status["Self"]["UserID"].as_u64().ok_or_else(|| "Tailscale reports no user for this computer.".into())
+}
+
+/// This computer's first Tailscale address and the user who owns it, for pages a browser on another device opens.
+/// A tagged computer has no owner `same_owner` admits, not even its own browser.
+pub fn self_address() -> Result<(IpAddr, u64), String> {
+    address_of(&tailscale(&["status", "--json", "--peers=false"])?)
+}
+
+fn address_of(status: &Value) -> Result<(IpAddr, u64), String> {
+    if status["Self"]["Tags"].as_array().is_some_and(|tags| !tags.is_empty()) {
+        return Err("This computer is a tagged Tailscale device.".into());
+    }
+    let owner = user_of(status)?;
+    let ip = status["Self"]["TailscaleIPs"].as_array().into_iter().flatten().find_map(|ip| ip.as_str()?.parse().ok());
+    Ok((ip.ok_or("Tailscale gives this computer no address yet.")?, owner))
 }
 
 /// The name of the device at `ip`, the first label of its MagicDNS name, when it is an untagged device of `owner`.
-fn same_owner(ip: IpAddr, owner: u64) -> Result<String, String> {
+pub(crate) fn same_owner(ip: IpAddr, owner: u64) -> Result<String, String> {
     let whois = tailscale(&["whois", "--json", &ip.to_string()])?;
     owned_by(&whois, owner)?;
     Ok(whois["Node"]["Name"].as_str().and_then(|dns| dns.split('.').next()).filter(|name| !name.is_empty()).map_or_else(|| ip.to_string(), str::to_string))
@@ -767,6 +786,13 @@ mod tests {
         assert_eq!(owned_by(&whois(8, Value::Null), 7), Err("logged in as eve@example.com".into()));
         assert_eq!(owned_by(&whois(7, json!(["tag:server"])), 7), Err("a tagged device".into()));
         assert!(owned_by(&json!({}), 7).is_err());
+    }
+
+    #[test]
+    fn a_tagged_computer_serves_pages_on_localhost_instead() {
+        let status = |tags: Value| json!({"Self": {"UserID": 7, "Tags": tags, "TailscaleIPs": ["100.64.0.1", "fd7a::1"]}});
+        assert_eq!(address_of(&status(Value::Null)), Ok(("100.64.0.1".parse().unwrap(), 7)));
+        assert_eq!(address_of(&status(json!(["tag:server"]))), Err("This computer is a tagged Tailscale device.".into()));
     }
 
     #[test]

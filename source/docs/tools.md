@@ -8,7 +8,7 @@ Built-in tools are defined in `tools/mod.rs` (`schemas` gives the JSON schema li
 | Shell | `Bash`, `TaskOutput`, `TaskStop` | `tools/bg.rs`, `tools/rtk.rs`, `tools/guard.rs` |
 | Agents | `Agent`, `WaitForAgents`, `SendMessage`, `ListAgents`, `Workflow` | `agent/subagent.rs`, `agent/workflow.rs`, `agent/peers.rs` |
 | Planning | `Todo`, `Goal`, `EnterPlanMode`, `ExitPlanMode`, `Skill` | `tools/todo.rs`, `tools/goal.rs`, `tools/plan.rs` |
-| User | `AskUserQuestion`, `PushNotification` | `tools/ask.rs`, `tui/notify.rs` |
+| User | `AskUserQuestion`, `PushNotification`, `Page` | `tools/ask.rs`, `tui/notify.rs`, `tools/page.rs` |
 | Time | `ScheduleWakeup`, `CronCreate`, `CronDelete`, `CronList` | `tools/cron.rs` |
 | Web | `WebSearch`, `WebFetch`, `GetSearchContent` | `tools/web/` |
 | Git | `EnterWorktree`, `ExitWorktree` | `worktree.rs` |

@@ -15,6 +15,7 @@ pub mod cron;
 pub mod goal;
 pub mod guard;
 pub mod hashline;
+pub mod page;
 pub mod plan;
 pub mod rtk;
 pub mod todo;
