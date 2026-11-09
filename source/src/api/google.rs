@@ -227,7 +227,7 @@ fn read(response: Result<ureq::http::Response<ureq::Body>, ureq::Error>, method:
 }
 
 /// Third-party text bound for the terminal, without escapes.
-fn shown(text: &str) -> String {
+pub(crate) fn shown(text: &str) -> String {
     text.trim().chars().filter(|c| !c.is_control()).take(500).collect()
 }
 
@@ -636,9 +636,15 @@ pub fn parse_stream(reader: &mut dyn BufRead, owner: &str, abort: &AtomicBool, o
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::io::{Read, Write};
+
+    /// The Antigravity app on local endpoints; the built-in version stands, so no request goes to the update manifest.
+    pub(crate) fn app_at(base: &str, fallback: &str) -> App {
+        let _ = ANTIGRAVITY_LATEST.set(ANTIGRAVITY_VERSION.into());
+        App { base: base.to_string().leak(), fallback: Some(fallback.to_string().leak()), ..ANTIGRAVITY_APP }
+    }
 
     fn pending() -> Pending {
         Pending { url: String::new(), verifier: "v".into(), state: "s1".into() }

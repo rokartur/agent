@@ -1445,19 +1445,28 @@ impl Agent {
     fn generate_image(&mut self, input: &Value) -> Result<String, String> {
         let prompt = tools::hashline::str_arg(input, "prompt")?;
         let path = tools::hashline::resolve(&self.cwd, tools::hashline::str_arg(input, "file_path")?);
+        let images: Option<Vec<String>> = serde_json::from_value(input["images"].clone()).map_err(|_| "\"images\" must be an array of paths.")?;
         let mut inputs = Vec::new();
-        for image in input["images"].as_array().into_iter().flatten().filter_map(Value::as_str) {
-            inputs.push(crate::image::block(&tools::hashline::resolve(&self.cwd, image))?);
+        for image in images.unwrap_or_default() {
+            inputs.push(crate::image::block(&tools::hashline::resolve(&self.cwd, &image))?);
         }
-        let bytes = self.client.generate_image(&self.image_model, prompt, &inputs, &self.abort)?;
+        // Before the request: an image drawn for a target that cannot take it is paid for and lost.
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| format!("Cannot create {}: {e}", parent.display()))?;
         }
-        std::fs::write(&path, &bytes).map_err(|e| format!("Cannot write {}: {e}", path.display()))?;
-        let block = crate::image::block(&path)?;
-        let media_type = block["source"]["media_type"].as_str().unwrap_or_default().to_string();
-        self.result_blocks = vec![block];
-        let mut text = format!("Wrote {} ({media_type}) to {}; it is attached as an image.", tools::format_size(bytes.len()), path.display());
+        tools::check_target(&path)?;
+        let bytes = self.client.generate_image(&self.image_model, prompt, &inputs, &self.abort)?;
+        let media_type = crate::image::sniffed_media_type(&bytes).ok_or("The image model answered with something that is not a PNG, JPEG, GIF or WebP image.")?;
+        tools::hashline::replace_file(&path, &bytes)?;
+        let mut text = format!("Wrote {} ({media_type}) to {}", tools::format_size(bytes.len()), path.display());
+        match crate::image::block(&path) {
+            Ok(block) => {
+                self.result_blocks = vec![block];
+                text.push_str("; it is attached as an image.");
+            }
+            // The file is written; an error here would have the model pay for the same image again.
+            Err(error) => text.push_str(&format!("; it could not be attached: {error}")),
+        }
         // A Gemini image model answers in the format it likes, which need not be the one the path's extension names.
         if let Some(named) = crate::image::media_type(&path).filter(|named| *named != media_type) {
             text.push_str(&format!(" The extension says {named}: rename the file if that matters."));
@@ -1971,7 +1980,7 @@ impl Agent {
         tools::schemas(
             &subagent::swarm_prompt(&self.agent_dir, &self.cwd, prompt::is_trusted(&self.trusted_projects, &self.cwd), &self.subagent_effort),
             context_tree_query,
-            self.client.generates_images(),
+            self.client.generates_images(&self.image_model),
         )
     }
 
@@ -2955,8 +2964,7 @@ mod tests {
         let home = std::env::temp_dir().join(format!("agent-image-tool-{}", std::process::id()));
         let cwd = home.join("project");
         std::fs::create_dir_all(&cwd).unwrap();
-        let reply = json!({"data": [{"b64_json": crate::image::base64(&crate::image::tests::PIXEL)}]}).to_string();
-        let (client, requests) = crate::api::images::tests::fake_codex_client(&home, &reply);
+        let (client, requests) = crate::api::images::tests::fake_codex_client(&home, &[(200, &crate::api::images::tests::pixel_reply())]);
         let settings = crate::settings::load(&home).unwrap();
         let session = Session::start(&home.join("sessions"), false, &cwd, "m").unwrap();
         let mut agent = Agent::new(client, &settings, home.clone(), cwd.clone(), session, home.join("sessions"), None);
@@ -2968,15 +2976,21 @@ mod tests {
         let written = std::fs::read(cwd.join("art/logo.png"));
         let misnamed = json!({"prompt": "a red dot", "file_path": "art/logo.jpg"});
         let (misnamed_output, _) = agent.run_tool("t2", "ImageGenerate", &misnamed, &[cwd.join("art/logo.jpg")], "draw", &mut |_| {});
+        let refused =
+            [json!({"prompt": "x", "file_path": "art"}), json!({"prompt": "x", "file_path": "a.png", "images": "art/logo.png"}), json!({"prompt": "x", "file_path": "a.png", "images": ["art"]})]
+                .map(|input| agent.run_tool("t3", "ImageGenerate", &input, &[cwd.join("a.png")], "draw", &mut |_| {}));
         std::fs::remove_dir_all(&home).ok();
 
         assert!(!is_error, "{output}");
         assert_eq!(written.unwrap(), crate::image::tests::PIXEL);
-        assert!(output.starts_with("Wrote 70B (image/png) to "), "{output}");
-        assert!(output.ends_with("; it is attached as an image."), "{output}");
+        assert_eq!(output, format!("Wrote 70B (image/png) to {}; it is attached as an image.", cwd.join("art/logo.png").display()));
         assert_eq!(agent.result_blocks[0]["source"]["media_type"], "image/png");
         assert_eq!(requests.recv().unwrap().2["prompt"], "a red dot");
         assert!(misnamed_output.ends_with(" The extension says image/jpeg: rename the file if that matters."), "{misnamed_output}");
+        let art = cwd.join("art");
+        let refusals = [format!("{} is not a regular file.", art.display()), "\"images\" must be an array of paths.".into(), format!("{} is not a regular file.", art.display())];
+        assert_eq!(refused, refusals.map(|refusal| (refusal, true)));
+        assert_eq!(requests.try_iter().count(), 1, "only the misnamed call reached the image model");
     }
 
     #[test]

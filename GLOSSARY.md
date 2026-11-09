@@ -51,7 +51,7 @@ Every model the configured accounts can use, as listed in `/model`.
 _Avoid_: Model list, registry
 
 **Image model**:
-The model the `ImageGenerate` tool draws with, on whichever account has one: `gpt-image-2` behind a ChatGPT login, or the image model an Antigravity account lists. Chosen by `image_model`; never in the catalog.
+The model the `ImageGenerate` tool draws with: `gpt-image-2` behind a ChatGPT login, else the image model an Antigravity account lists. The `image_model` setting overrides it; never in the catalog.
 _Avoid_: Image generator, imagegen
 
 ## Control

@@ -26,7 +26,8 @@ pub struct Settings {
     pub permission_mode: Mode,
     /// The auto-mode reviewer; empty means `small_model`.
     pub reviewer_model: String,
-    /// ImageGenerate's model: `gpt-image-2` (a ChatGPT login) or `google-antigravity/<id>`; empty picks the first account that has one.
+    /// ImageGenerate's model: a Codex one (`gpt-image-2`, `openai-codex/` optional) or `google-antigravity/<id>`; empty takes
+    /// gpt-image-2 on a ChatGPT login, else the first image model an Antigravity account lists.
     pub image_model: String,
     /// Session titles, long Video descriptions and compaction, and the reviewer and condense when theirs is empty;
     /// empty means the provider's small model.

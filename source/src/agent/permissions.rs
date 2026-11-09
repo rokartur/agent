@@ -305,6 +305,8 @@ mod tests {
         let files = [PathBuf::from("/p/dest.rs"), PathBuf::from("/p/source.rs")];
         let request = request_for("InsertLines", &json!({"anchor": "a"}), &files).unwrap();
         assert_eq!(request.detail, "InsertLines in /p/dest.rs\n/p/source.rs");
+        let image = request_for("ImageGenerate", &json!({"prompt": "a logo", "file_path": "a.png"}), &[PathBuf::from("/p/a.png")]).unwrap();
+        assert_eq!((image.detail.as_str(), image.grant.as_str()), ("ImageGenerate in /p/a.png", "edit:/p/a.png"));
         let mut grants = Grants::default();
         grants.add(&request_for("InsertLines", &json!({"anchor": "bogus1"}), &[]).unwrap());
         assert!(!grants.allows(&request_for("InsertLines", &json!({"anchor": "bogus2"}), &[]).unwrap()));

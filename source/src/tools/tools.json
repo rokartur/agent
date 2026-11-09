@@ -653,7 +653,7 @@
   },
   {
     "name": "ImageGenerate",
-    "description": "Generate an image with an image model (gpt-image-2 on a ChatGPT login, a Gemini image model on Antigravity) and write it to `file_path`. Pass `images` to edit them: the prompt then says what to change. The result shows the written image.",
+    "description": "Generate an image with the image model of a ChatGPT or Antigravity login and write it to `file_path`. Pass `images` to edit them: the prompt then says what to change. The result shows the written image.",
     "input_schema": {
       "type": "object",
       "properties": {

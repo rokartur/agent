@@ -116,7 +116,7 @@ mod tests {
 
     #[test]
     fn blocks_edits_and_state_changing_commands() {
-        for tool in ["Write", "Edit", "Agent", "EnterWorktree", "my-plugin__lookup", "mcp__github__create_issue"] {
+        for tool in ["Write", "Edit", "ImageGenerate", "Agent", "EnterWorktree", "my-plugin__lookup", "mcp__github__create_issue"] {
             assert!(blocked(tool, &json!({"path": "a"})).is_some(), "{tool}");
         }
         for tool in ["Read", "Grep", "Goal", "TaskStop", "AskUserQuestion", "Skill"] {

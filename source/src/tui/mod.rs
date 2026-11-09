@@ -3080,7 +3080,7 @@ impl App {
                         match self.client.remove(&account.provider, &account.name) {
                             Ok(()) => {
                                 self.system("logout", format!("Removed {}.", account.name));
-                                self.reload_models();
+                                self.accounts_changed();
                             }
                             Err(error) => self.push(Item::Error(error)),
                         }
@@ -3152,7 +3152,7 @@ impl App {
                 match self.client.add(account) {
                     Ok(()) => {
                         self.system("login", format!("Saved {name}."));
-                        self.reload_models();
+                        self.accounts_changed();
                     }
                     Err(error) => return self.push(Item::Error(error)),
                 }
@@ -3167,7 +3167,7 @@ impl App {
 
     /// Lists the models again after /login or /logout changed the accounts, so /model shows them without a restart,
     /// and has the agent apply the settings again, so ImageGenerate follows the accounts that can draw.
-    fn reload_models(&self) {
+    fn accounts_changed(&self) {
         let (client, events) = (self.client.clone(), self.events.clone());
         std::thread::spawn(move || {
             for failure in client.load_catalog() {

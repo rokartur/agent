@@ -291,16 +291,7 @@ fn write(input: &Value, cwd: &Path, editor: Option<&dyn hashline::EditorFiles>) 
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("Cannot create {}: {e}", parent.display()))?;
     }
-    // Reading a FIFO blocks and /dev/zero never ends; abort cannot stop either.
-    if path.exists() && !path.is_file() {
-        return Err(format!("{} is not a regular file.", path.display()));
-    }
-    // The rename in replace_file would succeed over a file the user cannot even read.
-    if let Err(e) = std::fs::File::open(&path)
-        && e.kind() != std::io::ErrorKind::NotFound
-    {
-        return Err(format!("Cannot read {}: {e}", path.display()));
-    }
+    check_target(&path)?;
     match editor.filter(|editor| editor.serves(&path)) {
         Some(editor) => editor.write(&path, content)?,
         None => hashline::replace_file(&path, content.as_bytes())?,
@@ -309,6 +300,21 @@ fn write(input: &Value, cwd: &Path, editor: Option<&dyn hashline::EditorFiles>) 
     let path = path.canonicalize().unwrap_or(path);
     // No echo of the content: it is already in the call, and every later turn would pay for it twice.
     Ok(format!("Wrote {} lines to {}.", content.lines().count(), path.display()))
+}
+
+/// Refuses a file a write must not replace: one that is not a regular file, or one the user cannot read.
+pub(crate) fn check_target(path: &Path) -> Result<(), String> {
+    // Reading a FIFO blocks and /dev/zero never ends; abort cannot stop either.
+    if path.exists() && !path.is_file() {
+        return Err(format!("{} is not a regular file.", path.display()));
+    }
+    // The rename in replace_file would succeed over a file the user cannot even read.
+    if let Err(e) = std::fs::File::open(path)
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        return Err(format!("Cannot read {}: {e}", path.display()));
+    }
+    Ok(())
 }
 
 /// pi file-search's rg argv as JSON events: the pattern after `--`, counts clamped.

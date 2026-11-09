@@ -850,21 +850,11 @@ impl Client {
         Ok(())
     }
 
-    /// Name and provider account id of the account the next request is likely to use: the current pick, the pinned one, or the first.
+    /// Name and provider account id of the account `likely_account` names.
     pub fn account(&self, provider: &str) -> Option<(String, Option<String>)> {
-        let account = self.likely_account(provider)?;
-        Some((account.name.clone(), account.account_id().map(String::from)))
-    }
-
-    fn likely_account(&self, provider: &str) -> Option<Account> {
         let state = self.state.lock().unwrap();
-        let name = state.current.get(provider).or_else(|| state.pinned.get(provider));
-        let mut candidates = state.accounts.iter().filter(|a| a.provider == provider);
-        match name {
-            Some(name) => candidates.find(|a| &a.name == name),
-            None => candidates.next(),
-        }
-        .cloned()
+        let account = likely_account(&state, provider)?;
+        Some((account.name.clone(), account.account_id().map(String::from)))
     }
 
     /// The account's last fetched subscription windows; None for API keys and before the first fetch.
@@ -981,6 +971,16 @@ fn status(state: &State, account: &Account, now: Instant) -> AccountStatus {
 
 fn key(account: &Account) -> String {
     format!("{}/{}", account.provider, account.name)
+}
+
+/// The account the next request to `provider` is likely to use: the current pick, the pinned one, or the first.
+fn likely_account<'a>(state: &'a State, provider: &str) -> Option<&'a Account> {
+    let name = state.current.get(provider).or_else(|| state.pinned.get(provider));
+    let mut candidates = state.accounts.iter().filter(|a| a.provider == provider);
+    match name {
+        Some(name) => candidates.find(|a| &a.name == name),
+        None => candidates.next(),
+    }
 }
 
 pub(crate) fn models_agent() -> ureq::Agent {
