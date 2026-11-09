@@ -321,7 +321,17 @@ pub fn model_key(model: &Model) -> String {
 /// Writes the change a /settings edit made from `before` to `after` over the file as it is now, under its lock,
 /// so another agent's edits to other keys survive.
 pub fn save_change(home: &Path, before: &Settings, after: &Settings) -> Result<(), String> {
-    crate::api::accounts::locked(&path(home), || save(home, &saved_after(before, after, &load(home)?)))
+    crate::api::accounts::locked(&path(home), || {
+        let file = read(home)?;
+        let mut next = to_json(&saved_after(before, after, &from_json(&file)));
+        // A key this version does not know was written by a newer agent; it passes through.
+        for (key, value) in file.as_object().into_iter().flatten() {
+            if next.get(key).is_none() {
+                next[key] = value.clone();
+            }
+        }
+        save(home, &next)
+    })
 }
 
 /// `saved` with only the keys a /settings edit changed from `before` to `after`, objects merged key by key. So the
@@ -366,13 +376,16 @@ pub fn path(home: &Path) -> PathBuf {
 
 /// Defaults for a missing file; an unreadable or broken one is an error, so the next save cannot write defaults over it.
 pub fn load(home: &Path) -> Result<Settings, String> {
+    Ok(from_json(&read(home)?))
+}
+
+fn read(home: &Path) -> Result<Value, String> {
     let path = path(home);
-    let own: Value = match std::fs::read_to_string(&path) {
-        Ok(text) => serde_json::from_str(&text).map_err(|e| format!("{} is broken: {e}. Fix or remove it by hand.", path.display()))?,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Value::Null,
-        Err(e) => return Err(format!("Cannot read {}: {e}", path.display())),
-    };
-    Ok(from_json(&own))
+    match std::fs::read_to_string(&path) {
+        Ok(text) => serde_json::from_str(&text).map_err(|e| format!("{} is broken: {e}. Fix or remove it by hand.", path.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Value::Null),
+        Err(e) => Err(format!("Cannot read {}: {e}", path.display())),
+    }
 }
 
 fn from_json(own: &Value) -> Settings {
@@ -511,11 +524,11 @@ fn default_lsp_servers() -> BTreeMap<String, LspServer> {
 const SCHEMA_URL: &str = "https://raw.githubusercontent.com/rokartur/agent/main/source/src/settings.schema.json";
 
 /// Callers hold the file lock; see `save_change`.
-fn save(home: &Path, settings: &Settings) -> Result<(), String> {
+fn save(home: &Path, settings: &Value) -> Result<(), String> {
     let path = path(home);
     std::fs::create_dir_all(path.parent().unwrap()).map_err(|e| format!("Cannot create {}: {e}", path.display()))?;
     // plugin_settings and headroom_token hold tokens.
-    crate::api::accounts::write_private(&path, &format!("{:#}\n", to_json(settings)))
+    crate::api::accounts::write_private(&path, &format!("{settings:#}\n"))
 }
 
 fn to_json(settings: &Settings) -> Value {
@@ -789,15 +802,31 @@ mod tests {
         settings.mid_turn = "queued".into();
         settings.on_start = vec!["echo started".into()];
         settings.lsp.get_mut("rust").unwrap().command = "ra-multiplex".into();
-        save(&home, &settings).unwrap();
+        save(&home, &to_json(&settings)).unwrap();
         assert_eq!(load(&home).unwrap(), settings);
         std::fs::remove_dir_all(&home).unwrap();
     }
 
     #[test]
+    fn a_save_keeps_keys_this_version_does_not_know() {
+        let home = std::env::temp_dir().join(format!("agent-settings-unknown-{}", std::process::id()));
+        std::fs::create_dir_all(path(&home).parent().unwrap()).unwrap();
+        std::fs::write(path(&home), r#"{"thinking": "low", "added_by_a_newer_agent": true, "another": {"nested": [1, 2]}}"#).unwrap();
+        let before = load(&home).unwrap();
+        let mut after = before.clone();
+        after.prune_sessions = "7d".into();
+        save_change(&home, &before, &after).unwrap();
+        let written: Value = serde_json::from_str(&std::fs::read_to_string(path(&home)).unwrap()).unwrap();
+        std::fs::remove_dir_all(&home).unwrap();
+        assert_eq!(written["added_by_a_newer_agent"], true);
+        assert_eq!(written["another"], json!({"nested": [1, 2]}));
+        assert_eq!((written["prune_sessions"].as_str(), written["thinking"].as_str()), (Some("7d"), Some("low")));
+    }
+
+    #[test]
     fn settings_schema_matches_what_save_writes() {
         let home = std::env::temp_dir().join(format!("agent-settings-schema-{}", std::process::id()));
-        save(&home, &load(&home).unwrap()).unwrap();
+        save(&home, &to_json(&load(&home).unwrap())).unwrap();
         let written: Value = serde_json::from_str(&std::fs::read_to_string(path(&home)).unwrap()).unwrap();
         std::fs::remove_dir_all(&home).unwrap();
         let schema: Value = serde_json::from_str(include_str!("settings.schema.json")).unwrap();
