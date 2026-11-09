@@ -63,13 +63,18 @@ pub fn create(cwd: &Path, name: &str) -> Result<Created, String> {
 fn hide_worktrees_dir(main: &Path) -> Result<(), String> {
     const PATTERN: &str = "/.agents/worktrees/";
     let exclude = main.join(git(main, &["rev-parse", "--git-path", "info/exclude"])?.trim());
-    let current = std::fs::read_to_string(&exclude).unwrap_or_default();
-    if current.lines().any(|line| line == PATTERN) {
+    let current = match std::fs::read(&exclude) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(e) => return Err(format!("Cannot read {}: {e}", exclude.display())),
+    };
+    if current.split(|byte| *byte == b'\n').any(|line| line == PATTERN.as_bytes()) {
         return Ok(());
     }
-    let separator = if current.is_empty() || current.ends_with('\n') { "" } else { "\n" };
+    let separator = if current.is_empty() || current.ends_with(b"\n") { "" } else { "\n" };
     std::fs::create_dir_all(exclude.parent().ok_or("info/exclude has no parent")?).map_err(|e| e.to_string())?;
-    std::fs::write(&exclude, format!("{current}{separator}{PATTERN}\n")).map_err(|e| format!("Cannot write {}: {e}", exclude.display()))
+    let mut file = std::fs::OpenOptions::new().create(true).append(true).open(&exclude).map_err(|e| format!("Cannot write {}: {e}", exclude.display()))?;
+    std::io::Write::write_all(&mut file, format!("{separator}{PATTERN}\n").as_bytes()).map_err(|e| format!("Cannot write {}: {e}", exclude.display()))
 }
 
 /// Uncommitted files and commits made since `created.base`, as git lists them; empty when there are none.
@@ -136,6 +141,21 @@ mod tests {
         std::fs::remove_file(checkout.join("notes.md")).unwrap();
         remove(&main, &checkout).unwrap();
         assert!(!checkout.exists());
+        std::fs::remove_dir_all(&main).unwrap();
+    }
+
+    #[test]
+    fn creating_a_worktree_keeps_exclude_rules_that_are_not_utf8() {
+        let main = std::env::temp_dir().join(format!("agent-worktree-exclude-{}", std::process::id()));
+        _ = std::fs::remove_dir_all(&main);
+        std::fs::create_dir_all(&main).unwrap();
+        for args in [&["init", "-q", "-b", "main"][..], &["-c", "user.email=a@b.c", "-c", "user.name=a", "commit", "-q", "--allow-empty", "-m", "a"]] {
+            git(&main, args).unwrap();
+        }
+        std::fs::write(main.join(".git/info/exclude"), b".env\n\xff\xfe\n").unwrap();
+        create(&main, "one").unwrap();
+        create(&main, "two").unwrap();
+        assert_eq!(std::fs::read(main.join(".git/info/exclude")).unwrap(), b".env\n\xff\xfe\n/.agents/worktrees/\n");
         std::fs::remove_dir_all(&main).unwrap();
     }
 
