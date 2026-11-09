@@ -6,7 +6,7 @@ main() {
   case "$(uname -s)" in
     Darwin) os=macos ;;
     Linux) os=linux ;;
-    *) echo "agent: this script installs on macOS and Linux; on Windows download agent-windows-x86_64.exe from https://github.com/rokartur/agent/releases/latest." >&2; exit 1 ;;
+    *) echo "agent: this script installs on macOS and Linux; on Windows download it from https://github.com/rokartur/agent/releases/latest." >&2; exit 1 ;;
   esac
   case "$(uname -m)" in
     arm64 | aarch64) arch=aarch64 ;;
