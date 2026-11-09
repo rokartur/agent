@@ -596,6 +596,8 @@ pub(super) fn replace_file(path: &Path, new: &[u8]) -> Result<(), String> {
         file.set_permissions(std::fs::metadata(&path)?.permissions())?;
         file.write_all(new)?;
         file.sync_all()?;
+        // Closed first: ReplaceFileW refuses a replacement that is still open (os error 32).
+        drop(file);
         crate::process::replace_with(&path, &temp)
     };
     write().map_err(|e| {
