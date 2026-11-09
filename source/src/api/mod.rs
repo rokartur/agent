@@ -270,13 +270,14 @@ impl Client {
                 }
                 return fetch_models(request, copilot::parse_models);
             }
-            (Secret::OAuth(tokens), provider @ (google::GEMINI_CLI | google::ANTIGRAVITY)) => return google::models(google::app(provider), tokens),
-            (Secret::OAuth(tokens), _) => http
+            (Secret::OAuth(tokens), google::ANTIGRAVITY) => return google::models(&google::ANTIGRAVITY_APP, tokens),
+            (Secret::OAuth(tokens), "openai-codex") => http
                 // An old client_version gets an empty list, a missing one a 400.
                 .get(format!("{}/codex/models?client_version=0.160.0", self.chatgpt_base))
                 .header("authorization", format!("Bearer {}", tokens.access))
                 .header("chatgpt-account-id", tokens.account_id.as_deref().unwrap_or_default()),
             (Secret::ApiKey(_), provider) => return Err(format!("{provider} accounts need /login, not an API key.")),
+            (Secret::OAuth(_), provider) => return Err(format!("{provider} accounts are no longer supported. Remove this account with /logout.")),
         };
         let parse = if account.provider == "anthropic" { models::parse_anthropic } else { models::parse_codex };
         fetch_models(request, parse)
@@ -554,7 +555,7 @@ impl Client {
                     "anthropic" => oauth::refresh_claude(&tokens.refresh),
                     "openai-codex" => oauth::refresh_codex(&tokens.refresh),
                     copilot::PROVIDER => copilot::refresh(&tokens.refresh),
-                    provider @ (google::GEMINI_CLI | google::ANTIGRAVITY) => google::refresh(google::app(provider), &tokens.refresh),
+                    google::ANTIGRAVITY => google::refresh(&google::ANTIGRAVITY_APP, &tokens.refresh),
                     other => Err(format!("{other} has no OAuth refresh.")),
                 }
                 .map_err(|e| format!("Cannot refresh {}: {e} Use /login again.", slot.name))?;
@@ -631,7 +632,7 @@ impl Client {
         let custom = self.custom_provider(&account.provider);
         let without_google_thoughts;
         let has_google_thoughts = || request["messages"].as_array().into_iter().flatten().filter_map(|m| m["content"].as_array()).flatten().any(google::is_google_thought);
-        let request = if matches!(account.provider.as_str(), google::GEMINI_CLI | google::ANTIGRAVITY) || !has_google_thoughts() {
+        let request = if account.provider == google::ANTIGRAVITY || !has_google_thoughts() {
             request
         } else {
             without_google_thoughts = drop_google_thoughts(request);
@@ -723,15 +724,14 @@ impl Client {
                 }
                 (call, body)
             }
-            (provider @ (google::GEMINI_CLI | google::ANTIGRAVITY), Secret::OAuth(tokens)) => {
-                let app = google::app(provider);
+            (google::ANTIGRAVITY, Secret::OAuth(tokens)) => {
+                let app = &google::ANTIGRAVITY_APP;
                 let call_to = |base: &str| {
-                    let mut call =
-                        self.http.post(format!("{base}/v1internal:streamGenerateContent?alt=sse")).header("authorization", format!("Bearer {}", tokens.access)).header("accept", "text/event-stream");
-                    for (name, value) in google::headers(app, google::wire_model(request)) {
-                        call = call.header(name, value);
-                    }
-                    call
+                    self.http
+                        .post(format!("{base}/v1internal:streamGenerateContent?alt=sse"))
+                        .header("authorization", format!("Bearer {}", tokens.access))
+                        .header("accept", "text/event-stream")
+                        .header("user-agent", google::user_agent())
                 };
                 fallback = app.fallback.map(call_to);
                 (call_to(app.base), google::request(app, request, tokens.account_id.as_deref().unwrap_or_default(), &self.cache_key))
@@ -773,7 +773,7 @@ impl Client {
             _ if custom.as_ref().is_some_and(|custom| custom.api == CustomApi::OpenAi) => openai_chat::parse_stream(&mut reader, abort, on_delta),
             copilot::PROVIDER => openai_chat::parse_stream(&mut reader, abort, on_delta),
             "openai-codex" => codex::parse_stream(&mut reader, abort, on_delta),
-            provider @ (google::GEMINI_CLI | google::ANTIGRAVITY) => google::parse_stream(&mut reader, &google::signature_owner(provider, google::wire_model(request)), abort, on_delta),
+            google::ANTIGRAVITY => google::parse_stream(&mut reader, &google::signature_owner(google::ANTIGRAVITY, google::wire_model(request)), abort, on_delta),
             _ => parse_stream(&mut reader, abort, on_delta),
         }
     }
@@ -1873,6 +1873,20 @@ mod tests {
         let sent = requests.recv_timeout(Duration::from_secs(5)).unwrap();
         assert_eq!(sent["model"], "MiniMax-M2");
         assert!(sent.get("thinking").is_none() && sent.get("speed").is_none(), "{sent}");
+    }
+
+    #[test]
+    fn a_saved_gemini_cli_account_lists_no_models_and_never_reaches_codex() {
+        let home = std::env::temp_dir().join(format!("agent-gemini-cli-{}", std::process::id()));
+        let mut client = Client::new(&home).unwrap();
+        let (base, requests) = mock_provider(&[(200, r#"{"models":[]}"#)]);
+        client.chatgpt_base = base;
+        let tokens = oauth::Tokens { access: "a".into(), refresh: "r".into(), expires: u64::MAX, account_id: None };
+        let listed = client.list_models(&Account { provider: "google-gemini-cli".into(), name: "gemini".into(), secret: Secret::OAuth(tokens) });
+        std::fs::remove_dir_all(&home).ok();
+
+        assert_eq!(listed.err().unwrap(), "google-gemini-cli accounts are no longer supported. Remove this account with /logout.");
+        assert!(requests.recv_timeout(std::time::Duration::from_millis(200)).is_err());
     }
 
     #[test]

@@ -7157,7 +7157,7 @@ mod tests {
         };
         let quota = |model: &str, used| crate::api::accounts::ModelQuota { model: model.into(), used, resets_at: None };
         let gemini = AccountView {
-            provider: "google-gemini-cli".into(),
+            provider: "google-antigravity".into(),
             usage: Some(crate::api::accounts::Usage { five_hour: None, seven_day: 80.0, resets_at: None, models: vec![quota("gemini-2.5-flash", 10.0), quota("gemini-2.5-pro", 80.0)] }),
             ..account("gemini", true, Some("proj-1"), None)
         };
@@ -7174,15 +7174,15 @@ mod tests {
         assert_eq!(
             table,
             [
-                ("  Subscription", "Provider            5h   7d  Pinned  usagefleet  Status".to_string()),
-                ("✓ claudescom", "anthropic          21%  73%          uf_tVdC…    ok".to_string()),
-                ("  rokartur", "anthropic            ?    ?  pinned              Usage request failed (401).".to_string()),
-                ("  ultra", "anthropic            -  41%                      rate limited".to_string()),
-                ("  gemini", "google-gemini-cli    -    -                      checking…".to_string()),
+                ("  Subscription", "Provider             5h   7d  Pinned  usagefleet  Status".to_string()),
+                ("✓ claudescom", "anthropic           21%  73%          uf_tVdC…    ok".to_string()),
+                ("  rokartur", "anthropic             ?    ?  pinned              Usage request failed (401).".to_string()),
+                ("  ultra", "anthropic             -  41%                      rate limited".to_string()),
+                ("  gemini", "google-antigravity    -    -                      checking…".to_string()),
                 ("      gemini-2.5-flash 10%", String::new()),
                 ("      gemini-2.5-pro 80%", String::new()),
                 ("", String::new()),
-                ("  API key", "Provider                     Pinned              Status".to_string()),
+                ("  API key", "Provider                      Pinned              Status".to_string()),
                 ("  claudescom-api", "anthropic".to_string()),
             ]
         );

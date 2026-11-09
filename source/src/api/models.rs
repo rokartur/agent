@@ -4,7 +4,7 @@ use serde_json::{Value, json};
 const CODEX_MAX_TOKENS: u64 = 128_000;
 
 /// The providers this agent can talk to.
-pub const PROVIDERS: [&str; 6] = ["anthropic", "openai-codex", "openrouter", "github-copilot", "google-gemini-cli", "google-antigravity"];
+pub const PROVIDERS: [&str; 5] = ["anthropic", "openai-codex", "openrouter", "github-copilot", "google-antigravity"];
 pub struct Preset {
     pub name: &'static str,
     pub base_url: &'static str,
