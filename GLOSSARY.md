@@ -79,8 +79,12 @@ A folder with `plugin.json` and a program that speaks JSON-RPC over stdin, addin
 _Avoid_: Extension, add-on
 
 **Skill**:
-A folder with a `SKILL.md` of instructions the model loads when a task matches its description.
+A folder with a `SKILL.md` of instructions the model loads when a task matches its description. Its body takes Claude Code's placeholders: `$ARGUMENTS`, `$ARGUMENTS[N]` and `$N` from 0, `$name` for the names in `arguments`, and `${CLAUDE_SKILL_DIR}`; `\$` keeps one literal. Args no placeholder takes follow as `ARGUMENTS: <args>`.
 _Avoid_: Prompt, recipe
+
+**Sub-skill**:
+A skill folder inside another skill's folder, named `parent:child`. The system prompt names it only on its parent's line; loading the parent lists it with its description.
+_Avoid_: Nested skill, child skill
 
 **Profile**:
 A named set of skills, by name or `owner/repo` source, in `skill_profiles`; its skills load only while `/profile:<name>` has it on, even ones in `disabled_skills`. Skills no profile holds load unless disabled.

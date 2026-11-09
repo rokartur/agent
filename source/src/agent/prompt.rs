@@ -158,6 +158,17 @@ pub struct Skill {
     pub shadows: Option<PathBuf>,
     /// The `owner/repo` that `npx skills` installed it from, read from `.skill-lock.json`.
     pub source: Option<String>,
+    /// Named parameters from `arguments:`, filled in order from the args as `$name` in the body.
+    pub arguments: Vec<String>,
+    /// `argument-hint:`, or the `arguments` names in brackets.
+    pub argument_hint: Option<String>,
+}
+
+impl Skill {
+    /// A `SKILL.md` nested in another skill's directory is named `parent:child` and listed under its parent.
+    pub fn is_sub_skill(&self) -> bool {
+        self.name.contains(':')
+    }
 }
 
 /// `.agents` dirs in the order they win a name conflict, each flagged global: the preferred side first, project ones nearest first.
@@ -206,9 +217,9 @@ fn skill_sources(agents_dir: &Path) -> HashMap<String, String> {
 
 fn collect_skill_files(dir: &Path, root: bool, out: &mut Vec<PathBuf>) {
     let skill = dir.join("SKILL.md");
-    if skill.is_file() {
+    let in_skill = skill.is_file();
+    if in_skill {
         out.push(skill);
-        return;
     }
     let Ok(entries) = std::fs::read_dir(dir) else { return };
     let mut entries: Vec<PathBuf> = entries.filter_map(|e| e.ok()).map(|e| e.path()).collect();
@@ -218,9 +229,10 @@ fn collect_skill_files(dir: &Path, root: bool, out: &mut Vec<PathBuf>) {
         if name.starts_with('.') || name == "node_modules" {
             continue;
         }
-        if path.is_dir() {
+        // Inside a skill only sub-skill folders count, so its references and scripts stay unscanned.
+        if path.is_dir() && (!in_skill || path.join("SKILL.md").is_file()) {
             collect_skill_files(&path, false, out);
-        } else if root && name.ends_with(".md") {
+        } else if root && !in_skill && name.ends_with(".md") {
             out.push(path);
         }
     }
@@ -232,9 +244,17 @@ pub fn parse_skill(path: &Path) -> Option<Skill> {
     let field = |key: &str| field(&fields, key).map(String::from);
     let model_invocable = field("disable-model-invocation").as_deref() != Some("true");
     let description = field("description").filter(|d| !d.trim().is_empty())?;
-    let dir_name = path.parent()?.file_name()?.to_string_lossy().into_owned();
-    let name = field("name").filter(|n| !n.is_empty()).unwrap_or(dir_name);
-    Some(Skill { name, description, path: path.to_path_buf(), model_invocable, shadows: None, source: None })
+    let dir = path.parent()?;
+    let dir_name = dir.file_name()?.to_string_lossy().into_owned();
+    let mut name = field("name").filter(|n| !n.is_empty()).unwrap_or(dir_name);
+    if path.file_name().is_some_and(|f| f == "SKILL.md")
+        && let Some(parent) = dir.parent().map(|parent| parent.join("SKILL.md")).filter(|parent| parent.is_file()).and_then(|parent| parse_skill(&parent))
+    {
+        name = format!("{}:{name}", parent.name);
+    }
+    let arguments: Vec<String> = field("arguments").unwrap_or_default().split(|c: char| !(c.is_alphanumeric() || c == '_')).filter(|n| !n.is_empty()).map(String::from).collect();
+    let argument_hint = field("argument-hint").filter(|h| !h.is_empty()).or_else(|| (!arguments.is_empty()).then(|| arguments.iter().map(|a| format!("[{a}]")).collect::<Vec<_>>().join(" ")));
+    Some(Skill { name, description, path: path.to_path_buf(), model_invocable, shadows: None, source: None, arguments, argument_hint })
 }
 
 /// pi's `/skill:name args` expansion: the skill body wrapped in a `<skill>` block, then the args.
@@ -245,9 +265,85 @@ pub fn expand_skill(text: &str, skills: &[Skill]) -> Result<String, String> {
     let Some(skill) = skills.iter().find(|s| s.name == name) else { return Ok(text.to_string()) };
     let content = read_text(&skill.path).ok_or(format!("Cannot read {}", skill.path.display()))?;
     let body = without_frontmatter(&content);
-    let base = skill.path.parent().unwrap_or(&skill.path).display();
-    let block = format!("<skill name=\"{}\" location=\"{}\">\nReferences are relative to {base}.\n\n{body}\n</skill>", skill.name, skill.path.display());
-    Ok(if args.is_empty() { block } else { format!("{block}\n\n{args}") })
+    let base = skill.path.parent().unwrap_or(&skill.path).display().to_string();
+    let (body, received) = fill_skill_arguments(body, &skill.arguments, args);
+    let body = body.replace("${CLAUDE_SKILL_DIR}", &base);
+    let block = format!("<skill name=\"{}\" location=\"{}\">\nReferences are relative to {base}.\n\n{body}{}\n</skill>", skill.name, skill.path.display(), sub_skills_note(skill, skills));
+    Ok(if args.is_empty() || received { block } else { format!("{block}\n\nARGUMENTS: {args}") })
+}
+
+/// The model-invocable direct children of `skill`, as a list after its body.
+fn sub_skills_note(skill: &Skill, skills: &[Skill]) -> String {
+    let lines: Vec<String> = sub_skills(skill, skills).map(|s| format!("- {}: {}", skill_label(s), s.description.split_whitespace().collect::<Vec<_>>().join(" "))).collect();
+    if lines.is_empty() { String::new() } else { format!("\n\nSub-skills, loaded by name like any skill:\n{}", lines.join("\n")) }
+}
+
+fn sub_skills<'a>(skill: &Skill, skills: &'a [Skill]) -> impl Iterator<Item = &'a Skill> {
+    let prefix = format!("{}:", skill.name);
+    skills.iter().filter(move |s| s.model_invocable && s.name.strip_prefix(&prefix).is_some_and(|rest| !rest.contains(':')))
+}
+
+/// Claude Code's skill placeholders: `$ARGUMENTS` as typed, `$ARGUMENTS[N]` and `$N` 0-based, `$name` from `arguments`.
+/// `\$` keeps a placeholder literal, `\\$` does not. Returns whether a placeholder received the args; when none did, they follow the block.
+fn fill_skill_arguments(content: &str, names: &[String], typed: &str) -> (String, bool) {
+    let args = split_args(typed);
+    let (mut out, mut rest, mut received) = (String::new(), content, false);
+    while let Some(at) = rest.find('$') {
+        let escaped = rest[..at].ends_with('\\') && !rest[..at].ends_with("\\\\");
+        out.push_str(&rest[..at]);
+        rest = &rest[at + 1..];
+        let Some((consumed, value)) = skill_placeholder(rest, names, &args, typed) else {
+            out.push('$');
+            continue;
+        };
+        if escaped {
+            out.pop();
+            out.push('$');
+            continue;
+        }
+        match value {
+            Some(value) => {
+                out.push_str(&value);
+                rest = &rest[consumed..];
+                received = true;
+            }
+            None => out.push('$'),
+        }
+    }
+    out.push_str(rest);
+    (out, received)
+}
+
+/// The placeholder at the start of `after` (the text past a `$`): its length and its value.
+/// An index past the args has no value and stays literal; a declared name past them is empty.
+fn skill_placeholder(after: &str, names: &[String], args: &[String], typed: &str) -> Option<(usize, Option<String>)> {
+    let digits = |text: &str| text.bytes().take_while(u8::is_ascii_digit).count();
+    // An overflowing index is past every argument.
+    let indexed = |text: &str| args.get(text.parse::<usize>().unwrap_or(usize::MAX)).cloned();
+    if let Some(index) = after.strip_prefix("ARGUMENTS[") {
+        let n = digits(index);
+        if n > 0 && index[n..].starts_with(']') {
+            return Some(("ARGUMENTS[]".len() + n, indexed(&index[..n])));
+        }
+    }
+    if after.starts_with("ARGUMENTS") {
+        return Some(("ARGUMENTS".len(), Some(typed.to_string())));
+    }
+    let n = digits(after);
+    if n > 0 {
+        return Some((n, indexed(&after[..n])));
+    }
+    let len = after.find(|c: char| !(c.is_alphanumeric() || c == '_')).unwrap_or(after.len());
+    let position = names.iter().position(|name| *name == after[..len])?;
+    Some((len, Some(args.get(position).cloned().unwrap_or_default())))
+}
+
+/// `name` or `name <argument hint>`, as the listings show a skill.
+fn skill_label(skill: &Skill) -> String {
+    match &skill.argument_hint {
+        Some(hint) => format!("{} {hint}", skill.name),
+        None => skill.name.clone(),
+    }
 }
 
 /// A prompt template, run as `/prompt:name args`.
@@ -420,19 +516,24 @@ fn frontmatter(text: &str) -> Option<Vec<(String, String)>> {
 }
 
 /// pi-cache-optimizer's compressed skill list: one header per skills root, one line per skill.
+/// Sub-skills get no line of their own; their parent's line names them, so a model that Reads the parent still finds them.
 fn format_skills(skills: Vec<Skill>) -> String {
     let mut by_root: BTreeMap<PathBuf, Vec<(String, String)>> = BTreeMap::new();
     let mut explicit: Vec<(PathBuf, String, String)> = Vec::new();
-    for skill in skills {
-        let description = skill.description.split_whitespace().collect::<Vec<_>>().join(" ");
+    for skill in skills.iter().filter(|skill| !skill.is_sub_skill()) {
+        let mut description = skill.description.split_whitespace().collect::<Vec<_>>().join(" ");
+        let subs: Vec<&str> = sub_skills(skill, &skills).map(|sub| sub.name.as_str()).collect();
+        if !subs.is_empty() {
+            description.push_str(&format!(" (sub-skills: {})", subs.join(", ")));
+        }
         let dir = skill.path.parent().expect("a skill file sits in a directory");
         let conventional = skill.path.file_name().is_some_and(|f| f == "SKILL.md") && dir.file_name().is_some_and(|d| *d == *skill.name);
         if !conventional {
-            explicit.push((skill.path, skill.name, description));
+            explicit.push((skill.path.clone(), skill_label(skill), description));
             continue;
         }
         let root = dir.parent().expect("a skill directory sits in a skills root").to_path_buf();
-        by_root.entry(root).or_default().push((skill.name, description));
+        by_root.entry(root).or_default().push((skill_label(skill), description));
     }
     let mut lines = vec![
         "The following skills provide specialized instructions for specific tasks.".to_string(),
@@ -590,6 +691,51 @@ mod tests {
         std::fs::remove_dir_all(&root).unwrap();
         assert_eq!(project_first, (vec![(project_skill.clone(), Some(global_skill.clone()))], vec![(project_prompt.clone(), Some(global_prompt.clone()))]));
         assert_eq!(global_first, (vec![(global_skill, Some(project_skill))], vec![(global_prompt, Some(project_prompt))]));
+    }
+
+    #[test]
+    fn a_skill_fills_its_named_arguments_and_leaves_shell_dollars_alone() {
+        let root = std::env::temp_dir().join(format!("agent-skill-arguments-{}", std::process::id()));
+        for (name, text) in [
+            (
+                "deploy",
+                "---\ndescription: d\narguments: [env, ref]\n---\nDeploy $ref to $env. First $0, second $ARGUMENTS[1], none $2, $tag. Price \\$1.00, kept \\\\$0. Dir ${CLAUDE_SKILL_DIR}. All: $ARGUMENTS",
+            ),
+            ("review", "---\ndescription: r\nargument-hint: \"[base]\"\n---\nReview."),
+            ("summarize", "---\ndescription: s\n---\nSummarize $0"),
+        ] {
+            std::fs::create_dir_all(root.join("skills").join(name)).unwrap();
+            std::fs::write(root.join("skills").join(name).join("SKILL.md"), text).unwrap();
+        }
+        let skills = load_skills(&root, &root, true, |_| true, false);
+        let body = |text: &str| expand_skill(text, &skills).unwrap().split_once("\n\n").unwrap().1.to_string();
+        let (deploy, review, summarize) = (body("/skill:deploy prod \"v1 rc\""), body("/skill:review main"), body("/skill:summarize \"$ARGUMENTS from yesterday\""));
+        let hints: Vec<Option<String>> = skills.iter().map(|s| s.argument_hint.clone()).collect();
+        std::fs::remove_dir_all(&root).unwrap();
+        let dir = root.join("skills").join("deploy");
+        assert_eq!(deploy, format!("Deploy v1 rc to prod. First prod, second v1 rc, none $2, $tag. Price $1.00, kept \\\\prod. Dir {}. All: prod \"v1 rc\"\n</skill>", dir.display()));
+        assert_eq!(review, "Review.\n</skill>\n\nARGUMENTS: main");
+        assert_eq!(summarize, "Summarize $ARGUMENTS from yesterday\n</skill>");
+        assert_eq!(hints, [Some("[env] [ref]".to_string()), Some("[base]".to_string()), None]);
+    }
+
+    #[test]
+    fn a_skill_folder_inside_a_skill_is_a_sub_skill_named_by_its_parent() {
+        let root = std::env::temp_dir().join(format!("agent-sub-skills-{}", std::process::id()));
+        for (dir, name) in [("review", "review"), ("review/react", "react"), ("review/react/hooks", "hooks"), ("review/references/notes", "notes")] {
+            std::fs::create_dir_all(root.join("skills").join(dir)).unwrap();
+            std::fs::write(root.join("skills").join(dir).join("SKILL.md"), format!("---\ndescription: {name} things\n---\n{name} body")).unwrap();
+        }
+        let skills = load_skills(&root, &root, true, |_| true, false);
+        let names: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();
+        let review = expand_skill("/skill:review", &skills).unwrap();
+        let react = expand_skill("/skill:review:react", &skills).unwrap();
+        let system = system_prompt(&root, &root, true, |_| true, false);
+        std::fs::remove_dir_all(&root).unwrap();
+        assert_eq!(names, ["review", "review:react", "review:react:hooks"]);
+        assert!(review.contains("Sub-skills, loaded by name like any skill:\n- review:react: react things\n</skill>"), "{review}");
+        assert!(react.contains("react body") && react.contains("- review:react:hooks: hooks things"), "{react}");
+        assert!(system.contains("- review: review things (sub-skills: review:react)\n") && !system.contains("hooks"), "{system}");
     }
 
     #[test]
