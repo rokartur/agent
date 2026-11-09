@@ -316,6 +316,8 @@ enum Panel {
     Trust {
         root: PathBuf,
         files: Vec<PathBuf>,
+        /// Keys wait out `PERMISSION_SETTLE` from here.
+        opened: Instant,
     },
     /// `confirm`: d was pressed once, and the next d removes the selected worktree.
     Worktrees {
@@ -639,6 +641,7 @@ struct Entry {
     cache: Option<(usize, bool, Vec<Line>)>,
 }
 
+#[derive(Default)]
 struct Git {
     branch: Option<String>,
     changed: usize,
@@ -697,6 +700,8 @@ struct App {
     last_usage: Usage,
     /// This session's usage per model, priced at render so the footer cost appears once the catalog loads.
     session_usage: Vec<ModelTotal>,
+    /// The file `session_usage` was read from and how far, so a turn reads only what it appended.
+    session_usage_read: (PathBuf, u64),
     cwd: PathBuf,
     /// The path menu's last listing and the cwd and query it answers.
     path_matches: std::cell::RefCell<(String, Vec<(String, String)>)>,
@@ -792,6 +797,7 @@ pub fn run(agent: Agent, setup: Setup, model_lists: JoinHandle<Vec<String>>, soc
     let (events, inbox) = mpsc::channel();
     let (commands, command_inbox) = mpsc::channel();
     let mut app = App::new(&agent, setup, commands, events.clone());
+    app.read_session_usage();
     let wake = events.clone();
     app.plugins.on_change(move || {
         let _ = wake.send(Msg::PluginsChanged);
@@ -1266,9 +1272,10 @@ impl App {
             settings,
             context_tokens: 0,
             last_usage: Usage::default(),
-            session_usage: agent.session.path.as_deref().map(usage::session_totals).unwrap_or_default(),
-            git: git_info(&agent.cwd),
-            git_due: Some(Instant::now() + GIT_REFRESH),
+            session_usage: Vec::new(),
+            session_usage_read: Default::default(),
+            git: Git::default(),
+            git_due: Some(Instant::now()),
             plugins: agent.plugins.clone(),
             mcp: agent.mcp.clone(),
             cwd: agent.cwd.clone(),
@@ -1782,7 +1789,7 @@ impl App {
             }
             Msg::WorktreeRemoved(path, result) => match result {
                 Ok(()) => {
-                    self.git = git_info(&self.cwd);
+                    self.git_due = Some(Instant::now());
                     self.system("worktree", format!("Removed {}", path.display()));
                 }
                 Err(error) => self.push(Item::Error(error)),
@@ -1941,7 +1948,10 @@ impl App {
                 if let Some(view) = &self.viewed {
                     match view.run.message(&text) {
                         Ok(()) => self.hint = Some((format!("Sent to {}", view.run.label), Instant::now())),
-                        Err(error) => self.hint = Some((error, Instant::now())),
+                        Err(error) => {
+                            self.editor.set(&text);
+                            self.hint = Some((error, Instant::now()));
+                        }
                     }
                     return;
                 }
@@ -1976,7 +1986,9 @@ impl App {
             KeyCode::Char('p') if ctrl => self.cycle_model(),
             KeyCode::Up if alt => {
                 let steering = std::mem::take(&mut *self.steering.lock().unwrap());
-                let mut queued = Vec::new();
+                let draft = self.editor.text();
+                let mut queued: Vec<String> = if draft.trim().is_empty() { Vec::new() } else { vec![draft] };
+                let had_draft = !queued.is_empty();
                 for (mut text, images) in steering.into_iter().chain(std::mem::take(&mut self.queued_commands)) {
                     let offset = self.images.len();
                     // Highest first: with offset 1, #1 becomes #2 only after the old #2 became #3.
@@ -1986,7 +1998,7 @@ impl App {
                     self.images.extend(images);
                     queued.push(text);
                 }
-                if !queued.is_empty() {
+                if queued.len() > usize::from(had_draft) {
                     self.editor.set(&queued.join("\n\n"));
                 }
             }
@@ -2022,7 +2034,8 @@ impl App {
         let mut tags = Vec::new();
         for (index, mut block) in std::mem::take(&mut self.images).into_iter().enumerate() {
             let tag = format!("[Image #{}]", index + 1);
-            if text.contains(&tag) {
+            // A null holds the place of an image whose tag was deleted.
+            if text.contains(&tag) && !block.is_null() {
                 // The API rejects unknown keys, so the dropped file's path leaves the block here.
                 match block.as_object_mut().unwrap().remove(DROPPED_PATH) {
                     Some(Value::String(path)) => tags.push(format!("{tag} {path}")),
@@ -2209,9 +2222,22 @@ impl App {
         self.client.catalog().iter().find(|m| m.id == self.settings.model).cloned()
     }
 
-    /// Rereads the session file; an unsaved session has none, so its footer shows no cost.
+    /// Reads what the session file gained since the last read; an unsaved session has none, so its footer shows no cost.
     fn read_session_usage(&mut self) {
-        self.session_usage = usage::session_totals(&self.sessions_dir.join(format!("{}.jsonl", self.session_id)));
+        let path = self.sessions_dir.join(format!("{}.jsonl", self.session_id));
+        if self.session_usage_read.0 != path {
+            self.session_usage = Vec::new();
+            self.session_usage_read = (path, 0);
+        }
+        let (path, read) = &mut self.session_usage_read;
+        let (new, end) = usage::session_totals_from(path, *read);
+        *read = end;
+        for total in new {
+            match self.session_usage.iter_mut().find(|known| known.model == total.model) {
+                Some(known) => known.requests.extend(total.requests),
+                None => self.session_usage.push(total),
+            }
+        }
     }
 
     /// The settings key of the current model; says so when the model lists are still loading.
@@ -2291,7 +2317,7 @@ impl App {
             self.system("trust", format!("{} is not trusted, so its .agents files stay unloaded and its edit hooks do not run. /trust loads them.", root.display()));
             return;
         }
-        self.panel = Some(Panel::Trust { root, files });
+        self.panel = Some(Panel::Trust { root, files, opened: Instant::now() });
     }
 
     /// /trust and /untrust; the agent rebuilds its system prompt once, before the next turn.
@@ -2412,8 +2438,8 @@ impl App {
             } else {
                 // All of them, in order: Alt+Up maps image n back to `[Image #n]`. The API rejects the dropped file's path key.
                 let mut images = std::mem::take(&mut self.images);
-                for image in &mut images {
-                    image.as_object_mut().unwrap().remove(DROPPED_PATH);
+                for image in images.iter_mut().filter_map(Value::as_object_mut) {
+                    image.remove(DROPPED_PATH);
                 }
                 self.steering.lock().unwrap().push((text, images));
             }
@@ -2727,7 +2753,11 @@ impl App {
             self.login_action(action);
             return;
         }
-        if let Some(Panel::Trust { .. }) = self.panel {
+        if let Some(Panel::Trust { opened, .. }) = self.panel {
+            // A key typed before the question appeared must not answer it; it stays up, so even a decline waits.
+            if opened.elapsed() < PERMISSION_SETTLE {
+                return;
+            }
             self.panel = None;
             match code {
                 KeyCode::Char('y') | KeyCode::Enter => self.set_trust(true),
@@ -3646,7 +3676,12 @@ impl App {
                 self.panel = None;
             }
             KeyCode::Enter if !btw.streaming && !btw.input.text().trim().is_empty() => {
-                let question = btw.input.take();
+                // Checked before the question leaves the input, so it is not lost.
+                if self.model().is_none() {
+                    self.system("btw", MODELS_STILL_LOADING);
+                    return;
+                }
+                let question = self.btw.as_mut().expect("key went to an open btw thread").input.take();
                 self.ask_btw(question.trim().to_string());
             }
             _ => _ = btw.input.edit_key(key),
@@ -4271,7 +4306,7 @@ impl App {
             }
             Panel::Btw => self.btw.as_ref().expect("the btw panel opens with a thread").render(width),
             Panel::Terminal { .. } | Panel::Diff { .. } => unreachable!("frame draws the full-screen view instead of a panel"),
-            Panel::Trust { root, files } => {
+            Panel::Trust { root, files, .. } => {
                 let rows: Vec<panel::Row> = files.iter().map(|file| panel::Row { left: file.strip_prefix(root).unwrap_or(file).display().to_string(), right: Vec::new() }).collect();
                 let view = panel::Panel {
                     title: "Trust this project? Its files can instruct the model and run commands.".into(),
@@ -4756,6 +4791,7 @@ impl App {
                 self.session_path = path;
                 self.spent = Spent::default();
                 self.session_usage = Vec::new();
+                self.session_usage_read = Default::default();
                 self.set_title(&unnamed_title(&self.cwd));
                 self.system("session", "Started a fresh conversation");
             }
@@ -4765,7 +4801,9 @@ impl App {
                 for client in &mut self.clients {
                     client.queue(&sequence);
                 }
-                self.git = git_info(&cwd);
+                // Blank until the refresh lands: the old directory's branch must not show for the new one.
+                self.git = Git::default();
+                self.git_due = Some(Instant::now());
                 self.cwd = cwd;
                 self.session_id = id;
                 self.session_path = path;
@@ -4908,7 +4946,7 @@ impl App {
         if matches!(*self.plan.lock().unwrap(), Plan::Ready(_)) && self.panel.is_none() {
             self.panel = Some(Panel::Plan { index: 0 });
         }
-        self.git = git_info(&self.cwd);
+        self.git_due = Some(Instant::now());
     }
 
     /// The whole screen: transcript, then status, open panel or slash menu, editor and footer pinned to the last rows.
@@ -6639,6 +6677,59 @@ mod tests {
         let opened = |lines: &mpsc::Receiver<String>| lines.try_iter().filter(|line| line.contains("\"open\"")).collect::<Vec<_>>();
         assert_eq!(opened(&first_lines), [json!({"open": "http://127.0.0.1:1/t/1"}).to_string()]);
         assert_eq!(opened(&second_lines), [json!({"open": "http://127.0.0.1:1/t/2"}).to_string()], "no terminal typed yet, so the last one attached opens it");
+    }
+
+    fn test_app(home: &Path) -> App {
+        let cwd = home.join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let (client, _) = crate::api::images::tests::fake_codex_client(home, &[]);
+        let settings = crate::settings::load(home).unwrap();
+        let session = Session::start(&home.join("sessions"), false, &cwd, "m").unwrap();
+        let agent = Agent::new(client, &settings, home.to_path_buf(), cwd, session, home.join("sessions"), None);
+        let setup = Setup { home: home.to_path_buf(), settings, prompt: None, pick_session: false, modes_error: None, plugin_updates: Vec::new(), missing_cwd: None, placed: None };
+        App::new(&agent, setup, mpsc::channel().0, mpsc::channel().0)
+    }
+
+    #[test]
+    fn a_key_typed_before_the_trust_question_appeared_does_not_answer_it() {
+        let home = std::env::temp_dir().join(format!("agent-tui-trust-{}", std::process::id()));
+        std::fs::create_dir_all(home.join("project/.agents")).unwrap();
+        std::fs::write(home.join("project/.agents/SYSTEM.md"), "x").unwrap();
+        let mut app = test_app(&home);
+        app.offer_trust();
+        assert!(matches!(app.panel, Some(Panel::Trust { .. })));
+        app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let trusted_at_once = app.settings.trusts(&app.cwd);
+        let Some(Panel::Trust { opened, .. }) = &mut app.panel else { panic!("the early key closed the question") };
+        *opened = Instant::now() - Duration::from_secs(1);
+        app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let trusted = app.settings.trusts(&app.cwd);
+        std::fs::remove_dir_all(&home).ok();
+        assert_eq!((trusted_at_once, trusted), (false, true));
+    }
+
+    #[test]
+    fn alt_up_keeps_the_draft_and_a_gap_in_the_images_does_not_panic() {
+        let home = std::env::temp_dir().join(format!("agent-tui-draft-{}", std::process::id()));
+        let mut app = test_app(&home);
+        std::fs::remove_dir_all(&home).ok();
+        let image = json!({"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AA"}, DROPPED_PATH: "/a.png"});
+
+        app.steering.lock().unwrap().push(("queued one".into(), Vec::new()));
+        app.editor.set("draft");
+        app.key(KeyEvent::new(KeyCode::Up, KeyModifiers::ALT));
+        assert_eq!(app.editor.text(), "draft\n\nqueued one");
+
+        app.settings.mid_turn = "steer".into();
+        app.working = Some(Instant::now());
+        app.images = vec![Value::Null, image.clone()];
+        app.submit("see [Image #2]".into(), false);
+        let steering = std::mem::take(&mut *app.steering.lock().unwrap());
+        assert_eq!(steering.len(), 1);
+        assert_eq!(steering[0].1, [Value::Null, json!({"type": "image", "source": image["source"]})]);
+
+        app.images = vec![Value::Null, image.clone()];
+        assert_eq!(app.take_images("[Image #1] typed by hand, [Image #2]").len(), 1);
     }
 
     #[test]

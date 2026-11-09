@@ -117,7 +117,7 @@ pub fn totals(dir: &Path, session_id: &str, now_ms: u64) -> [Vec<ModelTotal>; SC
     let Ok(files) = std::fs::read_dir(dir) else { return Default::default() };
     for path in files.flatten().map(|file| file.path()) {
         let current = path.file_stem().is_some_and(|stem| stem == session_id);
-        for (model, request, timestamp) in records(&path) {
+        for (model, request, timestamp) in records(&path, 0).0 {
             let age = now_ms.saturating_sub(timestamp);
             for (scope, inside) in by_model.iter_mut().zip([current, age < DAY_MS, age < 7 * DAY_MS, true]) {
                 if inside {
@@ -129,13 +129,19 @@ pub fn totals(dir: &Path, session_id: &str, now_ms: u64) -> [Vec<ModelTotal>; SC
     by_model.map(|scope| scope.into_values().collect())
 }
 
-/// The Session scope of `totals` for one session file, cheap enough to read after every turn.
+/// The Session scope of `totals` for one session file.
 pub fn session_totals(path: &Path) -> Vec<ModelTotal> {
+    session_totals_from(path, 0).0
+}
+
+/// `session_totals` of the records after byte `from`, with the offset to read from next time: a turn appends to the file.
+pub fn session_totals_from(path: &Path, from: u64) -> (Vec<ModelTotal>, u64) {
     let mut by_model = BTreeMap::new();
-    for (model, request, _) in records(path) {
+    let (records, read) = records(path, from);
+    for (model, request, _) in records {
         add(&mut by_model, &model, request);
     }
-    by_model.into_values().collect()
+    (by_model.into_values().collect(), read)
 }
 
 fn add(by_model: &mut BTreeMap<String, ModelTotal>, model: &str, request: Request) {
@@ -143,12 +149,23 @@ fn add(by_model: &mut BTreeMap<String, ModelTotal>, model: &str, request: Reques
     total.requests.push(request);
 }
 
-/// (model, request, timestamp) of each `usage` record in a session file; none when it cannot be read.
-fn records(path: &Path) -> Vec<(String, Request, u64)> {
-    let Ok(text) = std::fs::read_to_string(path) else { return Vec::new() };
+/// (model, request, timestamp) of each `usage` record after byte `from` of a session file, and the offset behind the last whole line; none when it cannot be read.
+fn records(path: &Path, from: u64) -> (Vec<(String, Request, u64)>, u64) {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut text = String::new();
+    let read = std::fs::File::open(path).and_then(|mut file| {
+        // A file shorter than `from` yields nothing, and a non-UTF-8 start fails the read.
+        file.seek(SeekFrom::Start(from))?;
+        file.read_to_string(&mut text)
+    });
+    if read.is_err() {
+        return (Vec::new(), from);
+    }
+    // A last line without its newline is a write in progress; the next read takes it.
+    let whole = text.rfind('\n').map_or(0, |end| end + 1);
     let mut records = Vec::new();
     // Skips the JSON parse of the far more common message lines; serde_json writes keys without spaces.
-    for line in text.lines().filter(|line| line.contains(r#""type":"usage""#)) {
+    for line in text[..whole].lines().filter(|line| line.contains(r#""type":"usage""#)) {
         let Ok(entry) = serde_json::from_str::<Value>(line) else { continue };
         if entry["type"] != "usage" {
             continue;
@@ -157,13 +174,33 @@ fn records(path: &Path) -> Vec<(String, Request, u64)> {
         let request = Request { usage: from_entry(&entry), cache_write_1h: entry["cache_write_1h"].as_u64().unwrap_or(0), billed: entry["billed"].as_f64() };
         records.push((model, request, entry["timestamp"].as_u64().unwrap_or(0)));
     }
-    records
+    (records, from + whole as u64)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::api::models::Rates;
+
+    #[test]
+    fn reading_from_an_offset_returns_only_the_records_after_it() {
+        use std::io::Write;
+        let path = std::env::temp_dir().join(format!("agent-usage-offset-{}.jsonl", std::process::id()));
+        let used = |input| Usage { input, output: 1, cache_read: 0, cache_write: 0 };
+        let inputs = |totals: &[ModelTotal]| totals.iter().flat_map(|total| &total.requests).map(|request| request.usage.input).collect::<Vec<_>>();
+        std::fs::write(&path, format!("{}\n{}\n", entry("opus", used(10), 1), entry("opus", used(20), 2))).unwrap();
+        let (first, read) = session_totals_from(&path, 0);
+        let mut file = std::fs::File::options().append(true).open(&path).unwrap();
+        // The second entry has no newline yet: a write in progress.
+        write!(file, "{}\n{}", entry("haiku", used(30), 3), entry("haiku", used(40), 4)).unwrap();
+        let (second, read_again) = session_totals_from(&path, read);
+        let length = path.metadata().unwrap().len();
+        let past_the_end = session_totals_from(&path, length + 10);
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!((inputs(&first), inputs(&second)), (vec![10, 20], vec![30]));
+        assert!(read < read_again && read_again < length, "{read} {read_again} {length}");
+        assert_eq!((inputs(&past_the_end.0), past_the_end.1), (vec![], length + 10));
+    }
 
     #[test]
     fn sums_usage_records_per_model_for_each_scope() {

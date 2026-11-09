@@ -938,7 +938,8 @@ impl Agent {
         let mut blocks = Vec::new();
         for (text, images) in steering {
             emit(Event::Steered(text.clone()));
-            blocks.extend(images);
+            // A null holds the place of an image whose tag was deleted.
+            blocks.extend(images.into_iter().filter(|image| !image.is_null()));
             blocks.push(json!({"type": "text", "text": text}));
         }
         for FollowUp { source, text } in follow_ups {
