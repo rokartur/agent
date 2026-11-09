@@ -1467,6 +1467,10 @@ impl App {
             MouseEventKind::Down(MouseButton::Left) => {
                 self.selection = Selection::default();
                 self.input_selection.press(point, &text);
+                let total = self.editor.render(self.editor_width).0.len();
+                if let Some(row) = total.checked_sub(point.line + 1) {
+                    self.editor.click(self.editor_width, row, point.column);
+                }
             }
             MouseEventKind::Drag(MouseButton::Left) => self.input_selection.drag(point, &text),
             MouseEventKind::Up(MouseButton::Left) if self.input_selection.release() && self.settings.copy_on_select => {
