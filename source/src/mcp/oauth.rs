@@ -371,7 +371,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(unix)]
     fn a_fresh_token_is_used_without_refreshing() {
         let home = std::env::temp_dir().join(format!("agent-mcp-auth-{}", std::process::id()));
         let mut store = Map::new();
@@ -382,12 +381,14 @@ mod tests {
             Ok(())
         })
         .unwrap();
+        #[cfg(unix)]
         let mode = std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(path(&home)).unwrap().permissions());
         let token = bearer(&home, "https://x/mcp", None);
         let other = bearer(&home, "https://y/mcp", None);
         assert!(logged_in(&read(&home).unwrap(), "https://x/mcp"));
         assert!(!logged_in(&read(&home).unwrap(), "https://z/mcp"));
         std::fs::remove_dir_all(&home).unwrap();
+        #[cfg(unix)]
         assert_eq!(mode & 0o777, 0o600);
         assert_eq!(token.unwrap().as_deref(), Some("tok"));
         assert_eq!(other.unwrap(), None);

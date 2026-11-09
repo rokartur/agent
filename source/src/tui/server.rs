@@ -84,7 +84,7 @@ impl Client {
     }
 }
 
-/// Listens on `socket`, readable by this user only, and turns each connection into `Msg::Attached`,
+/// Listens on `socket`, readable by this user only (on Windows, through the profile directory's ACL), and turns each connection into `Msg::Attached`,
 /// `Msg::Input` and `Msg::Detached`.
 pub fn listen(socket: &Path, events: Sender<Msg>) -> Result<(), String> {
     let _ = std::fs::remove_file(socket);

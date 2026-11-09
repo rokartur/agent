@@ -8,7 +8,7 @@ pub use unix::*;
 #[cfg(windows)]
 pub use windows::*;
 
-use std::process::{Command, Output, Stdio};
+use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -22,10 +22,21 @@ pub fn output_within(command: &mut Command, timeout: Duration) -> std::io::Resul
     // Read while it runs: a child writing more than a pipe buffer (64 KiB) would otherwise block until the timeout.
     let stdout = read_in_background(child.stdout.take());
     let stderr = read_in_background(child.stderr.take());
+    let Some(status) = wait_within(&mut child, timeout)? else { return Ok(None) };
+    // A background child (`sleep 5 &`) keeps the pipes open, so the readers would wait for it. Killing the group
+    // closes them on Unix; Windows' taskkill finds no tree under an exited parent, so there a grace period ends the wait.
+    #[cfg(unix)]
+    signal_group(child.id(), SIGKILL);
+    let drained_by = cfg!(windows).then(|| Instant::now() + Duration::from_secs(1));
+    Ok(Some(Output { status, stdout: collect(&stdout, drained_by), stderr: collect(&stderr, drained_by) }))
+}
+
+/// Waits for a `command(..)` child. Past `timeout` its group is killed and the result is None.
+pub fn wait_within(child: &mut Child, timeout: Duration) -> std::io::Result<Option<ExitStatus>> {
     let deadline = Instant::now() + timeout;
-    let status = loop {
+    loop {
         if let Some(status) = child.try_wait()? {
-            break status;
+            return Ok(Some(status));
         }
         if Instant::now() > deadline {
             signal_group(child.id(), SIGKILL);
@@ -34,13 +45,7 @@ pub fn output_within(command: &mut Command, timeout: Duration) -> std::io::Resul
         }
         // Short poll: callers such as the rtk rewrite sit on the bash tool's path.
         std::thread::sleep(Duration::from_millis(10));
-    };
-    // A background child (`sleep 5 &`) keeps the pipes open, so the readers would wait for it. Windows' taskkill finds
-    // no tree under an exited parent, so there the grace period below ends the wait instead.
-    #[cfg(unix)]
-    signal_group(child.id(), SIGKILL);
-    let drained_by = Instant::now() + Duration::from_secs(1);
-    Ok(Some(Output { status, stdout: collect(&stdout, drained_by), stderr: collect(&stderr, drained_by) }))
+    }
 }
 
 fn read_in_background(pipe: Option<impl std::io::Read + Send + 'static>) -> mpsc::Receiver<Vec<u8>> {
@@ -64,8 +69,9 @@ fn read_in_background(pipe: Option<impl std::io::Read + Send + 'static>) -> mpsc
     chunks
 }
 
-/// What a reader sent until its pipe closed or `deadline` passed.
-fn collect(chunks: &mpsc::Receiver<Vec<u8>>, deadline: Instant) -> Vec<u8> {
+/// What a reader sent until its pipe closed or `deadline`, if any, passed.
+fn collect(chunks: &mpsc::Receiver<Vec<u8>>, deadline: Option<Instant>) -> Vec<u8> {
+    let Some(deadline) = deadline else { return chunks.iter().flatten().collect() };
     let mut bytes = Vec::new();
     while let Ok(chunk) = chunks.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
         bytes.extend(chunk);
@@ -78,10 +84,21 @@ fn collect(chunks: &mpsc::Receiver<Vec<u8>>, deadline: Instant) -> Vec<u8> {
 pub fn canonicalize(path: impl AsRef<std::path::Path>) -> std::io::Result<std::path::PathBuf> {
     let path = std::fs::canonicalize(path)?;
     #[cfg(windows)]
-    if let Some(local) = path.to_str().and_then(|path| path.strip_prefix(r"\\?\"))
-        && !local.starts_with(r"UNC\")
-    {
-        return Ok(local.into());
+    if let Some(std::path::Component::Prefix(prefix)) = path.components().next() {
+        use std::path::Prefix;
+        let mut root = std::ffi::OsString::new();
+        match prefix.kind() {
+            Prefix::VerbatimDisk(drive) => root.push(format!(r"{}:\", drive as char)),
+            Prefix::VerbatimUNC(server, share) => {
+                for part in [r"\\".as_ref(), server, r"\".as_ref(), share, r"\".as_ref()] {
+                    root.push(part);
+                }
+            }
+            _ => return Ok(path),
+        }
+        let mut local = std::path::PathBuf::from(root);
+        local.extend(path.components().skip(1));
+        return Ok(local);
     }
     Ok(path)
 }
@@ -107,9 +124,8 @@ mod tests {
     }
 
     #[test]
-    #[cfg(unix)]
     fn installed_finds_only_executables_on_path() {
-        assert!(installed("sh"));
+        assert!(installed("git"));
         assert!(!installed("agent-no-such-binary"));
     }
 
@@ -152,10 +168,21 @@ mod tests {
     }
 
     #[test]
-    #[cfg(unix)]
+    #[cfg(windows)]
+    fn canonicalize_drops_the_verbatim_prefix() {
+        let path = canonicalize(std::env::temp_dir()).unwrap();
+        assert!(!path.to_string_lossy().starts_with(r"\\?\"), "{}", path.display());
+        assert!(path.is_dir());
+    }
+
+    #[test]
     fn wait_unreaped_reports_the_exit_and_leaves_the_child_to_reap() {
-        for script in ["exit 3", "kill -9 $$"] {
-            let mut child = command("sh").args(["-c", script]).spawn().unwrap();
+        let mut scripts = vec!["exit 3"];
+        if cfg!(unix) {
+            scripts.push("kill -9 $$");
+        }
+        for script in scripts {
+            let mut child = command(shell("sh").unwrap()).args(["-c", script]).spawn().unwrap();
             let unreaped = wait_unreaped(child.id()).unwrap();
             assert_eq!(unreaped, child.wait().unwrap());
         }

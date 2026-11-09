@@ -92,7 +92,7 @@ fn save(home: &Path, accounts: &[Account]) -> Result<(), String> {
     write_private(&path(home), &format!("{file:#}\n"))
 }
 
-/// Writes `text` through a 0600 temp file and a rename, so a crash never leaves half a file.
+/// Writes `text` through a temp file private to this user (0600 on Unix, the profile's ACL on Windows) and a rename, so a crash never leaves half a file.
 pub(crate) fn write_private(path: &Path, text: &str) -> Result<(), String> {
     // Renaming over a symlink would replace a dotfiles link with a plain file.
     let path = crate::process::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());

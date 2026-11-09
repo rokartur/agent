@@ -688,7 +688,8 @@ mod tests {
     #[test]
     fn a_missing_model_names_the_download() {
         let error = whisper_model(Path::new("/nonexistent/.agents")).unwrap_err();
-        assert!(error.starts_with("No model at /nonexistent/.agents") && error.contains(WHISPER_MODEL_URL), "{error}");
+        let models = if cfg!(windows) { r"/nonexistent/.agents\models/" } else { "/nonexistent/.agents/models/" };
+        assert!(error.starts_with(&format!("No model at {models}")) && error.contains(WHISPER_MODEL_URL), "{error}");
     }
 
     /// The whole tool on a clip of macOS `say` speech, with the whisper model /voice uses: whisper once, then the kept

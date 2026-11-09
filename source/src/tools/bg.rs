@@ -118,10 +118,7 @@ impl Terminals {
             let mut queued = follow_ups.lock().unwrap();
             let mut state = watched.state.lock().unwrap();
             let exit = match status {
-                // Windows ends a process with an exit code, so there a stopped terminal that did not exit 0 counts as killed.
-                Ok(status) if state.killed && (crate::process::signal_of(status).is_some() || cfg!(windows) && !status.success()) => {
-                    (Status::Killed, exit_text(status.code(), crate::process::signal_of(status)))
-                }
+                Ok(status) if state.killed && !status.success() => (Status::Killed, exit_text(status.code(), crate::process::signal_of(status))),
                 Ok(status) if status.success() => (Status::Done, "exit 0".to_string()),
                 Ok(status) => (Status::Failed, exit_text(status.code(), crate::process::signal_of(status))),
                 Err(e) => (Status::Failed, format!("wait failed: {e}")),

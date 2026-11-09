@@ -2366,6 +2366,8 @@ fn lock_file(session: &Path) -> std::io::Result<File> {
 /// Windows locks are mandatory: a lock on the session itself would block its own appends and every reader, so it sits beside it.
 #[cfg(windows)]
 fn lock_file(session: &Path) -> std::io::Result<File> {
+    // NotFound for a pruned session, as the Unix open gives, so a resume does not lock a fresh sidecar.
+    File::open(session)?;
     File::options().create(true).write(true).truncate(false).open(session.with_extension("lock"))
 }
 

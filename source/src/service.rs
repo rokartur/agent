@@ -107,7 +107,8 @@ fn install(home: &Path) -> Result<(), String> {
 /// `agent service install` there. The host's output shows here, and its exit status is this command's.
 fn install_on(host: &str) -> Result<(), String> {
     println!("Connecting to {host} over ssh...");
-    let status = process::command("ssh").args([host, &remote_install()]).stdin(std::process::Stdio::inherit()).status().map_err(|e| format!("Cannot run ssh: {e}"))?;
+    // BatchMode: from Windows ssh runs on a hidden console, where a password or host key prompt would wait unseen.
+    let status = process::command("ssh").args(["-o", "BatchMode=yes", host, &remote_install()]).stdin(std::process::Stdio::inherit()).status().map_err(|e| format!("Cannot run ssh: {e}"))?;
     match status.code() {
         Some(0) => {
             println!("Done on {host}.");
@@ -116,7 +117,7 @@ fn install_on(host: &str) -> Result<(), String> {
         // ssh exits 255 for its own failures, which it has printed.
         Some(255) => Err(format!("ssh {host} failed. agent service install --on needs `ssh {host}` to work from this computer.")),
         // A Windows host's ssh runs cmd, which cannot run the script.
-        _ => Err(format!("agent service install failed on {host}: {status}. A Windows host runs no agent service; run agent serve --tailnet there.")),
+        _ => Err(format!("agent service install failed on {host}: {status}. If {host} runs Windows, it runs no agent service; run agent serve --tailnet there.")),
     }
 }
 

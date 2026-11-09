@@ -82,6 +82,11 @@ pub fn make_executable(path: &Path) -> std::io::Result<()> {
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
 }
 
+/// Moves `temp` over `path` in one step.
+pub fn replace_with(path: &Path, temp: &Path) -> std::io::Result<()> {
+    std::fs::rename(temp, path)
+}
+
 /// Sends this process's stdout and stderr to `file` for the rest of its life.
 pub fn redirect_output_to(file: std::fs::File) -> std::io::Result<()> {
     let fd = file.into_raw_fd();

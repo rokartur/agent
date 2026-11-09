@@ -18,6 +18,7 @@ unsafe extern "system" {
     fn SetInformationJobObject(job: Handle, class: i32, info: *const c_void, length: u32) -> i32;
     fn AssignProcessToJobObject(job: Handle, process: Handle) -> i32;
     fn SetStdHandle(which: u32, handle: Handle) -> i32;
+    fn ReplaceFileW(replaced: *const u16, replacement: *const u16, backup: *const u16, flags: u32, exclude: *const c_void, reserved: *const c_void) -> i32;
 }
 
 const PROCESS_TERMINATE: u32 = 0x0001;
@@ -35,6 +36,7 @@ const STD_ERROR_HANDLE: u32 = -12i32 as u32;
 const JOB_OBJECT_EXTENDED_LIMIT_INFORMATION: i32 = 9;
 const JOB_OBJECT_LIMIT_BREAKAWAY_OK: u32 = 0x0800;
 const JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: u32 = 0x2000;
+const REPLACEFILE_IGNORE_MERGE_ERRORS: u32 = 0x2;
 
 #[repr(C)]
 #[derive(Default)]
@@ -72,9 +74,11 @@ pub fn shell(name: &str) -> Result<PathBuf, String> {
 /// Git's `bin` directory, which holds `bash.exe` and `sh.exe`.
 fn find_git_bin() -> Option<PathBuf> {
     let path = std::env::var_os("PATH").unwrap_or_default();
+    // A relative entry such as `.` would resolve against the project, which could then ship its own shell.
+    let path: Vec<PathBuf> = std::env::split_paths(&path).filter(|dir| dir.is_absolute()).collect();
     let mut candidates = Vec::new();
     // Git's installer puts `Git\cmd` on PATH; the shells sit in `Git\bin`.
-    for dir in std::env::split_paths(&path) {
+    for dir in &path {
         if dir.join("git.exe").is_file()
             && let Some(root) = dir.parent()
         {
@@ -84,8 +88,9 @@ fn find_git_bin() -> Option<PathBuf> {
     if let Some(programs) = std::env::var_os("ProgramFiles") {
         candidates.push(PathBuf::from(programs).join("Git").join("bin"));
     }
-    let system = std::env::var_os("SystemRoot").map(PathBuf::from);
-    candidates.extend(std::env::split_paths(&path).filter(|dir| system.as_ref().is_none_or(|system| !dir.starts_with(system))));
+    // Lowercase: PATH often has `C:\WINDOWS\system32` where SystemRoot says `C:\Windows`.
+    let system = std::env::var_os("SystemRoot").map(|system| system.to_string_lossy().to_lowercase());
+    candidates.extend(path.into_iter().filter(|dir| system.as_ref().is_none_or(|system| !dir.to_string_lossy().to_lowercase().starts_with(system.as_str()))));
     candidates.into_iter().find(|dir| dir.join("bash.exe").is_file() && dir.join("sh.exe").is_file())
 }
 
@@ -134,6 +139,19 @@ pub fn make_private(_path: &Path) -> std::io::Result<()> {
 }
 
 pub fn make_executable(_path: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
+/// Moves `temp` over `path`. ReplaceFileW, not rename: rename fails while another process (an editor, an
+/// indexer) has `path` open, and drops the ACL and attributes `path` had.
+pub fn replace_with(path: &Path, temp: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    let wide = |path: &Path| path.as_os_str().encode_wide().chain([0]).collect::<Vec<u16>>();
+    let (path, temp) = (wide(path), wide(temp));
+    let replaced = unsafe { ReplaceFileW(path.as_ptr(), temp.as_ptr(), std::ptr::null(), REPLACEFILE_IGNORE_MERGE_ERRORS, std::ptr::null(), std::ptr::null()) };
+    if replaced == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
     Ok(())
 }
 

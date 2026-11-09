@@ -141,6 +141,15 @@ pub fn connect(home: &Path, pid: u32) -> Result<local_socket::Stream, String> {
     local_socket::connect(&socket(home, pid)).map_err(|e| format!("Cannot reach session server {pid}: {e}"))
 }
 
+/// Stops the session server `pid`. On Unix it ends its turn and children on SIGTERM (`process::exit_on_signal`);
+/// Windows terminates it, and its job object ends the children.
+pub fn stop(home: &Path, pid: u32) -> Result<(), String> {
+    // A server killed without cleanup leaves its socket while its pid may already be another program's: only one
+    // still accepting on that socket is signalled.
+    connect(home, pid)?;
+    crate::process::signal_process(pid, crate::process::SIGTERM).map_err(|e| e.to_string())
+}
+
 /// Shows the session until it ends or this terminal detaches, then prints what the server said goodbye with. /env
 /// leaves it for a new session in another environment, which this terminal then shows. A remote session whose
 /// connection drops stays on screen while this terminal reconnects to it.
@@ -378,6 +387,18 @@ mod tests {
         std::fs::write(spills.join("out.txt"), "tool output").unwrap();
         sweep(&home);
         assert_eq!([socket.exists(), log.exists(), live_socket.exists(), old_log.exists(), spills.exists()], [false, true, true, false, false]);
+        std::fs::remove_dir_all(&home).unwrap();
+    }
+
+    #[test]
+    fn stopping_a_server_whose_socket_is_a_leftover_signals_nothing() {
+        let home = std::env::temp_dir().join(format!("agent-serve-stop-{}", std::process::id()));
+        std::fs::create_dir_all(dir(&home)).unwrap();
+        // This test's own pid stands for a pid reused by an unrelated program: a signal would end the test run.
+        let pid = std::process::id();
+        std::fs::write(socket(&home, pid), "").unwrap();
+        let error = stop(&home, pid).unwrap_err();
+        assert!(error.starts_with("Cannot reach session server"), "{error}");
         std::fs::remove_dir_all(&home).unwrap();
     }
 

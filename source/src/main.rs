@@ -235,6 +235,8 @@ fn main() {
     process::exit_on_signal(clean_up_on_signal);
     // An earlier agent with this pid that crashed left files that the spill and bg log `create_new` would refuse.
     tools::remove_spills();
+    #[cfg(windows)]
+    tools::remove_dead_agents_spills();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let command = match args.first().map(String::as_str) {
         Some("plugin") => Some(plugin_command(&args[1..])),

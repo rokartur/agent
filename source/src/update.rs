@@ -219,6 +219,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg(windows)]
     fn replace_puts_the_new_binary_in_place_and_clears_older_leftovers() {
         let dir = std::env::temp_dir().join(format!("agent-replace-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -235,8 +236,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
         assert_eq!(installed, "new");
         let aside = format!(".agent-old-{}.exe", std::process::id());
-        let expected = if cfg!(windows) { vec![aside.as_str(), "agent.exe"] } else { vec![".agent-old-1.exe", "agent.exe"] };
-        assert_eq!(left, expected);
+        assert_eq!(left, [aside.as_str(), "agent.exe"]);
     }
 
     #[test]

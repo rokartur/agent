@@ -374,7 +374,7 @@
   },
   {
     "name": "TaskStop",
-    "description": "Stop a background task: a Bash task (bt-N) gets SIGTERM to its process group and SIGKILL after 2s; a subagent (sa-N) stops and SendMessage can resume it later; a workflow (wf-N) stops with its agents. Returns its final state.",
+    "description": "Stop a background task: a Bash task (bt-N) gets SIGTERM to its process group and SIGKILL after 2s (on Windows, taskkill ends its process tree at once); a subagent (sa-N) stops and SendMessage can resume it later; a workflow (wf-N) stops with its agents. Returns its final state.",
     "input_schema": {
       "type": "object",
       "required": ["task_id"],

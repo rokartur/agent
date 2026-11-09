@@ -61,7 +61,9 @@ pub fn append(agent_dir: &Path, entry: Entry) -> Result<(), String> {
     }
     let mut file = crate::process::private_file().create(true).append(true).open(&path).map_err(|e| format!("Cannot open {}: {e}", path.display()))?;
     // `mode` applies only on create; a file from an older build may still be 0644, and prompts hold pasted tokens.
-    crate::process::make_private(&path).map_err(|e| format!("Cannot restrict {}: {e}", path.display()))?;
+    // On the open file, not the path, which another process could have swapped by now. Windows: the profile's ACL.
+    #[cfg(unix)]
+    file.set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o600)).map_err(|e| format!("Cannot restrict {}: {e}", path.display()))?;
     file.write_all(line(&entries[entries.len() - 1]).as_bytes()).map_err(|e| format!("Cannot write {}: {e}", path.display()))
 }
 

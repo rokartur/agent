@@ -429,8 +429,7 @@ pub fn wait(runs: &[Arc<Run>], abort: &AtomicBool) {
         if abort.load(Ordering::Relaxed) {
             let since = *aborted_at.get_or_insert_with(Instant::now);
             let signal = if since.elapsed() < Duration::from_secs(2) { crate::process::SIGTERM } else { crate::process::SIGKILL };
-            // Only running ones: on Windows each signal is a taskkill process the loop waits for.
-            for run in runs.iter().filter(|run| run.is_running()) {
+            for run in runs {
                 run.signal(signal);
             }
         }

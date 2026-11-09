@@ -216,17 +216,8 @@ fn copy_to_clipboard(text: &str) -> Result<(), String> {
     // The stdin handle drops before the wait, so the child sees EOF; it is reaped even when the write failed.
     let written = child.stdin.take().unwrap().write_all(text.as_bytes());
     // Bounded: Set-Clipboard waits while another app holds the clipboard open.
-    let deadline = std::time::Instant::now() + crate::image::CLIPBOARD_TIMEOUT;
-    let status = loop {
-        if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
-            break status;
-        }
-        if std::time::Instant::now() > deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(format!("{program} did not finish copying."));
-        }
-        std::thread::sleep(std::time::Duration::from_millis(10));
+    let Some(status) = crate::process::wait_within(&mut child, crate::image::CLIPBOARD_TIMEOUT).map_err(|e| e.to_string())? else {
+        return Err(format!("{program} did not finish copying."));
     };
     written.map_err(|e| e.to_string())?;
     if !status.success() {

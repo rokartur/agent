@@ -80,4 +80,10 @@ mod tests {
         assert!(spoken_text("\n [BLANK_AUDIO]\n").is_err());
         assert!(spoken_text("").is_err());
     }
+
+    #[test]
+    #[cfg(windows)]
+    fn voice_is_refused_on_windows() {
+        assert_eq!(start(&std::env::temp_dir()).err().unwrap(), "/voice does not work on Windows yet.");
+    }
 }

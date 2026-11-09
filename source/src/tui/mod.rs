@@ -2355,8 +2355,7 @@ impl App {
             KeyCode::Char('x') if !sessions.is_empty() && stopping => {
                 let peer = sessions.remove(*index);
                 *index = (*index).min(sessions.len().saturating_sub(1));
-                // The server ends its turn and children on SIGTERM, as on a closed terminal (`process::exit_on_signal`).
-                if let Err(e) = crate::process::signal_process(peer.pid, crate::process::SIGTERM) {
+                if let Err(e) = crate::serve::stop(&self.home, peer.pid) {
                     self.push(Item::Error(format!("Cannot stop session {}: {e}", peer.session)));
                 }
             }

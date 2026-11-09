@@ -567,6 +567,22 @@ pub fn remove_spills() {
     let _ = std::fs::remove_dir_all(spill_dir());
 }
 
+/// Removes the spill and web store dirs of agents no longer running: a stop on Windows is TerminateProcess, so no
+/// agent there cleans up after itself.
+#[cfg(windows)]
+pub fn remove_dead_agents_spills() {
+    let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else { return };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let pid = name.to_str().and_then(|name| name.strip_prefix("agent-web-").or(name.strip_prefix("agent-"))).and_then(|pid| pid.parse().ok());
+        if let Some(pid) = pid
+            && !crate::process::alive(pid)
+        {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
+}
+
 pub fn format_size(bytes: usize) -> String {
     match bytes {
         b if b < 1024 => format!("{b}B"),
