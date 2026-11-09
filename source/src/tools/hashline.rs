@@ -587,7 +587,7 @@ pub fn str_arg<'a>(input: &'a Value, name: &str) -> Result<&'a str, String> {
 }
 
 /// Replaces an existing `path` through a temp file and rename, so a crash or full disk never truncates it; a new file is written in place.
-pub(super) fn replace_file(path: &Path, new: &[u8]) -> Result<(), String> {
+pub(crate) fn replace_file(path: &Path, new: &[u8]) -> Result<(), String> {
     // rename would replace a symlink itself, so the temp file goes next to the file it points to.
     let Ok(path) = path.canonicalize() else { return std::fs::write(path, new).map_err(|e| format!("Cannot write {}: {e}", path.display())) };
     let name = path.file_name().expect("a canonical file path has a name").to_string_lossy();

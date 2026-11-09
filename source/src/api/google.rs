@@ -227,7 +227,7 @@ fn read(response: Result<ureq::http::Response<ureq::Body>, ureq::Error>, method:
 }
 
 /// Third-party text bound for the terminal, without escapes.
-fn shown(text: &str) -> String {
+pub(crate) fn shown(text: &str) -> String {
     text.trim().chars().filter(|c| !c.is_control()).take(500).collect()
 }
 
@@ -264,6 +264,13 @@ fn manifest_version(yaml: &str) -> Option<String> {
 pub fn models(app: &App, tokens: &Tokens) -> Result<Vec<Model>, String> {
     let body = json!({"project": tokens.account_id});
     Ok(parse_antigravity_models(&call(app, &tokens.access, "fetchAvailableModels", &body)?))
+}
+
+/// The first image model `fetchAvailableModels` lists for an Antigravity account; `parse_antigravity_models` leaves them out.
+pub fn image_model(app: &App, tokens: &Tokens) -> Result<String, String> {
+    let listed = call(app, &tokens.access, "fetchAvailableModels", &json!({"project": tokens.account_id}))?;
+    let mut ids = listed["imageGenerationModelIds"].as_array().into_iter().flatten().filter_map(Value::as_str);
+    ids.find(|id| !id.is_empty()).map(String::from).ok_or("This Antigravity account lists no image model.".into())
 }
 
 /// The quota of each model, in percent used, from the same call as the model list.
@@ -418,14 +425,35 @@ pub fn request(app: &App, anthropic: &Value, project: &str, session: &str) -> Va
         inner["toolConfig"] = json!({"functionCallingConfig": {"mode": "VALIDATED"}});
     }
     inner["sessionId"] = json!(session);
+    envelope(project, id, inner)
+}
+
+/// The Cloud Code Assist wrapper around a Gemini request.
+fn envelope(project: &str, model: &str, request: Value) -> Value {
     json!({
         "project": project,
-        "model": id,
-        "request": inner,
+        "model": model,
+        "request": request,
         "userAgent": "antigravity",
         "requestId": format!("agent-{}-{}", crate::process::now_ms(), oauth::random_hex(8)),
     })
 }
+
+/// A `streamGenerateContent` body for an Antigravity image model, as oh-my-pi sends it: the input images, then the
+/// prompt, answered with an image and nothing else.
+pub fn image_request(model: &str, project: &str, prompt: &str, inputs: &[Value]) -> Value {
+    let mut parts: Vec<Value> = inputs.iter().map(inline_data).collect();
+    parts.push(json!({"text": prompt}));
+    let request = json!({
+        "contents": [{"role": "user", "parts": parts}],
+        "systemInstruction": {"parts": [{"text": IMAGE_SYSTEM_INSTRUCTION}]},
+        "generationConfig": {"responseModalities": ["IMAGE"]},
+    });
+    envelope(project, model, request)
+}
+
+const IMAGE_SYSTEM_INSTRUCTION: &str =
+    "You are an AI image generator. Generate images based on user descriptions. Focus on creating high-quality, visually appealing images that match the user's request.";
 
 /// The model id Cloud Code Assist knows, without the provider prefix.
 pub fn wire_model(anthropic: &Value) -> &str {
@@ -608,9 +636,15 @@ pub fn parse_stream(reader: &mut dyn BufRead, owner: &str, abort: &AtomicBool, o
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::io::{Read, Write};
+
+    /// The Antigravity app on local endpoints; the built-in version stands, so no request goes to the update manifest.
+    pub(crate) fn app_at(base: &str, fallback: &str) -> App {
+        let _ = ANTIGRAVITY_LATEST.set(ANTIGRAVITY_VERSION.into());
+        App { base: base.to_string().leak(), fallback: Some(fallback.to_string().leak()), ..ANTIGRAVITY_APP }
+    }
 
     fn pending() -> Pending {
         Pending { url: String::new(), verifier: "v".into(), state: "s1".into() }
@@ -738,6 +772,17 @@ mod tests {
                 ]},
             ])
         );
+    }
+
+    #[test]
+    fn an_image_request_carries_the_inputs_then_the_prompt_and_asks_for_an_image_only() {
+        let input = json!({"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "iVBO"}});
+        let body = image_request("gemini-3-pro-image", "proj-1", "a red dot", &[input]);
+        assert_eq!((&body["project"], &body["model"]), (&json!("proj-1"), &json!("gemini-3-pro-image")));
+        let inner = &body["request"];
+        assert_eq!(inner["contents"], json!([{"role": "user", "parts": [{"inlineData": {"mimeType": "image/png", "data": "iVBO"}}, {"text": "a red dot"}]}]));
+        assert_eq!(inner["generationConfig"], json!({"responseModalities": ["IMAGE"]}));
+        assert_eq!(inner["systemInstruction"]["parts"][0]["text"], IMAGE_SYSTEM_INSTRUCTION);
     }
 
     #[test]

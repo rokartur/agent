@@ -35,7 +35,12 @@ const MAX_SOURCE_BYTES: u64 = 100 << 20;
 
 /// Reads an image file into an API image block.
 pub fn block(path: &Path) -> Result<Value, String> {
-    let size = std::fs::metadata(path).map_err(|e| format!("Cannot read {}: {e}", path.display()))?.len();
+    let metadata = std::fs::metadata(path).map_err(|e| format!("Cannot read {}: {e}", path.display()))?;
+    // /dev/zero has size 0 and never ends; reading a FIFO blocks.
+    if !metadata.is_file() {
+        return Err(format!("{} is not a regular file.", path.display()));
+    }
+    let size = metadata.len();
     if size > MAX_SOURCE_BYTES {
         return Err(format!(
             "{} is {}; images over {} are not attached. Shrink it first, e.g. magick in.png -resize 50% out.jpg.",
@@ -166,7 +171,7 @@ fn shrunk(bytes: &[u8], media_type: &'static str, side: u32) -> Result<(&'static
 }
 
 /// The API rejects a media type that disagrees with the bytes, and a `.png` file can hold a JPEG.
-fn sniffed_media_type(bytes: &[u8]) -> Option<&'static str> {
+pub(crate) fn sniffed_media_type(bytes: &[u8]) -> Option<&'static str> {
     match bytes {
         [0x89, b'P', b'N', b'G', ..] => Some("image/png"),
         [0xff, 0xd8, 0xff, ..] => Some("image/jpeg"),
@@ -246,7 +251,7 @@ pub fn from_base64(data: &str) -> Result<Value, String> {
     bytes_block(unbase64(data).ok_or("The image is not valid base64")?)
 }
 
-fn unbase64(text: &str) -> Option<Vec<u8>> {
+pub(crate) fn unbase64(text: &str) -> Option<Vec<u8>> {
     let mut out = Vec::with_capacity(text.len() / 4 * 3);
     let (mut acc, mut bits) = (0u32, 0);
     for ch in text.bytes().take_while(|&ch| ch != b'=') {
@@ -312,12 +317,14 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn an_image_over_the_api_limit_is_refused_before_reading() {
+    fn an_image_over_the_api_limit_or_not_a_regular_file_is_refused_before_reading() {
         let file = std::env::temp_dir().join(format!("agent-big-image-{}.png", std::process::id()));
         std::fs::File::create(&file).unwrap().set_len(MAX_SOURCE_BYTES + 1).unwrap();
         let block = block(&file);
         std::fs::remove_file(&file).unwrap();
         assert!(block.unwrap_err().contains("images over"));
+        let folder = std::env::temp_dir();
+        assert_eq!(super::block(&folder).unwrap_err(), format!("{} is not a regular file.", folder.display()));
     }
 
     #[test]

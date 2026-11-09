@@ -3080,7 +3080,7 @@ impl App {
                         match self.client.remove(&account.provider, &account.name) {
                             Ok(()) => {
                                 self.system("logout", format!("Removed {}.", account.name));
-                                self.reload_models();
+                                self.accounts_changed();
                             }
                             Err(error) => self.push(Item::Error(error)),
                         }
@@ -3152,7 +3152,7 @@ impl App {
                 match self.client.add(account) {
                     Ok(()) => {
                         self.system("login", format!("Saved {name}."));
-                        self.reload_models();
+                        self.accounts_changed();
                     }
                     Err(error) => return self.push(Item::Error(error)),
                 }
@@ -3165,14 +3165,16 @@ impl App {
         }
     }
 
-    /// Lists the models again after /login or /logout changed the accounts, so /model shows them without a restart.
-    fn reload_models(&self) {
+    /// Lists the models again after /login or /logout changed the accounts, so /model shows them without a restart,
+    /// and has the agent apply the settings again, so ImageGenerate follows the accounts that can draw.
+    fn accounts_changed(&self) {
         let (client, events) = (self.client.clone(), self.events.clone());
         std::thread::spawn(move || {
             for failure in client.load_catalog() {
                 let _ = events.send(Msg::Agent(Event::Notice(format!("Model list failed: {failure}"))));
             }
         });
+        let _ = self.commands.send(Command::Apply(Box::new(self.settings.clone())));
     }
 
     /// /goal: no argument shows the goal, a keyword manages it, anything else sets a new goal and starts on it.

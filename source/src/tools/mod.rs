@@ -36,9 +36,15 @@ const SCHEMAS: &str = include_str!("tools.json");
 
 /// Every tool in tools.json order; `Agent` carries the swarm prompt like jcode's `swarm`.
 /// One fixed list: the tools head the cached prompt prefix, so changing it mid-session rewrites the whole cache.
-pub fn schemas(swarm_prompt: &str, context_tree_query: bool) -> Value {
+/// `image_generate` is whether an account has an image model; without one ImageGenerate is left out.
+pub fn schemas(swarm_prompt: &str, context_tree_query: bool, image_generate: bool) -> Value {
     let all: Vec<Value> = serde_json::from_str(SCHEMAS).expect("tools.json is valid JSON");
-    let mut tools: Vec<Value> = all.into_iter().filter(|tool| context_tree_query || tool["name"] != "ContextTreeQuery").collect();
+    let offered = |tool: &Value| match tool["name"].as_str() {
+        Some("ContextTreeQuery") => context_tree_query,
+        Some("ImageGenerate") => image_generate,
+        _ => true,
+    };
+    let mut tools: Vec<Value> = all.into_iter().filter(offered).collect();
     if let Some(tool) = tools.iter_mut().find(|tool| tool["name"] == "Agent") {
         let base = tool["description"].as_str().expect("tools.json describes Agent");
         tool["description"] = format!("{base}\n\nSwarm prompt (user-tunable via ~/.agents/swarm-prompt.md):\n{swarm_prompt}").into();
@@ -285,16 +291,7 @@ fn write(input: &Value, cwd: &Path, editor: Option<&dyn hashline::EditorFiles>) 
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("Cannot create {}: {e}", parent.display()))?;
     }
-    // Reading a FIFO blocks and /dev/zero never ends; abort cannot stop either.
-    if path.exists() && !path.is_file() {
-        return Err(format!("{} is not a regular file.", path.display()));
-    }
-    // The rename in replace_file would succeed over a file the user cannot even read.
-    if let Err(e) = std::fs::File::open(&path)
-        && e.kind() != std::io::ErrorKind::NotFound
-    {
-        return Err(format!("Cannot read {}: {e}", path.display()));
-    }
+    check_target(&path)?;
     match editor.filter(|editor| editor.serves(&path)) {
         Some(editor) => editor.write(&path, content)?,
         None => hashline::replace_file(&path, content.as_bytes())?,
@@ -303,6 +300,21 @@ fn write(input: &Value, cwd: &Path, editor: Option<&dyn hashline::EditorFiles>) 
     let path = path.canonicalize().unwrap_or(path);
     // No echo of the content: it is already in the call, and every later turn would pay for it twice.
     Ok(format!("Wrote {} lines to {}.", content.lines().count(), path.display()))
+}
+
+/// Refuses a file a write must not replace: one that is not a regular file, or one the user cannot read.
+pub(crate) fn check_target(path: &Path) -> Result<(), String> {
+    // Reading a FIFO blocks and /dev/zero never ends; abort cannot stop either.
+    if path.exists() && !path.is_file() {
+        return Err(format!("{} is not a regular file.", path.display()));
+    }
+    // The rename in replace_file would succeed over a file the user cannot even read.
+    if let Err(e) = std::fs::File::open(path)
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        return Err(format!("Cannot read {}: {e}", path.display()));
+    }
+    Ok(())
 }
 
 /// pi file-search's rg argv as JSON events: the pattern after `--`, counts clamped.
@@ -597,15 +609,17 @@ mod tests {
     }
 
     #[test]
-    fn context_tree_query_is_offered_only_when_asked() {
-        let offers = |query: bool| schemas("", query).as_array().unwrap().iter().any(|tool| tool["name"] == "ContextTreeQuery");
-        assert!(offers(true));
-        assert!(!offers(false));
+    fn context_tree_query_and_image_generate_are_offered_only_when_asked() {
+        let offers = |query: bool, images: bool, name: &str| schemas("", query, images).as_array().unwrap().iter().any(|tool| tool["name"] == name);
+        assert!(offers(true, false, "ContextTreeQuery"));
+        assert!(!offers(false, true, "ContextTreeQuery"));
+        assert!(offers(false, true, "ImageGenerate"));
+        assert!(!offers(true, false, "ImageGenerate"));
     }
 
     #[test]
     fn parameters_a_schema_lacks_are_named_at_any_depth() {
-        let tools = schemas("", false);
+        let tools = schemas("", false, false);
         let undeclared = |name: &str, input: Value| undeclared_params(&tools, name, &input);
         assert_eq!(undeclared("Grep", json!({"pattern": "x", "head_limit": 5, "-n": true})).unwrap(), "Grep does not take `-n`, `head_limit`.");
         let edits = json!({"file_path": "a", "edits": [{"old_string": "a", "new_string": "b", "replace_all": true}, {"old_string": "c", "new_string": "d", "replace_all": true}]});
@@ -616,7 +630,7 @@ mod tests {
 
     #[test]
     fn declared_parameters_free_form_values_and_other_tools_pass() {
-        let tools = schemas("", false);
+        let tools = schemas("", false, false);
         let undeclared = |name: &str, input: Value| undeclared_params(&tools, name, &input);
         assert_eq!(undeclared("Grep", json!({"pattern": "x", "-C": 2, "-A": 3, "-B": 1, "output_mode": "count"})), None);
         assert_eq!(undeclared("TaskStop", json!({"task_id": "bt-1"})), None);

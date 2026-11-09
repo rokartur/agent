@@ -30,7 +30,7 @@ pub const PROMPT: &str = "<plan_mode>
 Plan mode is on. Investigate and design, change nothing. Edits, subagents, plugin and MCP tools and state-changing commands are blocked; Bash runs only read-only commands (ls, cat, rg, fd, git status/log/diff/show, ...). Ask with AskUserQuestion when a decision cannot be inferred. When the plan is ready, call ExitPlanMode with the whole plan in Markdown as your last action. Start the plan with a `# Title` heading. The user then picks: implement in a fresh session, export, or keep planning.
 </plan_mode>";
 
-const EDITING_TOOLS: [&str; 7] = ["Write", "ReplaceLines", "Edit", "InsertLines", "Agent", "EnterWorktree", "ExitWorktree"];
+const EDITING_TOOLS: [&str; 8] = ["Write", "ReplaceLines", "Edit", "InsertLines", "ImageGenerate", "Agent", "EnterWorktree", "ExitWorktree"];
 
 const READ_ONLY_COMMANDS: [&str; 18] = ["ls", "cat", "head", "tail", "wc", "rg", "fd", "pwd", "tree", "file", "stat", "which", "echo", "jq", "diff", "du", "cd", "true"];
 const READ_ONLY_GIT: [&str; 7] = ["status", "log", "diff", "show", "blame", "ls-files", "rev-parse"];
@@ -116,7 +116,7 @@ mod tests {
 
     #[test]
     fn blocks_edits_and_state_changing_commands() {
-        for tool in ["Write", "Edit", "Agent", "EnterWorktree", "my-plugin__lookup", "mcp__github__create_issue"] {
+        for tool in ["Write", "Edit", "ImageGenerate", "Agent", "EnterWorktree", "my-plugin__lookup", "mcp__github__create_issue"] {
             assert!(blocked(tool, &json!({"path": "a"})).is_some(), "{tool}");
         }
         for tool in ["Read", "Grep", "Goal", "TaskStop", "AskUserQuestion", "Skill"] {
