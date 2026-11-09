@@ -304,6 +304,10 @@ pub fn launch(workflows: &Arc<Mutex<Vec<Arc<Workflow>>>>, script: String, args: 
     let watched = workflow.clone();
     std::thread::spawn(move || {
         let result = execute(&watched, &args, prior.unwrap_or_default(), &host);
+        // The script can end, fail or be stopped with agents still running; nothing would supervise them.
+        for run in watched.runs() {
+            run.stop();
+        }
         let mut queued = host.follow_ups.lock().unwrap();
         let text = match &result {
             Ok(answer) => format!("Workflow {} ({}) finished.\n\n{answer}", watched.id, watched.name),
