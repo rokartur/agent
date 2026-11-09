@@ -1,0 +1,2 @@
+# Files built into the binary with include_str! must not pick up CRLF on Windows checkouts.
+* text=auto eol=lf
