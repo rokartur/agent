@@ -2250,7 +2250,7 @@ impl Session {
             let copied = session.path.as_ref().expect("saved above").with_extension("").join("pages");
             std::fs::create_dir_all(copied.parent().expect("a session file has a folder")).map_err(|e| format!("Cannot create {}: {e}", copied.display()))?;
             crate::process::private_dir(&copied)?;
-            for file in files.flatten() {
+            for file in files.flatten().filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file())) {
                 // std::fs::copy keeps the 0600 of the page.
                 std::fs::copy(file.path(), copied.join(file.file_name())).map_err(|e| format!("Cannot copy {}: {e}", file.path().display()))?;
             }
@@ -3228,7 +3228,7 @@ mod tests {
         let open = Session::start(&dir, true, Path::new("/w"), "m").unwrap();
         open.append(&json!({"type": "message", "message": user("hi")})).unwrap();
         let pages = open.path.as_ref().unwrap().with_extension("").join("pages");
-        std::fs::create_dir_all(&pages).unwrap();
+        std::fs::create_dir_all(pages.join("not-a-page")).unwrap();
         std::fs::write(pages.join("1.html"), "<p>page</p>").unwrap();
         let (copy, history) = Session::resume(&dir, &open.id).unwrap();
         let copied = Session::history(copy.path.as_ref().unwrap()).unwrap();
