@@ -453,6 +453,7 @@ const BUILTIN_COMMANDS: &[(&str, MidTurn, &str)] = &[
     ("settings", MidTurn::Runs, "Open settings menu"),
     ("permissions", MidTurn::Runs, "<mode>: ask, auto or full access"),
     ("thinking", MidTurn::Runs, "<level>: Set thinking level"),
+    ("effort", MidTurn::Runs, "<level>: Alias for /thinking"),
     ("fast", MidTurn::Runs, "Step speed: standard, fast, ultrafast; quicker output, billed higher, on models that offer it"),
     ("ponytail", MidTurn::Runs, "<off | lite | full | ultra>: Set the ponytail level"),
     ("caveman", MidTurn::Runs, "<off | full | ultra | wenyan>: Set the caveman level"),
@@ -463,7 +464,7 @@ const BUILTIN_COMMANDS: &[(&str, MidTurn, &str)] = &[
     ("copy-session-path", MidTurn::Runs, "Copy this session's file path to clipboard for another session to read"),
     ("session", MidTurn::Runs, "Show the session id, file and context use"),
     ("hotkeys", MidTurn::Runs, "Show all keyboard shortcuts"),
-    ("compact", MidTurn::Waits, "[focus]: Summarize older messages"),
+    ("compact", MidTurn::Waits, "[note]: Summarize older messages"),
     ("handoff", MidTurn::Waits, "[next task]: Summarize this conversation and continue in a fresh session"),
     ("plan", MidTurn::Waits, "[task | export [file] | implement | exit]: Plan mode, read-only until you pick what to do with the plan; ~/.agents/prompts/plan.md overrides the prompt"),
     ("todos", MidTurn::Runs, "Show and edit the todo list"),
@@ -2469,6 +2470,7 @@ impl App {
             });
         }
         let (name, args) = trimmed.strip_prefix('/').map_or(("", ""), |rest| rest.split_once(' ').map_or((rest, ""), |(name, args)| (name, args.trim())));
+        let name = if name == "effort" { "thinking" } else { name };
         match name {
             "quit" | "exit" => self.quit = true,
             "detach" => self.detach(),
@@ -4678,7 +4680,7 @@ impl App {
     fn accept_slash(&mut self, run: bool) {
         let matches = self.menu_matches();
         let name = matches[self.menu_index.min(matches.len() - 1)].0.clone();
-        let takes_args = matches!(name.as_str(), "thinking" | "rename-title" | "btw" | "goal" | "import" | "workspace add" | "workspace remove")
+        let takes_args = matches!(name.as_str(), "thinking" | "effort" | "rename-title" | "btw" | "goal" | "import" | "workspace add" | "workspace remove")
             || name.starts_with("prompt:")
             || name.starts_with("skill:")
             || self.skill_command(format!("/{name}")).starts_with("/skill:")
@@ -5888,7 +5890,7 @@ fn matching_commands(commands: &[(String, String)], text: &str) -> Vec<(String, 
 /// Fixed argument values of `name` starting with `arg`, as whole `name value` entries so accepting one fills or runs the command.
 fn matching_args(name: &str, arg: &str) -> Vec<(String, String)> {
     let values: Vec<(&str, &str)> = match name {
-        "thinking" => THINKING_LEVELS.iter().map(|level| (*level, "")).collect(),
+        "thinking" | "effort" => THINKING_LEVELS.iter().map(|level| (*level, "")).collect(),
         "ponytail" => PONYTAIL_LEVELS.iter().map(|level| (*level, "")).collect(),
         "caveman" => CAVEMAN_LEVELS.iter().map(|level| (*level, "")).collect(),
         "permissions" => MODES.iter().map(|mode| (mode.label(), mode.description())).collect(),

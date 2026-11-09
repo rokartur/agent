@@ -38,7 +38,7 @@ Esc Esc on an idle session lists `RewindPoint`s: every user prompt with its inde
 
 Two mechanisms shrink the provider's view, both keep the originals in `messages`:
 
-- **Compaction** (`Agent::compact`): one summary replaces everything before `cut`. Runs on `/compact [focus]`, `/handoff`, and automatically when context tokens pass `context_window - reserve_tokens`. The summary prompt is `SUMMARY_PROMPT` in `agent/mod.rs`; `keep_recent_tokens` stays verbatim.
+- **Compaction** (`Agent::compact`): one summary replaces everything before `cut`. Runs on `/compact [note]`, `/handoff`, and automatically when context tokens pass `context_window - reserve_tokens`. The summary prompt is `SUMMARY_PROMPT` in `agent/mod.rs`; `keep_recent_tokens` stays verbatim.
 - **Condense** (`agent/condense.rs`, pi-condense's design): batches of finished tool calls are summarized on a background thread by the cheap model, each call labelled `[[N:name]]` and given a short ref like `t7`. The model sees the summary; `ContextTreeQuery` fetches an original by ref. `PROTECTED_TOOLS` never condense. Settings: `condense.enabled`, `condense.model`, `condense.min_batch_chars`.
 
 `/context` shows how the window splits across system prompt, tools, messages and summaries (`agent/context.rs`).
