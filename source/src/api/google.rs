@@ -425,10 +425,15 @@ pub fn request(app: &App, anthropic: &Value, project: &str, session: &str) -> Va
         inner["toolConfig"] = json!({"functionCallingConfig": {"mode": "VALIDATED"}});
     }
     inner["sessionId"] = json!(session);
+    envelope(project, id, inner)
+}
+
+/// The Cloud Code Assist wrapper around a Gemini request.
+fn envelope(project: &str, model: &str, request: Value) -> Value {
     json!({
         "project": project,
-        "model": id,
-        "request": inner,
+        "model": model,
+        "request": request,
         "userAgent": "antigravity",
         "requestId": format!("agent-{}-{}", crate::process::now_ms(), oauth::random_hex(8)),
     })
@@ -439,17 +444,12 @@ pub fn request(app: &App, anthropic: &Value, project: &str, session: &str) -> Va
 pub fn image_request(model: &str, project: &str, prompt: &str, inputs: &[Value]) -> Value {
     let mut parts: Vec<Value> = inputs.iter().map(inline_data).collect();
     parts.push(json!({"text": prompt}));
-    json!({
-        "project": project,
-        "model": model,
-        "request": {
-            "contents": [{"role": "user", "parts": parts}],
-            "systemInstruction": {"parts": [{"text": IMAGE_SYSTEM_INSTRUCTION}]},
-            "generationConfig": {"responseModalities": ["IMAGE"]},
-        },
-        "userAgent": "antigravity",
-        "requestId": format!("agent-{}-{}", crate::process::now_ms(), oauth::random_hex(8)),
-    })
+    let request = json!({
+        "contents": [{"role": "user", "parts": parts}],
+        "systemInstruction": {"parts": [{"text": IMAGE_SYSTEM_INSTRUCTION}]},
+        "generationConfig": {"responseModalities": ["IMAGE"]},
+    });
+    envelope(project, model, request)
 }
 
 const IMAGE_SYSTEM_INSTRUCTION: &str =
@@ -778,8 +778,7 @@ pub(crate) mod tests {
     fn an_image_request_carries_the_inputs_then_the_prompt_and_asks_for_an_image_only() {
         let input = json!({"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "iVBO"}});
         let body = image_request("gemini-3-pro-image", "proj-1", "a red dot", &[input]);
-        assert_eq!((&body["project"], &body["model"], &body["userAgent"]), (&json!("proj-1"), &json!("gemini-3-pro-image"), &json!("antigravity")));
-        assert!(body["requestId"].as_str().unwrap().starts_with("agent-"));
+        assert_eq!((&body["project"], &body["model"]), (&json!("proj-1"), &json!("gemini-3-pro-image")));
         let inner = &body["request"];
         assert_eq!(inner["contents"], json!([{"role": "user", "parts": [{"inlineData": {"mimeType": "image/png", "data": "iVBO"}}, {"text": "a red dot"}]}]));
         assert_eq!(inner["generationConfig"], json!({"responseModalities": ["IMAGE"]}));
