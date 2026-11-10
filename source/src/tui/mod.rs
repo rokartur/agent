@@ -150,6 +150,8 @@ enum Msg {
     WorktreeRemoved(PathBuf, Result<(), String>),
     /// The footer's git state, read off the UI thread in this cwd, and how long the read took.
     Git(PathBuf, Git, Duration),
+    /// The rules of a newly picked ponytail or caveman level finished downloading.
+    ModesFetched(Result<(), String>),
     /// A plugin set its status or exited: redraw the footer and /plugins.
     PluginsChanged,
     /// An MCP server connected, failed or exited: redraw /mcp.
@@ -1830,6 +1832,8 @@ impl App {
             Msg::Changes(Ok(Some(files))) if files.is_empty() => self.system("changes", "No files changed in this session."),
             Msg::Changes(Ok(Some(files))) => self.replace_panel(Panel::Changes { files, index: 0 }),
             Msg::Changes(Err(error)) => self.push(Item::Error(error)),
+            Msg::ModesFetched(Err(error)) => self.push(Item::Error(error)),
+            Msg::ModesFetched(Ok(())) => {}
             Msg::Context { split, session } => {
                 let window = self.context_window();
                 self.push(Item::Lines(context_lines(split, window, session, self.last_usage)));
@@ -2207,11 +2211,12 @@ impl App {
         self.expanded = self.settings.expand_tools;
         *self.permission_mode.lock().unwrap() = self.settings.permission_mode;
         self.client.configure(&self.settings);
-        // Startup already refreshed the rules; a new level downloads only its missing file, which can take seconds offline.
-        if (self.settings.ponytail != old.ponytail || self.settings.caveman != old.caveman)
-            && let Err(error) = modes::fetch(&self.home, &self.settings.ponytail, &self.settings.caveman, false)
-        {
-            self.push(Item::Error(error));
+        // Startup already refreshed the rules; a new level downloads only its missing file, behind the UI: offline that takes 10 s per file.
+        if self.settings.ponytail != old.ponytail || self.settings.caveman != old.caveman {
+            let (home, ponytail, caveman, events) = (self.home.clone(), self.settings.ponytail.clone(), self.settings.caveman.clone(), self.events.clone());
+            std::thread::spawn(move || {
+                let _ = events.send(Msg::ModesFetched(modes::fetch(&home, &ponytail, &caveman, false)));
+            });
         }
         if self.settings.conflict_priority != old.conflict_priority || self.settings.trusted_projects != old.trusted_projects {
             self.load_skills_and_prompts();
@@ -6801,6 +6806,18 @@ mod tests {
         *run.state.lock().unwrap() = crate::agent::subagent::RunState { tool_calls: 31, elapsed: Some(Duration::from_secs(8)), result: Some(Err("Operation aborted".into())), ..Default::default() };
         let rows: Vec<String> = subagent_done_lines(&run, 30).iter().map(text).collect();
         assert_eq!(rows, ["✗ sa-1 scan · 31 tools · 8s ", "  · Operation aborted"]);
+    }
+
+    #[test]
+    fn a_failed_mode_rules_download_is_reported_in_the_transcript() {
+        let home = std::env::temp_dir().join(format!("agent-modes-fetched-{}", std::process::id()));
+        let mut app = test_app(&home);
+        app.handle(Msg::ModesFetched(Ok(())));
+        let after_success = app.entries.len();
+        app.handle(Msg::ModesFetched(Err("Cannot download the ponytail rules from x: offline".into())));
+        let _ = std::fs::remove_dir_all(&home);
+        assert_eq!(app.entries.len(), after_success + 1);
+        assert!(matches!(&app.entries.last().unwrap().item, Item::Error(error) if error.ends_with("x: offline")));
     }
 
     #[test]
