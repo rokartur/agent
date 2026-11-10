@@ -43,7 +43,7 @@ impl Drop for Home {
 }
 
 /// Answers the model list and every request without tools (titles, summaries) itself, and each request with tools
-/// with the next of `replies`; the bodies of the requests with tools go to `requests`.
+/// with the next of `replies`, one that is an error body with status 400; the bodies of the requests with tools go to `requests`.
 struct FakeApi {
     base: String,
     requests: Receiver<Value>,
@@ -81,6 +81,7 @@ fn fake_api(replies: Vec<String>) -> FakeApi {
                 } else {
                     let _ = sent.send(request);
                     match replies.next() {
+                        Some(error) if error.starts_with(r#"{"error""#) => (400, error),
                         Some(reply) => (200, reply),
                         None => (400, r#"{"error":{"type":"invalid_request_error","message":"The fake API has no more replies."}}"#.to_string()),
                     }
@@ -102,7 +103,11 @@ fn tool_use(id: &str, name: &str, input: Value) -> Value {
 
 /// One streamed model reply: text blocks arrive as deltas, tool calls whole.
 fn reply(blocks: &[Value], stop_reason: &str) -> String {
-    let mut events = vec![json!({"type": "message_start", "message": {"id": "msg", "usage": {"input_tokens": 100}}})];
+    reply_with_input_tokens(blocks, stop_reason, 100)
+}
+
+fn reply_with_input_tokens(blocks: &[Value], stop_reason: &str, input_tokens: u64) -> String {
+    let mut events = vec![json!({"type": "message_start", "message": {"id": "msg", "usage": {"input_tokens": input_tokens}}})];
     for (index, block) in blocks.iter().enumerate() {
         if block["type"] == "text" {
             events.push(json!({"type": "content_block_start", "index": index, "content_block": {"type": "text", "text": ""}}));
@@ -304,6 +309,64 @@ impl Drop for Editor {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
+}
+
+/// Every file under `dir`, at any depth.
+fn files_under(dir: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() { files.extend(files_under(&path)) } else { files.push(path) }
+    }
+    files
+}
+
+#[test]
+fn a_nearly_full_context_is_compacted_before_the_next_request() {
+    let home = Home::new("compact");
+    std::fs::create_dir_all(home.dir.join(".agents")).unwrap();
+    std::fs::write(home.dir.join(".agents/settings.json"), r#"{"keep_recent_tokens": 0}"#).unwrap();
+    // 199 000 is past the 200 000 window of the fake's models less the reserve.
+    let api = fake_api(vec![reply_with_input_tokens(&[text("first answer")], "end_turn", 199_000), reply(&[text("second answer")], "end_turn")]);
+    let mut editor = Editor::start(&home, &api);
+    let session_id = editor.new_session(&home.project());
+
+    editor.prompt(&session_id, "one").unwrap();
+    editor.prompt(&session_id, "two").unwrap();
+
+    let second = api.requests.try_iter().nth(1).unwrap();
+    let messages = second["messages"].as_array().unwrap();
+    assert!(messages[0].to_string().contains("Fake title"), "the summary leads: {}", messages[0]);
+    assert!(!messages.iter().flat_map(|message| message["content"].as_array().unwrap()).any(|block| block["text"] == "one"), "{messages:?}");
+    let sessions: Vec<String> =
+        files_under(&home.dir.join(".agents")).iter().filter(|path| path.extension().is_some_and(|extension| extension == "jsonl")).map(|path| std::fs::read_to_string(path).unwrap()).collect();
+    let session: Vec<&String> = sessions.iter().filter(|session| session.contains(r#""text":"two""#)).collect();
+    assert_eq!(session.len(), 1);
+    let compactions: Vec<Value> = session[0].lines().map(|line| serde_json::from_str(line).unwrap()).filter(|entry: &Value| entry["type"] == "compaction").collect();
+    assert_eq!(compactions.len(), 1);
+    assert!(compactions[0]["cut"].as_u64().unwrap() >= 1, "{}", compactions[0]);
+}
+
+#[test]
+fn a_context_limit_error_retries_once_within_the_limit_and_a_repeat_ends_the_turn() {
+    let too_long = || r#"{"error":{"type":"invalid_request_error","message":"prompt is too long: 250000 tokens > 150000 maximum"}}"#.to_string();
+
+    let home = Home::new("limit-retry");
+    let api = fake_api(vec![too_long(), reply(&[text("ok")], "end_turn")]);
+    let mut editor = Editor::start(&home, &api);
+    let session_id = editor.new_session(&home.project());
+    assert_eq!(editor.prompt(&session_id, "Hi.").unwrap(), json!({"stopReason": "end_turn"}));
+    let chunks: Vec<&str> = editor.updates("agent_message_chunk").iter().map(|update| update["content"]["text"].as_str().unwrap()).collect();
+    assert_eq!(chunks.concat(), "ok");
+    assert_eq!(api.requests.try_iter().count(), 2);
+
+    let home = Home::new("limit-repeat");
+    let api = fake_api(vec![too_long(), too_long(), reply(&[text("a third try")], "end_turn")]);
+    let mut editor = Editor::start(&home, &api);
+    let session_id = editor.new_session(&home.project());
+    let error = editor.prompt(&session_id, "Hi.").unwrap_err();
+    assert!(error.contains("prompt is too long"), "{error}");
+    assert_eq!(api.requests.try_iter().count(), 2, "a limit that is not lower is not retried");
 }
 
 #[test]
