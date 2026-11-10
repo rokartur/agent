@@ -77,6 +77,7 @@ const ANIMATION_TICK: Duration = Duration::from_millis(80);
 const HINT_LIFETIME: Duration = Duration::from_millis(1500);
 /// Other sessions and terminals add worktrees, switch branches and edit files, so the footer polls git.
 const GIT_REFRESH: Duration = Duration::from_secs(3);
+const RUN_VIEW_REFRESH: Duration = Duration::from_millis(250);
 const EDGE_SCROLL: Duration = Duration::from_millis(40);
 const PERMISSION_SETTLE: Duration = Duration::from_millis(400);
 
@@ -5134,7 +5135,7 @@ impl App {
 
     /// Shows `run`'s session in place of the transcript, or the main transcript again for None.
     fn view_run(&mut self, run: Option<Arc<Run>>) {
-        self.viewed = run.map(|run| RunView { run, loaded: None, lines: Vec::new() });
+        self.viewed = run.map(|run| RunView { run, loaded: None, built: None, lines: Vec::new() });
         self.panel = None;
         self.scroll = 0;
         self.selection = Selection::default();
@@ -6148,20 +6149,23 @@ fn footer_agents(runs: &Runs) -> usize {
     runs.list.iter().filter(|run| run.is_running() && run.workflow.is_none()).count()
 }
 
-/// The subagent shown in place of the transcript. `loaded` is the (file size, width) `lines` were built for.
+/// The subagent shown in place of the transcript. `loaded` is the (file size, width) `lines` were built for, `built` when.
 struct RunView {
     run: Arc<Run>,
     loaded: Option<(u64, usize)>,
+    built: Option<Instant>,
     lines: Vec<Line>,
 }
 
 impl RunView {
-    /// The run's session as transcript lines, reread when its file grows.
+    /// The run's session as transcript lines, reread when its file grows, at most every `RUN_VIEW_REFRESH` while the run works.
     fn lines(&mut self, width: usize, cwd: &Path) -> &[Line] {
         let session = self.run.state.lock().unwrap().session.clone().filter(|_| self.run.environment().is_none());
         let size = session.as_ref().and_then(|path| std::fs::metadata(path).ok()).map_or(0, |meta| meta.len());
-        if self.loaded != Some((size, width)) {
+        let held = self.run.is_running() && self.loaded.is_some_and(|(_, loaded_width)| loaded_width == width) && self.built.is_some_and(|at| at.elapsed() < RUN_VIEW_REFRESH);
+        if self.loaded != Some((size, width)) && !held {
             self.loaded = Some((size, width));
+            self.built = Some(Instant::now());
             self.lines = match session {
                 None => system_lines("⚙", "task", &self.run.task, SYSTEM, width),
                 Some(path) => subagent_lines(Path::new(&path), width, cwd).unwrap_or_else(|error| system_lines("✗", "error", &error, ERROR, width)),
@@ -6824,11 +6828,40 @@ mod tests {
     fn a_subagent_on_another_computer_shows_its_task_not_its_session_file_path_there() {
         let shown = |run: crate::agent::subagent::Run| {
             run.state.lock().unwrap().session = Some("/nonexistent/agent-remote-session.jsonl".into());
-            let mut view = RunView { run: Arc::new(run), loaded: None, lines: Vec::new() };
+            let mut view = RunView { run: Arc::new(run), loaded: None, built: None, lines: Vec::new() };
             view.lines(80, Path::new("/")).iter().map(text).collect::<Vec<_>>().join("\n")
         };
         assert!(shown(crate::agent::subagent::scan_run()).starts_with("✗"));
         assert_eq!(shown(crate::agent::subagent::scan_run_on("arturs-mac-studio")), "⚙ task scan");
+    }
+
+    #[test]
+    fn a_watched_subagent_is_not_rebuilt_on_every_append() {
+        use std::io::Write as _;
+        let dir = std::env::temp_dir().join(format!("agent-run-view-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let session = dir.join("abc123.jsonl");
+        let append = |text: &str| {
+            let entry = json!({"type": "message", "message": {"role": "assistant", "content": [{"type": "text", "text": text}]}});
+            writeln!(std::fs::OpenOptions::new().create(true).append(true).open(&session).unwrap(), "{entry}").unwrap();
+        };
+        let run = crate::agent::subagent::scan_run();
+        run.state.lock().unwrap().session = Some(session.to_str().unwrap().into());
+        let mut view = RunView { run: Arc::new(run), loaded: None, built: None, lines: Vec::new() };
+        let shows = |view: &mut RunView, width: usize, text: &str| view.lines(width, Path::new("/")).iter().map(self::text).any(|line| line.contains(text));
+        append("first");
+        let first = shows(&mut view, 80, "first");
+        append("second");
+        let held = !shows(&mut view, 80, "second");
+        view.built = Some(Instant::now() - Duration::from_secs(1));
+        let after_the_cap = shows(&mut view, 80, "second");
+        append("third");
+        let at_a_new_width = shows(&mut view, 60, "third");
+        append("fourth");
+        view.run.state.lock().unwrap().result = Some(Ok("done".into()));
+        let once_finished = shows(&mut view, 60, "fourth");
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!([first, held, after_the_cap, at_a_new_width, once_finished], [true; 5]);
     }
 
     #[test]
