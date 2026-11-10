@@ -6,7 +6,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Sender};
+use std::sync::mpsc::{self, Sender, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -63,7 +63,7 @@ struct Process {
     run: u64,
     child: Child,
     /// A writer thread owns stdin, so a plugin that stops reading never blocks the agent.
-    stdin: Sender<String>,
+    stdin: SyncSender<String>,
 }
 
 /// One row of `agent plugin list` and /plugins.
@@ -154,7 +154,7 @@ impl Plugins {
     pub fn event(&self, params: Value) {
         for plugin in &self.state.lock().unwrap().plugins {
             if let Some(process) = &plugin.process {
-                let _ = process.stdin.send(message(plugin, None, "event", &params));
+                let _ = process.stdin.try_send(message(plugin, None, "event", &params));
             }
         }
     }
@@ -163,7 +163,7 @@ impl Plugins {
     pub fn event_to(&self, name: &str, params: Value) {
         for plugin in &self.state.lock().unwrap().plugins {
             if let (true, Some(process)) = (plugin.name == name, &plugin.process) {
-                let _ = process.stdin.send(message(plugin, None, "event", &params));
+                let _ = process.stdin.try_send(message(plugin, None, "event", &params));
             }
         }
     }
@@ -294,7 +294,7 @@ impl Plugins {
         self.request_until(name, method, params, Some(INPUT_TIMEOUT), &AtomicBool::new(false))
     }
 
-    /// The plugin's answer, or None when it is not running, exits, misses `timeout`, or `abort` is set.
+    /// The plugin's answer, or None when it is not running, its queue is full, it exits, misses `timeout`, or `abort` is set.
     fn request_until(&self, name: &str, method: &str, params: Value, timeout: Option<Duration>, abort: &AtomicBool) -> Option<Value> {
         let (reply, answer) = mpsc::channel();
         let id = {
@@ -302,7 +302,7 @@ impl Plugins {
             state.next_id += 1;
             let id = state.next_id;
             let plugin = state.plugins.iter().find(|plugin| plugin.name == name)?;
-            plugin.process.as_ref()?.stdin.send(message(plugin, Some(id), method, &params)).ok()?;
+            plugin.process.as_ref()?.stdin.try_send(message(plugin, Some(id), method, &params)).ok()?;
             state.pending.insert(id, (name.to_string(), reply));
             id
         };
@@ -329,7 +329,8 @@ impl Plugins {
             .spawn()
             .map_err(|e| format!("Cannot start {}: {e}", command[0]))?;
         let (mut stdin, stdout, stderr) = (child.stdin.take().unwrap(), child.stdout.take().unwrap(), child.stderr.take().unwrap());
-        let (lines, outbox) = mpsc::channel::<String>();
+        // Bounded: a plugin that never reads stdin must not grow memory; a dropped request times out in `request_until`.
+        let (lines, outbox) = mpsc::sync_channel::<String>(64);
         std::thread::spawn(move || {
             for line in outbox {
                 if writeln!(stdin, "{line}").is_err() {
@@ -386,7 +387,7 @@ impl Plugins {
             }
             _ if message.get("id").is_some() => {
                 let error = json!({"jsonrpc": "2.0", "id": message["id"], "error": {"code": -32601, "message": "Method not found"}});
-                let _ = plugin.process.as_ref().unwrap().stdin.send(error.to_string());
+                let _ = plugin.process.as_ref().unwrap().stdin.try_send(error.to_string());
             }
             _ => {}
         }
@@ -755,6 +756,22 @@ done"#
         plugins.sync(&["fleet".into()], &json!({}));
         assert!(plugins.statuses().is_empty());
         assert!(plugins.account_labels().is_empty());
+    }
+
+    #[test]
+    fn a_plugin_that_never_reads_does_not_block_or_queue_events() {
+        let home = home_with("deaf", &[("deaf", "sleep 30")]);
+        let plugins = Plugins::new(&home);
+        plugins.sync(&[], &json!({}));
+        assert!(plugins.list()[0].running);
+        let started = Instant::now();
+        // 20 MB: far past the pipe buffer and the 64 queued lines, so a blocking send would hang here.
+        for _ in 0..200 {
+            plugins.event(json!({"type": "tool_call", "pad": "x".repeat(100_000)}));
+        }
+        let took = started.elapsed();
+        plugins.sync(&["deaf".into()], &json!({}));
+        assert!(took < Duration::from_secs(5), "events waited on the plugin for {took:?}");
     }
 
     #[test]
