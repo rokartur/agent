@@ -182,9 +182,13 @@ pub fn edits_inside_workspace(files: &[PathBuf], cwd: &Path, extra_dirs: &[PathB
 }
 
 /// The file with symlinks and `..` resolved, so a link or `../` cannot lead out of the workspace. A new file resolves by its nearest existing parent.
+/// None for a dangling or looping link: the write would follow it to a target this cannot see.
 fn real_path(path: &Path) -> Option<PathBuf> {
     let (existing, real) = path.ancestors().find_map(|dir| Some((dir, crate::process::canonicalize(dir).ok()?)))?;
     let rest = path.strip_prefix(existing).ok()?;
+    if rest.components().next().is_some_and(|first| std::fs::symlink_metadata(existing.join(first)).is_ok()) {
+        return None;
+    }
     rest.components().all(|component| matches!(component, Component::Normal(_))).then(|| real.join(rest))
 }
 
@@ -405,6 +409,8 @@ mod tests {
         std::fs::write(cwd.join("a.rs"), "").unwrap();
         #[cfg(unix)]
         std::os::unix::fs::symlink(&outside, cwd.join("link")).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(outside.join("missing.rs"), cwd.join("dangling")).unwrap();
         let inside = |paths: &[PathBuf]| edits_inside_workspace(paths, &cwd, std::slice::from_ref(&extra));
         let results = [
             inside(&[cwd.join("a.rs"), cwd.join("new/dir/b.rs"), extra.join("c.rs")]),
@@ -417,9 +423,10 @@ mod tests {
             inside(&[extra.join(".envrc")]),
             inside(&[cwd.join(".agents/edit-hooks.json")]),
             inside(&[cwd.join("a.rs"), cwd.join(".mcp.json")]),
+            inside(&[cwd.join("dangling")]),
         ];
         std::fs::remove_dir_all(&root).unwrap();
-        assert_eq!(results, [true, false, false, false, !cfg!(unix), false, false, false, false, false]);
+        assert_eq!(results, [true, false, false, false, !cfg!(unix), false, false, false, false, false, !cfg!(unix)]);
     }
 
     #[test]

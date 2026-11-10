@@ -588,7 +588,11 @@ pub fn str_arg<'a>(input: &'a Value, name: &str) -> Result<&'a str, String> {
 /// Replaces an existing `path` through a temp file and rename, so a crash or full disk never truncates it; a new file is written in place.
 pub(crate) fn replace_file(path: &Path, new: &[u8]) -> Result<(), String> {
     // rename would replace a symlink itself, so the temp file goes next to the file it points to.
-    let Ok(path) = crate::process::canonicalize(path) else { return std::fs::write(path, new).map_err(|e| format!("Cannot write {}: {e}", path.display())) };
+    let Ok(path) = crate::process::canonicalize(path) else {
+        // create_new, not fs::write: a dangling symlink must not be followed to a target outside the workspace.
+        let created = std::fs::OpenOptions::new().write(true).create_new(true).open(path).and_then(|mut file| file.write_all(new));
+        return created.map_err(|e| format!("Cannot write {}: {e}", path.display()));
+    };
     let name = path.file_name().expect("a canonical file path has a name").to_string_lossy();
     let temp = path.with_file_name(format!(".{name}.{}.tmp", crate::api::oauth::random_hex(4)));
     let write = || -> std::io::Result<()> {
@@ -672,6 +676,20 @@ mod tests {
         let state = (std::fs::read_to_string(&target).unwrap(), link.is_symlink(), std::fs::metadata(&target).unwrap().permissions().mode() & 0o777, std::fs::read_dir(&dir).unwrap().count());
         std::fs::remove_dir_all(&dir).unwrap();
         assert_eq!(state, ("new".to_string(), true, 0o751, 2));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_write_through_a_dangling_link_is_refused_and_creates_nothing() {
+        let dir = temp_file("dangling-link", "").parent().unwrap().to_path_buf();
+        let (link, target) = (dir.join("link"), dir.join("target"));
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let (written, new_file) = (replace_file(&link, b"x"), replace_file(&dir.join("new.txt"), b"x"));
+        let state = (target.exists(), std::fs::read_to_string(dir.join("new.txt")).unwrap());
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(written.unwrap_err().starts_with("Cannot write"));
+        assert_eq!((state, new_file), ((false, "x".to_string()), Ok(())));
     }
 
     #[test]
