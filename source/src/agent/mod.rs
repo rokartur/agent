@@ -1,7 +1,7 @@
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{File, TryLockError};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Sender};
@@ -2264,7 +2264,7 @@ impl Session {
     fn copy(dir: &Path, from: &Path, cwd: &Path, model: &str) -> Result<Session, String> {
         let session = Session::start(dir, true, cwd, model)?;
         let text = std::fs::read_to_string(from).map_err(|e| format!("Cannot read {}: {e}", from.display()))?;
-        for line in text.lines().skip(1) {
+        for line in complete_lines(&text).lines().skip(1) {
             let entry: Value = serde_json::from_str(line).map_err(|e| format!("{}: {e}", from.display()))?;
             session.append(&entry)?;
         }
@@ -2285,7 +2285,7 @@ impl Session {
     pub fn history(path: &Path) -> Result<History, String> {
         let text = std::fs::read_to_string(path).map_err(|e| format!("Cannot read {}: {e}", path.display()))?;
         let mut history = History::default();
-        for (number, line) in text.lines().enumerate() {
+        for (number, line) in complete_lines(&text).lines().enumerate() {
             let entry: Value = serde_json::from_str(line).map_err(|e| format!("{}:{}: {e}", path.display(), number + 1))?;
             let missing = |field: &str| format!("{}:{}: {} without {field}", path.display(), number + 1, entry["type"].as_str().unwrap_or_default());
             match entry["type"].as_str() {
@@ -2424,7 +2424,8 @@ impl Session {
 
     pub fn append(&self, entry: &Value) -> Result<(), String> {
         let Some(path) = &self.path else { return Ok(()) };
-        let mut file = crate::process::private_file().create(true).append(true).open(path).map_err(|e| format!("Cannot open {}: {e}", path.display()))?;
+        let mut file = crate::process::private_file().create(true).read(true).append(true).open(path).map_err(|e| format!("Cannot open {}: {e}", path.display()))?;
+        drop_torn_tail(&mut file, path)?;
         // One write call, so a signal exit on another thread cannot leave half a line; writeln! on a File writes piecewise.
         file.write_all(format!("{entry}\n").as_bytes()).map_err(|e| format!("Cannot write {}: {e}", path.display()))
     }
@@ -2533,6 +2534,28 @@ fn resolve_id(dir: &Path, prefix: &str) -> Result<String, String> {
         [] => Err(format!("No saved session {prefix}.")),
         _ => Err(format!("{prefix} matches {} sessions; use more characters.", ids.len())),
     }
+}
+
+/// The complete entries of a session file. Every entry ends with a newline, so a tail without one is a write that was cut short.
+fn complete_lines(text: &str) -> &str {
+    if text.ends_with('\n') { text } else { text.rsplit_once('\n').map_or("", |(complete, _)| complete) }
+}
+
+/// Cuts off a last line without a newline, the half entry `complete_lines` skips, so the next entry is not glued onto it.
+fn drop_torn_tail(file: &mut File, path: &Path) -> Result<(), String> {
+    let failed = |e: std::io::Error| format!("Cannot repair {}: {e}", path.display());
+    let mut last = *b"\n";
+    if file.metadata().map_err(failed)?.len() > 0 {
+        file.seek(SeekFrom::End(-1)).map_err(failed)?;
+        file.read_exact(&mut last).map_err(failed)?;
+    }
+    if last == *b"\n" {
+        return Ok(());
+    }
+    let bytes = std::fs::read(path).map_err(failed)?;
+    let complete = bytes.iter().rposition(|&byte| byte == b'\n').map_or(0, |at| at + 1);
+    // A second handle: Windows refuses set_len on one opened only for append.
+    std::fs::OpenOptions::new().write(true).open(path).and_then(|file| file.set_len(complete as u64)).map_err(failed)
 }
 
 /// Index of the assistant message where the kept tail starts: the latest one with at least `keep_tokens` after it, else the latest assistant message.
@@ -3026,6 +3049,28 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
         assert_eq!(history.messages, [user("hi"), assistant("hello")]);
         assert_eq!(history.checkpoints, [Checkpoint { at: 1, before: "t0".into(), after: "t1".into() }]);
+    }
+
+    #[test]
+    fn a_session_whose_last_line_was_cut_short_loads_without_it() {
+        let dir = std::env::temp_dir().join(format!("agent-torn-line-{}", std::process::id()));
+        let session = Session::start(&dir, true, Path::new("/w"), "m").unwrap();
+        let path = session.path.clone().unwrap();
+        let write_raw = |bytes: &[u8]| std::fs::OpenOptions::new().append(true).open(&path).unwrap().write_all(bytes).unwrap();
+        let messages = || Session::history(&path).map(|history| history.messages);
+        session.append(&json!({"type": "message", "message": user("hi")})).unwrap();
+        session.append(&json!({"type": "message", "message": assistant("hello")})).unwrap();
+        write_raw(br#"{"type":"message","mess"#);
+        let torn = messages();
+        session.append(&json!({"type": "message", "message": user("again")})).unwrap();
+        let appended = messages();
+        write_raw(b"not json\n");
+        session.append(&json!({"type": "message", "message": user("more")})).unwrap();
+        let broken_in_the_middle = messages();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(torn, Ok(vec![user("hi"), assistant("hello")]));
+        assert_eq!(appended, Ok(vec![user("hi"), assistant("hello"), user("again")]));
+        assert!(broken_in_the_middle.unwrap_err().contains("expected"), "a complete bad line must stay an error");
     }
 
     #[test]

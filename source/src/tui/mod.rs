@@ -7238,7 +7238,7 @@ mod tests {
         let session = dir.join("abc123.jsonl");
         let messages = [json!({"role": "user", "content": [{"type": "text", "text": "review auth"}]}), json!({"role": "assistant", "content": [{"type": "text", "text": "Token stays cached."}]})];
         let entries: Vec<String> = messages.iter().map(|message| json!({"type": "message", "message": message}).to_string()).collect();
-        std::fs::write(&session, entries.join("\n")).unwrap();
+        std::fs::write(&session, entries.join("\n") + "\n").unwrap();
         let lines = subagent_lines(&session, 60, Path::new("/repo"));
         std::fs::remove_dir_all(&dir).unwrap();
         let lines: Vec<String> = lines.unwrap().iter().map(text).collect();
@@ -7259,7 +7259,7 @@ mod tests {
             json!({"role": "assistant", "content": [{"type": "text", "text": "Done."}]}),
         ];
         let entries: Vec<String> = messages.iter().map(|message| json!({"type": "message", "message": message}).to_string()).collect();
-        std::fs::write(&session, entries.join("\n")).unwrap();
+        std::fs::write(&session, entries.join("\n") + "\n").unwrap();
         let lines = subagent_lines(&session, 60, Path::new("/repo"));
         std::fs::remove_dir_all(&dir).unwrap();
         let lines: Vec<String> = lines.unwrap().iter().map(text).collect();
