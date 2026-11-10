@@ -2,7 +2,7 @@
 
 Question: can the built-in model list be replaced by asking each provider which models exist, so new models appear without a release?
 
-Answer: yes. Since 344267f the agent has no built-in list and no cache. At each start it asks every account for its models. See [What the agent does](#what-the-agent-does).
+Answer: yes. Since 344267f the agent has no built-in list. At each start it asks every account for its models, and saves the result to `~/.agents/cache/models.json` so a one-shot run (`-p`) does not wait for the lists. See [What the agent does](#what-the-agent-does).
 
 Checked 2026-10 with live requests. Credentials came from `~/.agents/accounts.json` (Anthropic) and `~/.codex/auth.json` (Codex). They were never printed.
 
