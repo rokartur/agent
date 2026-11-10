@@ -4,6 +4,10 @@
 
 Only the latest release gets security fixes. The agent updates itself, so most users run the latest release.
 
+## Updates and downloads
+
+Releases are built by GitHub Actions when a `v*` tag is pushed. The updater and `install.sh` download the binary from the GitHub release over HTTPS and compare it with the `SHA256SUMS` file of the same release. This check finds a damaged or incomplete download. It does not protect against a release that was replaced on GitHub, because the checksum comes from the same place as the binary. Releases are not signed.
+
 ## Report a vulnerability
 
 Do not open a public issue for a security problem.
