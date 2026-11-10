@@ -210,7 +210,7 @@ fn original(messages: &[Value], id: &str) -> Option<(String, Value, String, bool
     let call = blocks().find(|b| b["type"] == "tool_use" && b["id"] == id)?;
     let result = blocks().find(|b| b["type"] == "tool_result" && b["tool_use_id"] == id)?;
     let name = call["name"].as_str().unwrap_or_default().to_string();
-    let output = result["content"].as_str().unwrap_or_default().to_string();
+    let output = crate::acp::result_text(&result["content"]);
     Some((name, call["input"].clone(), output, result["is_error"].as_bool().unwrap_or(false)))
 }
 
@@ -292,5 +292,16 @@ mod tests {
         assert_eq!(messages[1]["content"][0]["content"], "big output");
         assert!(query(&messages, std::slice::from_ref(&batch), &json!({"toolCallIds": ["t1"]})).unwrap().ends_with("Status: OK\n\nbig output"));
         assert_eq!(query(&messages, &[batch], &json!({"toolCallIds": ["t9"]})).unwrap_err(), "Unknown refs: t9. Known refs: t1.");
+    }
+
+    #[test]
+    fn query_returns_the_text_of_a_result_stored_as_blocks() {
+        let blocks = json!([{"type": "text", "text": "frame 1: a title card"}, {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": ""}}]);
+        let messages = [
+            json!({"role": "assistant", "content": [{"type": "tool_use", "id": "a", "name": "Video", "input": {"source": "clip.mp4"}}]}),
+            json!({"role": "user", "content": [{"type": "tool_result", "tool_use_id": "a", "content": blocks, "is_error": false}]}),
+        ];
+        let batch = Condensed { refs: vec![("t1".into(), "a".into())], summary: "`t1` watched a clip".into() };
+        assert!(query(&messages, &[batch], &json!({"toolCallIds": ["t1"]})).unwrap().ends_with("Status: OK\n\nframe 1: a title card"));
     }
 }
