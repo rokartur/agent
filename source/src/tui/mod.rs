@@ -6994,7 +6994,8 @@ mod tests {
         );
         assert_eq!(MODEL_ROWS.map(|row| SETTING_NAMES[row]), ["Model", "Condense model", "Fallback model", "Reviewer model", "Subagent model", "Small model"]);
         let home = std::env::temp_dir().join(format!("agent-settings-labels-{}", std::process::id()));
-        let fields: [(&str, fn(&Settings) -> String); 15] = [
+        type Field = fn(&Settings) -> String;
+        let fields: [(&str, Field); 15] = [
             ("Thinking level", |s| s.thinking.to_string()),
             ("Auto-compact", |s| s.auto_compact.to_string()),
             ("Compaction reserve", |s| s.reserve_tokens.to_string()),
