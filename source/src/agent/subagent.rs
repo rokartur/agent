@@ -185,6 +185,8 @@ pub struct Launch {
 #[derive(Default)]
 pub struct Runs {
     pub list: Vec<Arc<Run>>,
+    /// Only grows, so the id of a failed spawn that left `list` is never given to another run.
+    spawned: usize,
 }
 
 impl Runs {
@@ -226,8 +228,9 @@ pub fn spawn(runs: &Arc<Mutex<Runs>>, launch: Launch, background: bool, workflow
             return Err(format!("{MAX_RUNNING} subagents are already running, the limit. Wait for one to finish."));
         }
         let roster = runs.roster();
+        runs.spawned += 1;
         let run = Arc::new(Run {
-            id: format!("sa-{}", runs.list.len() + 1),
+            id: format!("sa-{}", runs.spawned),
             label: launch.label.clone(),
             task: launch.task.clone(),
             model: launch.model.clone(),
@@ -631,6 +634,16 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_spawn_does_not_free_its_id() {
+        let runs = Arc::new(Mutex::new(Runs::default()));
+        for _ in 0..2 {
+            spawn(&runs, test_launch(), true, None, &Arc::default()).err().unwrap();
+        }
+        let runs = runs.lock().unwrap();
+        assert_eq!((runs.list.len(), runs.spawned), (0, 2), "the next run is sa-3, not sa-1 again");
+    }
+
+    #[test]
     fn running_runs_move_to_the_top_newest_first() {
         let mut runs = Runs::default();
         let start = Instant::now();
@@ -655,7 +668,7 @@ mod tests {
         for run in [&older, &newer] {
             run.state.lock().unwrap().result = Some(Ok("done".into()));
         }
-        let runs = Arc::new(Mutex::new(Runs { list: vec![Arc::new(older), Arc::new(newer), Arc::new(owned)] }));
+        let runs = Arc::new(Mutex::new(Runs { list: vec![Arc::new(older), Arc::new(newer), Arc::new(owned)], ..Default::default() }));
         let follow_ups = Arc::default();
         assert!(send(&runs, "step", "hi", None, &follow_ups).unwrap_err().starts_with("sa-3 belongs to workflow wf-1"));
         assert_eq!(send(&runs, "scan", "hi", None, &follow_ups).unwrap_err(), "sa-2 kept no session, so it cannot be resumed.");
