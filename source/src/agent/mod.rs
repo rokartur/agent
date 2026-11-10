@@ -3206,6 +3206,63 @@ mod tests {
     }
 
     #[test]
+    fn check_permission_asks_once_per_grant_and_a_closed_reply_denies() {
+        let home = std::env::temp_dir().join(format!("agent-permission-ask-{}", std::process::id()));
+        let cwd = home.join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let settings = crate::settings::load(&home).unwrap();
+        let session = Session::start(&home.join("sessions"), true, &cwd, "m").unwrap();
+        let mut agent = Agent::new(Client::new(&home).unwrap(), &settings, home.clone(), cwd, session, home.join("sessions"), None);
+        *agent.permission_mode.lock().unwrap() = Mode::Ask;
+        // (refusal, whether the user was asked); no answer drops the reply channel.
+        let mut check = |command: &str, answer: Option<fn() -> Decision>| {
+            let mut asked = false;
+            let refusal = agent.check_permission(None, "Bash", &json!({"command": command}), &[], &mut |event| {
+                if let Event::Permission { reply, .. } = event {
+                    asked = true;
+                    if let Some(answer) = answer {
+                        reply.send(answer()).unwrap();
+                    }
+                }
+            });
+            (refusal, asked)
+        };
+        let results = [check("ls", Some(|| Decision::Allow)), check("ls", Some(|| Decision::Allow)), check("ls", Some(|| Decision::AllowAlways)), check("ls", None), check("rm -rf build", None)];
+        let aborted = agent.abort.load(Ordering::Relaxed);
+        std::fs::remove_dir_all(&home).unwrap();
+        assert_eq!(results, [(None, true), (None, true), (None, true), (None, false), (Some("The user denied this tool call.".into()), true)]);
+        assert!(aborted, "a denied call stops the turn");
+    }
+
+    #[test]
+    fn check_permission_runs_workspace_edits_unreviewed_in_auto_and_everything_in_full_access() {
+        // Canonical: /var is a link to /private/var on macOS, and a workspace edit is matched by its real path.
+        let home = crate::process::canonicalize(std::env::temp_dir()).unwrap().join(format!("agent-permission-auto-{}", std::process::id()));
+        let cwd = home.join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        std::fs::write(cwd.join("a.rs"), "").unwrap();
+        let settings = crate::settings::load(&home).unwrap();
+        let session = Session::start(&home.join("sessions"), true, &cwd, "m").unwrap();
+        let mut agent = Agent::new(Client::new(&home).unwrap(), &settings, home.clone(), cwd.clone(), session, home.join("sessions"), None);
+        // (refused, whether the user was asked). No account, so a call that reaches the reviewer is refused.
+        let mut check = |mode: Mode, tool: &str, input: Value, files: &[PathBuf]| {
+            assert!(permissions::request_for(tool, &input, files).is_some(), "{tool} runs without a permission request");
+            *agent.permission_mode.lock().unwrap() = mode;
+            let mut asked = false;
+            let refusal = agent.check_permission(None, tool, &input, files, &mut |event| asked |= matches!(event, Event::Permission { .. }));
+            (refusal.is_some(), asked)
+        };
+        let results = [
+            check(Mode::FullAccess, "Bash", json!({"command": "rm -rf /"}), &[]),
+            check(Mode::Auto, "Write", json!({"file_path": cwd.join("a.rs"), "content": ""}), &[cwd.join("a.rs")]),
+            check(Mode::Auto, "Write", json!({"file_path": cwd.join(".git/hooks/pre-commit"), "content": ""}), &[cwd.join(".git/hooks/pre-commit")]),
+            check(Mode::Auto, "ImageGenerate", json!({"prompt": "a cat"}), &[cwd.join("a.png")]),
+        ];
+        std::fs::remove_dir_all(&home).unwrap();
+        assert_eq!(results, [(false, false), (false, false), (true, false), (true, false)]);
+    }
+
+    #[test]
     fn a_follow_up_turn_keeps_the_users_last_request_for_the_reviewer() {
         let home = std::env::temp_dir().join(format!("agent-follow-up-request-{}", std::process::id()));
         let cwd = home.join("project");
