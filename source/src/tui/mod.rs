@@ -6966,6 +6966,65 @@ mod tests {
     }
 
     #[test]
+    fn changing_a_settings_row_changes_that_row_and_no_other() {
+        let home = std::env::temp_dir().join(format!("agent-settings-rows-{}", std::process::id()));
+        let mut app = test_app(&home);
+        // The first settings change configures the client, which is what the Message threads row reads.
+        app.client.configure(&app.settings);
+        let values = |app: &App| app.setting_values().iter().map(text).collect::<Vec<_>>();
+        // These open their own panel; Ponytail (14) and Caveman (15) would download their rules.
+        let skipped = [&MODEL_ROWS[..], &[CONTEXT_WINDOW_ROW, HEADROOM_URL_ROW, HEADROOM_TOKEN_ROW, 14, 15]].concat();
+        let mut changed = Vec::new();
+        for row in (0..SETTING_NAMES.len()).filter(|row| !skipped.contains(row)) {
+            let before = values(&app);
+            app.change_setting(row, true);
+            let after = values(&app);
+            changed.push((SETTING_NAMES[row], (0..after.len()).filter(|&index| before[index] != after[index]).collect::<Vec<_>>()));
+        }
+        let _ = std::fs::remove_dir_all(&home);
+        let own: Vec<(&str, Vec<usize>)> = (0..SETTING_NAMES.len()).filter(|row| !skipped.contains(row)).map(|row| (SETTING_NAMES[row], vec![row])).collect();
+        assert_eq!(changed, own);
+    }
+
+    #[test]
+    fn settings_rows_keep_their_labels() {
+        assert_eq!(
+            [CONTEXT_WINDOW_ROW, PROVIDER_ORDER_ROW, HEADROOM_URL_ROW, HEADROOM_TOKEN_ROW].map(|row| SETTING_NAMES[row]),
+            ["Context window", "Provider order", "Headroom URL", "Headroom token"]
+        );
+        assert_eq!(MODEL_ROWS.map(|row| SETTING_NAMES[row]), ["Model", "Condense model", "Fallback model", "Reviewer model", "Subagent model", "Small model"]);
+        let home = std::env::temp_dir().join(format!("agent-settings-labels-{}", std::process::id()));
+        let fields: [(&str, fn(&Settings) -> String); 15] = [
+            ("Thinking level", |s| s.thinking.to_string()),
+            ("Auto-compact", |s| s.auto_compact.to_string()),
+            ("Compaction reserve", |s| s.reserve_tokens.to_string()),
+            ("Keep recent context", |s| s.keep_recent_tokens.to_string()),
+            ("Condense tool output", |s| s.condense.to_string()),
+            ("rtk", |s| s.rtk.to_string()),
+            ("Headroom proxy", |s| s.headroom.to_string()),
+            ("Notifications", |s| s.notifications.to_string()),
+            ("Copy on select", |s| s.copy_on_select.to_string()),
+            ("Update channel", |s| s.update_channel.to_string()),
+            ("Speed", |s| s.speed.to_string()),
+            ("Prompt cache TTL", |s| s.cache_ttl.to_string()),
+            ("Cost in footer", |s| s.footer_cost.to_string()),
+            ("Message threads", |s| s.message_threads.to_string()),
+            ("Output style", |s| s.output_style.to_string()),
+        ];
+        let mut unchanged = Vec::new();
+        for (label, field) in fields {
+            let mut app = test_app(&home);
+            let before = field(&app.settings);
+            app.change_setting(SETTING_NAMES.iter().position(|name| *name == label).unwrap(), true);
+            if field(&app.settings) == before {
+                unchanged.push(label);
+            }
+        }
+        let _ = std::fs::remove_dir_all(&home);
+        assert_eq!(unchanged, [""; 0], "these rows change another setting");
+    }
+
+    #[test]
     fn settings_sections_hold_every_row_once_and_search_spans_them() {
         let mut rows: Vec<usize> = SETTING_SECTIONS.iter().flat_map(|(_, rows)| rows.iter().copied()).collect();
         rows.sort();
