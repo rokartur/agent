@@ -2,7 +2,7 @@
 
 The Rust crate lives in `source/`; run cargo there.
 
-Before a commit, run the four checks in `CONTRIBUTING.md`, the same ones CI runs. Plain `cargo clippy` passes what CI fails: CI adds `--all-targets -- -D warnings` and `cargo fmt --check`.
+Before a commit, run the three checks in `CONTRIBUTING.md`, the same ones CI runs. Plain `cargo clippy` passes what CI fails: CI adds `--all-targets --locked -- -D warnings` and `cargo fmt --check`.
 
 Try the TUI on a throwaway home: `cargo build && tui run t "env HOME=/tmp/agent-home $PWD/target/debug/agent"`. Its settings land in `/tmp/agent-home/.agents/settings.json`.
 

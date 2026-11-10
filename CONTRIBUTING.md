@@ -10,17 +10,20 @@ Thank you for your help. Bug reports, fixes and small features are welcome.
 
 ## Build and test
 
-You need a stable Rust toolchain.
+You need a stable Rust toolchain. The tests also run `rg` (ripgrep), `fd` and ImageMagick, so these must be on your `PATH`:
+
+- macOS: `brew install ripgrep fd imagemagick`
+- Debian or Ubuntu: `sudo apt-get install ripgrep fd-find imagemagick`, then `sudo ln -s "$(command -v fdfind)" /usr/local/bin/fd`
+- Windows: `choco install ripgrep fd imagemagick.app`
 
 ```sh
 cd source
-cargo build
-cargo test
-cargo clippy --all-targets -- -D warnings
+cargo test --locked
+cargo clippy --all-targets --locked -- -D warnings
 cargo fmt --check
 ```
 
-CI runs the same four commands on each pull request.
+CI runs these three checks on each pull request, the tests on Linux, macOS and Windows.
 
 ## Pull requests
 
