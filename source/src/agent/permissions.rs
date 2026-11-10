@@ -125,6 +125,7 @@ pub fn request_for(tool: &str, input: &Value, files: &[PathBuf]) -> Option<Reque
             grant: format!("subagent:{input}"),
         }),
         // A saved workflow is granted by its file (a bundled one by name); a script the model wrote only for this exact script.
+        // check_permission replaces scriptPath with the file's text first, so the path arm only catches a caller that skips it.
         "Workflow" => {
             let (detail, grant) = match (input["scriptPath"].as_str(), input["script"].as_str(), input["name"].as_str()) {
                 (Some(path), _, _) => (format!("Workflow script {path}"), format!("workflow-script:{path}")),

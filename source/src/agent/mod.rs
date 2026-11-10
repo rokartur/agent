@@ -1624,6 +1624,23 @@ impl Agent {
     /// None when the call may run; otherwise the tool result that explains the refusal.
     /// A user's "No" also stops the turn, like Esc.
     fn check_permission(&mut self, call: Option<&str>, tool: &str, input: &Value, edited_files: &[PathBuf], emit: &mut dyn FnMut(Event)) -> Option<String> {
+        // A script file is checked as the text it holds now, like an inline script: a path alone would show no code and cover every later content.
+        let resolved;
+        let input = match input["scriptPath"].as_str() {
+            Some(path) if tool == "Workflow" => {
+                let path = self.cwd.join(path);
+                let script = match std::fs::read_to_string(&path) {
+                    Ok(script) => script,
+                    Err(e) => return Some(format!("Cannot read {}: {e}", path.display())),
+                };
+                let mut with_script = input.clone();
+                with_script.as_object_mut()?.remove("scriptPath");
+                with_script["script"] = json!(script);
+                resolved = with_script;
+                &resolved
+            }
+            _ => input,
+        };
         // A saved workflow is granted by its file, so a project workflow that later shadows the same name asks again.
         let saved_file: Vec<PathBuf> = match (tool, input["name"].as_str()) {
             ("Workflow", Some(name)) => self.saved_workflow(name.trim_start_matches('/')).and_then(|saved| saved.path).into_iter().collect(),
@@ -3277,6 +3294,37 @@ mod tests {
         std::fs::remove_dir_all(&home).unwrap();
         assert_eq!(results, [(None, true), (None, true), (None, true), (None, false), (Some("The user denied this tool call.".into()), true)]);
         assert!(aborted, "a denied call stops the turn");
+    }
+
+    #[test]
+    fn a_workflow_script_file_is_approved_by_its_content() {
+        let home = std::env::temp_dir().join(format!("agent-workflow-path-{}", std::process::id()));
+        let cwd = home.join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let script = cwd.join("w.js");
+        let settings = crate::settings::load(&home).unwrap();
+        let session = Session::start(&home.join("sessions"), true, &cwd, "m").unwrap();
+        let mut agent = Agent::new(Client::new(&home).unwrap(), &settings, home.clone(), cwd, session, home.join("sessions"), None);
+        *agent.permission_mode.lock().unwrap() = Mode::Ask;
+        let mut shown = Vec::new();
+        let mut check = || {
+            agent.check_permission(None, "Workflow", &json!({"scriptPath": "w.js"}), &[], &mut |event| {
+                if let Event::Permission { request, reply, .. } = event {
+                    shown.push(request.detail);
+                    reply.send(Decision::AllowAlways).unwrap();
+                }
+            })
+        };
+        std::fs::write(&script, "return 1").unwrap();
+        let first = [check(), check()];
+        std::fs::write(&script, "return 2").unwrap();
+        let changed = check();
+        std::fs::remove_file(&script).unwrap();
+        let missing = check();
+        std::fs::remove_dir_all(&home).unwrap();
+        assert_eq!((first, changed), ([None, None], None));
+        assert!(missing.unwrap().starts_with("Cannot read"));
+        assert_eq!(shown, ["return 1", "return 2"], "one request per content, each showing the script");
     }
 
     #[test]
