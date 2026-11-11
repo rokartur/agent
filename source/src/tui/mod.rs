@@ -58,7 +58,7 @@ use crate::tools::rtk::strip_ansi;
 use crate::tools::todo::{Status, Task, Todos};
 use crate::worktree::{self, Worktree};
 use editor::Editor;
-use render::{BRIGHT, Line, MUTED, PLAIN, Span, Style, line_width, link_at, overlay_center, overlay_right, plain_text, select, span, take_cursor, text_in, truncate, width, wrap};
+use render::{BRIGHT, DIM, Line, MUTED, PLAIN, Span, Style, line_width, link_at, overlay_center, overlay_right, plain_text, select, span, take_cursor, text_in, truncate, width, wrap};
 use selection::{Point, Selection};
 
 const WORKING: &str = "Working";
@@ -81,7 +81,6 @@ const RUN_VIEW_REFRESH: Duration = Duration::from_millis(250);
 const EDGE_SCROLL: Duration = Duration::from_millis(40);
 const PERMISSION_SETTLE: Duration = Duration::from_millis(400);
 
-const DIM: Style = Style::fg(241);
 const WARN: Style = Style::fg(179);
 const FOOTER_SEPARATOR: &str = " · ";
 const SYSTEM: Style = Style::rgb(0x79c0ff);
@@ -5011,8 +5010,27 @@ impl App {
         let mut panel_view = (0, Vec::new());
         match &self.panel {
             Some(panel) => {
-                let mut lines = self.render_panel(panel, width);
-                panel_cursor = take_cursor(&mut lines).map(|(x, y)| (x, bottom.len() + y));
+                let rule_title = match panel {
+                    Panel::Settings { .. } | Panel::ContextWindows { .. } | Panel::Headroom { .. } | Panel::ProviderOrder { .. } | Panel::Profiles { .. } | Panel::ProfileSkills { .. } => {
+                        Some("Settings")
+                    }
+                    Panel::Models { back: ModelsBack::Settings, .. } => Some("Settings"),
+                    Panel::Ask(_) => Some("Question"),
+                    _ => None,
+                };
+                let lines = match rule_title {
+                    Some(title) => {
+                        let mut lines = panel::ruled(self.render_panel(panel, width), title, width);
+                        panel_cursor = take_cursor(&mut lines).map(|(x, y)| (x, bottom.len() + y));
+                        lines
+                    }
+                    None => {
+                        let mut lines = self.render_panel(panel, width.saturating_sub(panel::BOX_COLUMNS));
+                        // The border adds a row above the panel's first line and two columns left of it.
+                        panel_cursor = take_cursor(&mut lines).map(|(x, y)| (x + 2, bottom.len() + y + 1));
+                        panel::boxed(lines, width)
+                    }
+                };
                 panel_view = (bottom.len(), lines.clone());
                 bottom.extend(lines);
             }
@@ -5053,8 +5071,8 @@ impl App {
         bottom.extend(workflow_rows(&workflows, workflow_focus, width));
 
         let room = height.saturating_sub(bottom.len());
-        // The last column is kept for the scrollbar so text does not rewrap when it appears.
-        let content_width = width.saturating_sub(1);
+        // The last two columns are kept for a gap and the scrollbar, so text does not rewrap when it appears.
+        let content_width = width.saturating_sub(2);
         let (mut transcript, mut total, mut prompts) = self.transcript_tail(content_width, room + self.scroll);
         // Scroll counts lines up from the bottom, so a scrolled-up view or a drag in progress moves up by what streamed in below it.
         let (last_total, last_width) = self.transcript_size;
@@ -5097,7 +5115,7 @@ impl App {
         }
         for (row, glyph) in scrollbar(total, visible, self.scroll).into_iter().enumerate() {
             let pad = content_width.saturating_sub(line_width(&rows[row]));
-            rows[row].push(span(format!("{}{glyph}", " ".repeat(pad)), MUTED));
+            rows[row].push(span(format!("{} {glyph}", " ".repeat(pad)), MUTED));
         }
         rows.resize(room, Vec::new());
         self.input_view = (rows.len() + editor_top, shown, below);

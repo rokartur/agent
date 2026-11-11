@@ -14,20 +14,21 @@ pub fn render(text: &str, width: usize) -> Vec<Line> {
     let mut out: Vec<Line> = Vec::new();
     let mut spans: Vec<Span> = Vec::new();
     let mut styles: Vec<Style> = vec![PLAIN];
-    let mut lists: Vec<Option<u64>> = Vec::new();
+    // Each open list: the next number of an ordered one, and the width of its current item's marker.
+    let mut lists: Vec<(Option<u64>, usize)> = Vec::new();
     let mut item_prefix: Option<Span> = None;
     let mut quote_depth = 0;
     let mut in_code = false;
     let mut table: Vec<Vec<Line>> = Vec::new();
     // The open link's URL and where its text starts in `spans`.
     let mut link: Option<(String, usize)> = None;
-    let base = |depth: usize, quote: usize| -> Line {
+    let base = |list_columns: usize, quote: usize| -> Line {
         let mut indent = vec![span(" ", PLAIN)];
         for _ in 0..quote {
             indent.push(span("│ ", QUOTE));
         }
-        if depth > 1 {
-            indent.push(span("  ".repeat(depth - 1), PLAIN));
+        if list_columns > 0 {
+            indent.push(span(" ".repeat(list_columns), PLAIN));
         }
         indent
     };
@@ -63,7 +64,7 @@ pub fn render(text: &str, width: usize) -> Vec<Line> {
                     gap(&mut out);
                 }
             }
-            Event::End(TagEnd::Paragraph) => flush(&mut out, &mut spans, &mut item_prefix, base(lists.len(), quote_depth)),
+            Event::End(TagEnd::Paragraph) => flush(&mut out, &mut spans, &mut item_prefix, base(list_indent(&lists), quote_depth)),
             Event::Start(Tag::Heading { level, .. }) => {
                 gap(&mut out);
                 let marker = match level {
@@ -84,45 +85,47 @@ pub fn render(text: &str, width: usize) -> Vec<Line> {
             }
             Event::End(TagEnd::BlockQuote(_)) => quote_depth -= 1,
             Event::Start(Tag::List(start)) => {
-                flush(&mut out, &mut spans, &mut item_prefix, base(lists.len(), quote_depth));
+                flush(&mut out, &mut spans, &mut item_prefix, base(list_indent(&lists), quote_depth));
                 if lists.is_empty() {
                     gap(&mut out);
                 }
-                lists.push(start);
+                lists.push((start, 0));
             }
             Event::End(TagEnd::List(_)) => {
                 lists.pop();
             }
             Event::Start(Tag::Item) => {
-                flush(&mut out, &mut spans, &mut item_prefix, base(lists.len(), quote_depth));
-                let marker = match lists.last_mut() {
-                    Some(Some(n)) => {
+                flush(&mut out, &mut spans, &mut item_prefix, base(list_indent(&lists), quote_depth));
+                let (number, marker_width) = lists.last_mut().expect("an item is inside a list");
+                let marker = match number {
+                    Some(n) => {
                         *n += 1;
                         format!("{}. ", *n - 1)
                     }
-                    _ => "- ".to_string(),
+                    None => "- ".to_string(),
                 };
+                *marker_width = marker.len();
                 item_prefix = Some(span(marker, BULLET));
             }
-            Event::End(TagEnd::Item) => flush(&mut out, &mut spans, &mut item_prefix, base(lists.len(), quote_depth)),
+            Event::End(TagEnd::Item) => flush(&mut out, &mut spans, &mut item_prefix, base(list_indent(&lists), quote_depth)),
             Event::TaskListMarker(done) => spans.push(span(if done { "[x] " } else { "[ ] " }, BULLET)),
             Event::Start(Tag::CodeBlock(kind)) => {
-                flush(&mut out, &mut spans, &mut item_prefix, base(lists.len(), quote_depth));
+                flush(&mut out, &mut spans, &mut item_prefix, base(list_indent(&lists), quote_depth));
                 gap(&mut out);
                 let language = match &kind {
                     CodeBlockKind::Fenced(info) => info.split_whitespace().next().unwrap_or_default(),
                     CodeBlockKind::Indented => "",
                 };
-                out.push(code_rule(&base(lists.len(), quote_depth), width, language));
+                out.push(code_rule(&base(list_indent(&lists), quote_depth), width, language));
                 in_code = true;
             }
             Event::End(TagEnd::CodeBlock) => {
-                out.push(code_rule(&base(lists.len(), quote_depth), width, ""));
+                out.push(code_rule(&base(list_indent(&lists), quote_depth), width, ""));
                 in_code = false;
             }
             // Inside a list item or quote pulldown-cmark sends one Text per line.
             Event::Text(text) if in_code => {
-                let indent = base(lists.len(), quote_depth);
+                let indent = base(list_indent(&lists), quote_depth);
                 for line in text.trim_end_matches('\n').split('\n') {
                     let line = line.replace('\t', "    ");
                     out.extend(wrap(&[span(line, CODE)], width, &indent));
@@ -159,20 +162,25 @@ pub fn render(text: &str, width: usize) -> Vec<Line> {
             Event::Start(Tag::TableHead | Tag::TableRow) => table.push(Vec::new()),
             Event::End(TagEnd::TableCell) => table.last_mut().expect("a cell sits in a row").push(std::mem::take(&mut spans)),
             Event::End(TagEnd::Table) => {
-                let room = width.saturating_sub(line_width(&base(lists.len(), quote_depth)));
+                let room = width.saturating_sub(line_width(&base(list_indent(&lists), quote_depth)));
                 for row in aligned(std::mem::take(&mut table), room) {
                     spans = row;
-                    flush(&mut out, &mut spans, &mut item_prefix, base(lists.len(), quote_depth));
+                    flush(&mut out, &mut spans, &mut item_prefix, base(list_indent(&lists), quote_depth));
                 }
             }
             _ => {}
         }
     }
-    flush(&mut out, &mut spans, &mut item_prefix, base(lists.len(), quote_depth));
+    flush(&mut out, &mut spans, &mut item_prefix, base(list_indent(&lists), quote_depth));
     while out.first().is_some_and(|l| l.is_empty()) {
         out.remove(0);
     }
     out
+}
+
+/// Where the innermost list's markers start: under the text of the item that holds it.
+fn list_indent(lists: &[(Option<u64>, usize)]) -> usize {
+    lists.iter().rev().skip(1).map(|(_, marker_width)| marker_width).sum()
 }
 
 /// A rule across the code block, with the fence's language on the opening one: `── rust ─────`.
@@ -254,6 +262,11 @@ mod tests {
         let lines = render("- one `a.txt`\n- two\n\n```\nhello\n```", 10);
         assert_eq!(text(&lines), [" - one", "   a.txt", " - two", "", " ─────────", " hello", " ─────────"]);
         assert_eq!(lines[1].last().unwrap().style, INLINE_CODE);
+    }
+
+    #[test]
+    fn a_nested_list_starts_under_its_parent_items_text() {
+        assert_eq!(text(&render("1. one\n   - a\n     - b\n", 20)), [" 1. one", "    - a", "      - b"]);
     }
 
     #[test]
