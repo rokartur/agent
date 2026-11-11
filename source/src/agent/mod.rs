@@ -894,8 +894,9 @@ impl Agent {
                 None => vec![input["path"].as_str().unwrap_or_default()],
             };
             for path in paths {
-                self.record_skill_read(&self.cwd.join(path));
-                let nested = prompt::nested_context(&self.cwd, &self.extra_dirs, &self.cwd.join(path), &mut self.nested_instructions);
+                let path = tools::hashline::resolve(&self.cwd, path);
+                self.record_skill_read(&path);
+                let nested = prompt::nested_context(&self.cwd, &self.extra_dirs, &path, &mut self.nested_instructions);
                 if !nested.is_empty() {
                     output = format!("{output}\n\n{nested}");
                 }
@@ -1103,7 +1104,7 @@ impl Agent {
             return Err(format!("Unknown model {model}."));
         }
         let cwd = match input["cwd"].as_str() {
-            Some(dir) => self.cwd.join(dir),
+            Some(dir) => tools::hashline::resolve(&self.cwd, dir),
             None => self.cwd.clone(),
         };
         let on = match input["on"].as_str().filter(|on| *on != tailnet::LOCAL) {
@@ -1174,7 +1175,7 @@ impl Agent {
     fn workflow(&mut self, input: &Value) -> Result<String, String> {
         let script = match (input["scriptPath"].as_str(), input["script"].as_str(), input["name"].as_str()) {
             (Some(path), _, _) => {
-                let path = self.cwd.join(path);
+                let path = tools::hashline::resolve(&self.cwd, path);
                 std::fs::read_to_string(&path).map_err(|e| format!("Cannot read {}: {e}", path.display()))?
             }
             (None, Some(script), _) => script.to_string(),
@@ -1328,7 +1329,7 @@ impl Agent {
     }
 
     fn switch_worktree(&mut self, path: &str, emit: &mut dyn FnMut(Event)) -> Result<String, String> {
-        let typed = self.cwd.join(path);
+        let typed = tools::hashline::resolve(&self.cwd, path);
         let path = crate::process::canonicalize(&typed).map_err(|e| format!("Cannot open {}: {e}", typed.display()))?;
         let (worktrees, current) = crate::worktree::list(&self.cwd)?;
         if !worktrees.iter().any(|worktree| crate::process::canonicalize(&worktree.path).is_ok_and(|known| known == path)) {
@@ -1628,7 +1629,7 @@ impl Agent {
         let resolved;
         let input = match input["scriptPath"].as_str() {
             Some(path) if tool == "Workflow" => {
-                let path = self.cwd.join(path);
+                let path = tools::hashline::resolve(&self.cwd, path);
                 let script = match std::fs::read_to_string(&path) {
                     Ok(script) => script,
                     Err(e) => return Some(format!("Cannot read {}: {e}", path.display())),

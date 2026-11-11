@@ -712,7 +712,7 @@ impl Turn {
             Event::Text(chunk) => text("agent_message_chunk", chunk),
             Event::Thinking(chunk) => text("agent_thought_chunk", chunk),
             Event::ToolStart { id, name, input } => {
-                let path = input["file_path"].as_str().map(|path| self.cwd.join(path));
+                let path = input["file_path"].as_str().map(|path| crate::tools::hashline::resolve(&self.cwd, path));
                 // An image is no text to diff, and an editor asked to read it may answer with megabytes of garbage.
                 if let Some(path) = path.as_ref().filter(|_| tool_kind(name) == "edit" && name != "ImageGenerate") {
                     self.before_edit.insert(id.clone(), (path.clone(), self.read_text(path)));

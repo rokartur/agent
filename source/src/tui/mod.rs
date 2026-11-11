@@ -3352,7 +3352,7 @@ impl App {
     /// A failure keeps the plan ready so `/plan export <file>` can retry.
     fn export_plan(&mut self, file: &str) {
         let Plan::Ready(text) = self.plan.lock().unwrap().clone() else { return };
-        let path = self.cwd.join(if file.is_empty() { plan_file_name(&text) } else { file.to_string() });
+        let path = crate::tools::hashline::resolve(&self.cwd, &if file.is_empty() { plan_file_name(&text) } else { file.to_string() });
         // create_new: an existing file is the user's, never overwrite it.
         let written = std::fs::File::create_new(&path).and_then(|mut file| std::io::Write::write_all(&mut file, format!("{text}\n").as_bytes()));
         match written {
@@ -6718,11 +6718,14 @@ mod tests {
 
         app.submit("/export ~/out.jsonl".into(), false);
         app.submit("/import ~/in.jsonl".into(), false);
+        app.submit("/export ../sub/out.jsonl".into(), false);
 
         let user_home = PathBuf::from(std::env::var("HOME").unwrap());
         let Ok(Command::Export(out)) = sent.try_recv() else { panic!("/export sent no Export") };
         let Ok(Command::Import(file)) = sent.try_recv() else { panic!("/import sent no Import") };
         assert_eq!((out, file), (user_home.join("out.jsonl"), user_home.join("in.jsonl")));
+        let Ok(Command::Export(relative)) = sent.try_recv() else { panic!("/export sent no Export") };
+        assert_eq!(relative, app.cwd.join("../sub/out.jsonl"));
     }
 
     #[test]
