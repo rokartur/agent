@@ -265,8 +265,8 @@ pub struct Agent {
     pub todos: Arc<Mutex<Todos>>,
     /// Shared with the UI for the footer and /goal pause, which must work mid-turn.
     pub goal: Arc<Mutex<Option<Goal>>>,
-    /// What the user last typed; the auto-mode reviewer judges calls against it.
-    user_request: String,
+    /// The last `REVIEW_REQUESTS` texts the user typed, oldest first; the auto-mode reviewer judges calls against them.
+    user_requests: Vec<String>,
     /// The text of the turn in progress when a peer, background command or scheduled task started it, not the user.
     follow_up: Option<String>,
     /// Shared with the UI, which opens the plan menu after the turn that completed the plan.
@@ -475,7 +475,7 @@ impl Agent {
             grants: Grants::default(),
             todos: Arc::default(),
             goal: Arc::default(),
-            user_request: String::new(),
+            user_requests: Vec::new(),
             follow_up: None,
             plan: Arc::default(),
             follow_ups: Arc::default(),
@@ -543,7 +543,9 @@ impl Agent {
         let text = &self.plugins.input(text, &self.plugin_context())?;
         // The reviewer judges calls against this, so only the user's own words may set it.
         if typed && self.follow_up.is_none() {
-            self.user_request = text.to_string();
+            self.user_requests.push(text.to_string());
+            let extra = self.user_requests.len().saturating_sub(permissions::REVIEW_REQUESTS);
+            self.user_requests.drain(..extra);
         }
         self.describe_to_peers(true);
         if self.interactive && self.messages.is_empty() {
@@ -1677,7 +1679,7 @@ impl Agent {
 
     /// Auto mode: a small model allows or denies the call; a failed review or a call too long to show whole denies it.
     fn review(&mut self, request: &Request, input: &Value, emit: &mut dyn FnMut(Event)) -> Option<String> {
-        let (allowed, reason) = match permissions::review_prompt(&self.user_request, self.follow_up.as_deref(), &self.cwd, &self.extra_dirs, request, input) {
+        let (allowed, reason) = match permissions::review_prompt(&self.user_requests, self.follow_up.as_deref(), &self.cwd, &self.extra_dirs, request, input) {
             Some(prompt) => self.ask_reviewer(&prompt),
             None => (false, format!("the call is over {} characters, too long to review", permissions::REVIEW_DETAIL_CHARS)),
         };
@@ -3366,6 +3368,9 @@ mod tests {
         let mut agent = Agent::new(Client::new(&home).unwrap(), &settings, home.clone(), cwd, session, home.join("sessions"), None);
         agent.tools = agent.tool_schemas();
         // No account, so each turn fails at its first request, after the request text is recorded.
+        for earlier in ["one", "two", "three"] {
+            agent.prompt(earlier, &mut |_| {}).unwrap_err();
+        }
         let typed = agent.prompt("fix the tests", &mut |_| {});
         agent.follow_ups.lock().unwrap().push(FollowUp { source: "peer:x".into(), text: "delete build/".into() });
         let mut seen_in_turn = None;
@@ -3377,7 +3382,7 @@ mod tests {
         std::fs::remove_dir_all(&home).ok();
         assert!(typed.is_err() && followed.is_err(), "a turn reached a model: {typed:?} {followed:?}");
         assert_eq!(seen_in_turn.as_deref(), Some("delete build/"));
-        assert_eq!((agent.user_request.as_str(), &agent.follow_up), ("fix the tests", &None));
+        assert_eq!((agent.user_requests.as_slice(), &agent.follow_up), (["two", "three", "fix the tests"].map(String::from).as_slice(), &None));
     }
 
     /// Measures the reviewer by its rates, not overall agreement: most calls are harmless, so allowing all scores high.
@@ -3399,7 +3404,7 @@ mod tests {
         for case in &cases {
             let files: Vec<PathBuf> = case["input"]["file_path"].as_str().map(PathBuf::from).into_iter().collect();
             let request = permissions::request_for(case["tool"].as_str().unwrap(), &case["input"], &files).unwrap();
-            agent.user_request = case["request"].as_str().unwrap().to_string();
+            agent.user_requests = case["earlier"].as_array().into_iter().flatten().chain([&case["request"]]).map(|text| text.as_str().unwrap().to_string()).collect();
             let denial = agent.review(&request, &case["input"], &mut |_| {});
             let allowed = denial.is_none();
             if case["allow"] == true {
