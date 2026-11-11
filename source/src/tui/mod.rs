@@ -5056,7 +5056,7 @@ impl App {
         // The last column is kept for the scrollbar so text does not rewrap when it appears.
         let content_width = width.saturating_sub(1);
         let (mut transcript, mut total, mut prompts) = self.transcript_tail(content_width, room + self.scroll);
-        // Scroll counts lines up from the bottom, so a scrolled-up view or a selection moves up by what streamed in below it.
+        // Scroll counts lines up from the bottom, so a scrolled-up view or a drag in progress moves up by what streamed in below it.
         let (last_total, last_width) = self.transcript_size;
         // A new width rewraps every line, so the selected lines no longer hold the selected text.
         if content_width != last_width {
@@ -5065,7 +5065,7 @@ impl App {
         }
         if content_width == last_width && total > last_total {
             self.selection.shift(total - last_total);
-            if self.scroll > 0 || self.selection.range().is_some() {
+            if self.scroll > 0 || self.selection.dragging {
                 self.scroll += total - last_total;
                 (transcript, total, prompts) = self.transcript_tail(content_width, room + self.scroll);
             }
@@ -6842,6 +6842,31 @@ mod tests {
         let _ = std::fs::remove_dir_all(&home);
         assert_eq!(app.entries.len(), after_success + 1);
         assert!(matches!(&app.entries.last().unwrap().item, Item::Error(error) if error.ends_with("x: offline")));
+    }
+
+    #[test]
+    fn a_jump_to_the_bottom_follows_new_output_while_a_finished_selection_is_still_highlighted() {
+        let home = std::env::temp_dir().join(format!("agent-tui-follow-{}", std::process::id()));
+        let mut app = test_app(&home);
+        let _ = std::fs::remove_dir_all(&home);
+        let add_line = |app: &mut App| {
+            app.handle(Msg::ModesFetched(Err("offline".into())));
+            app.frame(40, 20);
+        };
+        for _ in 0..30 {
+            add_line(&mut app);
+        }
+        let mouse = |kind, row, column| MouseEvent { kind, row, column, modifiers: KeyModifiers::NONE };
+        app.mouse(mouse(MouseEventKind::Down(MouseButton::Left), 2, 2));
+        app.mouse(mouse(MouseEventKind::Drag(MouseButton::Left), 3, 6));
+        add_line(&mut app);
+        assert!(app.scroll > 0, "a drag in progress holds the view on the text under the mouse");
+        app.mouse(mouse(MouseEventKind::Up(MouseButton::Left), 3, 6));
+        assert!(app.selection.range().is_some());
+
+        app.key(KeyEvent::new(KeyCode::Down, KeyModifiers::ALT));
+        add_line(&mut app);
+        assert_eq!(app.scroll, 0);
     }
 
     #[test]
