@@ -1,7 +1,5 @@
 use super::OK;
-use super::render::{BRIGHT, Line, MUTED, PLAIN, Style, span, truncate, width};
-
-const COUNT: Style = Style::fg(241);
+use super::render::{BRIGHT, DIM, Line, MUTED, PLAIN, line_width, span, truncate, width};
 
 pub struct Row {
     pub left: String,
@@ -79,11 +77,44 @@ pub fn frame(head: Vec<Line>, len: usize, selected: usize, hint: &str, columns: 
         lines.push(truncate(&line, columns));
     }
     if len > max_rows {
-        lines.extend([Vec::new(), vec![span(format!("  {}/{len}", selected + 1), COUNT)]]);
+        lines.extend([Vec::new(), vec![span(format!("  {}/{len}", selected + 1), DIM)]]);
     }
     lines.push(vec![span(hint, MUTED)]);
     lines
 }
+
+/// A panel's lines in a border `columns` wide: its leading blank line stays above and its key hints stay below.
+/// The panel was rendered `BOX_COLUMNS` narrower than `columns`.
+pub fn boxed(mut lines: Vec<Line>, columns: usize) -> Vec<Line> {
+    if lines.len() < 3 {
+        return lines;
+    }
+    let inner = columns.saturating_sub(BOX_COLUMNS);
+    let rule = "─".repeat(inner + 2);
+    let hint = lines.pop().expect("checked above");
+    let mut out = vec![lines.remove(0), vec![span(format!("╭{rule}╮"), DIM)]];
+    for line in lines {
+        let mut row = vec![span("│ ", DIM)];
+        row.extend(truncate(&line, inner));
+        row.push(span(format!("{} │", " ".repeat(inner.saturating_sub(line_width(&line)))), DIM));
+        out.push(row);
+    }
+    out.extend([vec![span(format!("╰{rule}╯"), DIM)], hint]);
+    out
+}
+
+/// A panel's lines under a `── title ───` rule `columns` wide, which replaces that title at the start of the panel's header.
+pub fn ruled(mut lines: Vec<Line>, title: &str, columns: usize) -> Vec<Line> {
+    if lines.get(1).and_then(|header| header.first()).is_some_and(|first| first.text == title) {
+        lines[1].remove(0);
+    }
+    let rest = columns.saturating_sub(width(title) + 4);
+    lines.insert(1, vec![span("── ", DIM), span(title, BRIGHT.bold()), span(format!(" {}", "─".repeat(rest)), DIM)]);
+    lines
+}
+
+/// The columns `boxed` takes for its border and padding.
+pub const BOX_COLUMNS: usize = 4;
 
 #[cfg(test)]
 mod tests {
@@ -112,8 +143,23 @@ mod tests {
         let panel = |selected| Panel { title: "Settings".into(), tabs: &[], tab: 0, search: None, rows: &rows, selected, empty: "", hint: "" };
         let lines: Vec<String> = panel(3).render(40, 2).iter().map(text).collect();
         assert_eq!(lines[..6], ["", "Settings", "  2    ", "→ 3    ", "", "  4/5"]);
-        assert_eq!(panel(3).render(40, 2)[5][0].style, COUNT);
+        assert_eq!(panel(3).render(40, 2)[5][0].style, DIM);
         assert_eq!(panel(3).render(40, 5).len(), 8);
+    }
+
+    #[test]
+    fn a_boxed_panel_keeps_its_blank_line_above_and_its_hint_below() {
+        let lines = vec![Vec::new(), vec![span("Title", PLAIN)], vec![span("a long row", PLAIN)], vec![span("esc close", MUTED)]];
+        let boxed: Vec<String> = boxed(lines, 10).iter().map(text).collect();
+        assert_eq!(boxed, ["", "╭────────╮", "│ Title  │", "│ a lon… │", "╰────────╯", "esc close"]);
+    }
+
+    #[test]
+    fn a_ruled_panel_moves_its_title_into_the_rule() {
+        let rows = [Row { left: "a".into(), right: Vec::new() }];
+        let panel = Panel { title: "Settings".into(), tabs: &["One"], tab: 0, search: None, rows: &rows, selected: 0, empty: "", hint: "esc close" };
+        let lines: Vec<String> = ruled(panel.render(16, 5), "Settings", 16).iter().map(text).collect();
+        assert_eq!(lines, ["", "── Settings ────", "  [One]", "→ a    ", "esc close"]);
     }
 
     #[test]
