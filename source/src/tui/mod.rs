@@ -2509,10 +2509,10 @@ impl App {
             "rename-title-ai" => _ = self.commands.send(Command::RenameTitle),
             "clone" => self.start(Command::Clone),
             "import" if args.is_empty() => self.push(Item::Error("Usage: /import <file.jsonl>".into())),
-            "import" => self.start(Command::Import(self.cwd.join(args))),
+            "import" => self.start(Command::Import(crate::tools::hashline::resolve(&self.cwd, args))),
             "export" => {
                 let out = if args.is_empty() { format!("session-{}.jsonl", self.session_id) } else { args.to_string() };
-                let _ = self.commands.send(Command::Export(self.cwd.join(out)));
+                let _ = self.commands.send(Command::Export(crate::tools::hashline::resolve(&self.cwd, &out)));
             }
             "workspace" => _ = self.commands.send(Command::Workspace(args.to_string())),
             "model" => self.open_models(0, args, ModelsBack::Close),
@@ -6706,6 +6706,23 @@ mod tests {
         let agent = Agent::new(client, &settings, home.to_path_buf(), cwd, session, home.join("sessions"), None);
         let setup = Setup { home: home.to_path_buf(), settings, prompt: None, pick_session: false, modes_error: None, plugin_updates: Vec::new(), missing_cwd: None, placed: None };
         App::new(&agent, setup, mpsc::channel().0, mpsc::channel().0)
+    }
+
+    #[test]
+    fn export_and_import_expand_a_leading_tilde_to_home() {
+        let home = std::env::temp_dir().join(format!("agent-tui-tilde-{}", std::process::id()));
+        let mut app = test_app(&home);
+        std::fs::remove_dir_all(&home).ok();
+        let (commands, sent) = mpsc::channel();
+        app.commands = commands;
+
+        app.submit("/export ~/out.jsonl".into(), false);
+        app.submit("/import ~/in.jsonl".into(), false);
+
+        let user_home = PathBuf::from(std::env::var("HOME").unwrap());
+        let Ok(Command::Export(out)) = sent.try_recv() else { panic!("/export sent no Export") };
+        let Ok(Command::Import(file)) = sent.try_recv() else { panic!("/import sent no Import") };
+        assert_eq!((out, file), (user_home.join("out.jsonl"), user_home.join("in.jsonl")));
     }
 
     #[test]
