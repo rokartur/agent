@@ -20,6 +20,8 @@ env:
 jobs:
   # Its own job, so clippy's 10 s run beside the tests instead of before them.
   lint:
+    # release.yml checks the release commit through its tag, so the push of that commit to main would check it twice.
+    if: ${{ !(github.ref == 'refs/heads/main' && startsWith(github.event.head_commit.message, 'chore(release):')) }}
     timeout-minutes: 15
     strategy:
       matrix:
@@ -42,6 +44,7 @@ jobs:
       - run: cargo clippy --all-targets --locked -- -D warnings
 
   test:
+    if: ${{ !(github.ref == 'refs/heads/main' && startsWith(github.event.head_commit.message, 'chore(release):')) }}
     timeout-minutes: 15
     strategy:
       matrix:
