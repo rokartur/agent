@@ -4,10 +4,10 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::TcpListener;
+use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::time::Duration;
 
 use serde_json::{Value, json};
@@ -56,41 +56,60 @@ fn fake_api(replies: Vec<String>) -> FakeApi {
     std::thread::spawn(move || {
         let mut replies = replies.into_iter();
         for stream in listener.incoming() {
-            let mut stream = stream.unwrap();
-            let mut reader = BufReader::new(stream.try_clone().unwrap());
-            let mut request_line = String::new();
-            reader.read_line(&mut request_line).unwrap();
-            let mut length = 0;
-            let mut header = String::new();
-            while reader.read_line(&mut header).unwrap() > 2 {
-                if let Some(value) = header.to_lowercase().strip_prefix("content-length:") {
-                    length = value.trim().parse().unwrap();
-                }
-                header.clear();
-            }
-            let mut body = vec![0; length];
-            reader.read_exact(&mut body).unwrap();
-            let (status, body) = if request_line.contains("/v1/models") {
-                (200, r#"{"data":[{"id":"claude-haiku-9","max_input_tokens":200000,"max_tokens":8192},{"id":"claude-sonnet-9","max_input_tokens":200000,"max_tokens":8192}]}"#.to_string())
-            } else if request_line.starts_with("GET") {
-                (404, "{}".to_string())
-            } else {
-                let request: Value = serde_json::from_slice(&body).unwrap();
-                if request["tools"].as_array().is_none_or(Vec::is_empty) {
-                    (200, reply(&[text("Fake title")], "end_turn"))
-                } else {
-                    let _ = sent.send(request);
-                    match replies.next() {
-                        Some(error) if error.starts_with(r#"{"error""#) => (400, error),
-                        Some(reply) => (200, reply),
-                        None => (400, r#"{"error":{"type":"invalid_request_error","message":"The fake API has no more replies."}}"#.to_string()),
-                    }
-                }
-            };
-            let _ = write!(stream, "HTTP/1.1 {status} X\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len());
+            // A session process that exits with its title request in flight drops the connection, on Windows as a reset (os error 10054).
+            let _ = answer(stream.unwrap(), &mut replies, &sent);
         }
     });
     FakeApi { base, requests }
+}
+
+/// An error when the client went away before its whole request arrived; no reply is used up then.
+fn answer(mut stream: TcpStream, replies: &mut impl Iterator<Item = String>, sent: &Sender<Value>) -> std::io::Result<()> {
+    let mut reader = BufReader::new(stream.try_clone()?);
+    let mut request_line = String::new();
+    if reader.read_line(&mut request_line)? == 0 {
+        return Err(std::io::ErrorKind::UnexpectedEof.into());
+    }
+    let mut length = 0;
+    let mut header = String::new();
+    while reader.read_line(&mut header)? > 2 {
+        if let Some(value) = header.to_lowercase().strip_prefix("content-length:") {
+            length = value.trim().parse().unwrap();
+        }
+        header.clear();
+    }
+    let mut body = vec![0; length];
+    reader.read_exact(&mut body)?;
+    let (status, body) = if request_line.contains("/v1/models") {
+        (200, r#"{"data":[{"id":"claude-haiku-9","max_input_tokens":200000,"max_tokens":8192},{"id":"claude-sonnet-9","max_input_tokens":200000,"max_tokens":8192}]}"#.to_string())
+    } else if request_line.starts_with("GET") {
+        (404, "{}".to_string())
+    } else {
+        let request: Value = serde_json::from_slice(&body).unwrap();
+        if request["tools"].as_array().is_none_or(Vec::is_empty) {
+            (200, reply(&[text("Fake title")], "end_turn"))
+        } else {
+            let _ = sent.send(request);
+            match replies.next() {
+                Some(error) if error.starts_with(r#"{"error""#) => (400, error),
+                Some(reply) => (200, reply),
+                None => (400, r#"{"error":{"type":"invalid_request_error","message":"The fake API has no more replies."}}"#.to_string()),
+            }
+        }
+    };
+    write!(stream, "HTTP/1.1 {status} X\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len())
+}
+
+#[test]
+fn the_fake_api_answers_after_a_client_drops_its_connection() {
+    let api = fake_api(Vec::new());
+    let address = api.base.strip_prefix("http://").unwrap();
+    drop(TcpStream::connect(address).unwrap());
+    let mut stream = TcpStream::connect(address).unwrap();
+    write!(stream, "GET /v1/models HTTP/1.1\r\n\r\n").unwrap();
+    let mut answer = String::new();
+    let read = stream.read_to_string(&mut answer);
+    assert!(answer.starts_with("HTTP/1.1 200"), "{read:?} {answer}");
 }
 
 fn text(text: &str) -> Value {
