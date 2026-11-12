@@ -33,6 +33,9 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v7
+      # C: is slow on Windows runners and D: holds the checkout, as uv's setup-dev-drive.ps1 found: cargo's registry and temp files go to D: too.
+      - if: runner.os == 'Windows'
+        run: printf '%s\n' 'CARGO_HOME=D:\.cargo' "TEMP=$RUNNER_TEMP" "TMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: stable
@@ -56,6 +59,9 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v7
+      # C: is slow on Windows runners and D: holds the checkout, as uv's setup-dev-drive.ps1 found: cargo's registry and temp files go to D: too.
+      - if: runner.os == 'Windows'
+        run: printf '%s\n' 'CARGO_HOME=D:\.cargo' "TEMP=$RUNNER_TEMP" "TMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
       # Tests run rg, fd and ImageMagick's convert; Ubuntu ships fd as fdfind.
       - if: runner.os == 'Linux'
         id: image
