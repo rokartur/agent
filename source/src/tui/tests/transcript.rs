@@ -93,7 +93,7 @@ fn update_todos_marks_each_task_and_strikes_through_the_done_ones() {
     let task = |subject: &str, status| Task { id: 1, subject: subject.into(), description: None, active_form: None, status };
     let lines = update_todos_lines(&[task("review", Status::Completed), task("fix", Status::InProgress), task("test", Status::Pending)], 40);
     let rows: Vec<String> = lines.iter().map(text).collect();
-    assert_eq!(rows, ["✓ Update Todos", "  ⎿  ✓ review", "     • fix", "     ○ test"]);
+    assert_eq!(rows, ["✓ Update Todos", "  ⎿ ✓ review", "    • fix", "    ○ test"]);
     let running: Vec<String> = render_tool("Todo", &json!({"action": "create", "subject": "x"}), None, 40, false, Path::new("/repo")).iter().map(text).collect();
     assert_eq!(running, ["• Update Todos"]);
     assert!(lines[1][1].style == OK && lines[1][2].style.strikethrough && lines[2][1].style.bold && lines[3][1].style == DIM && lines[3][2].style == PLAIN);
@@ -115,54 +115,15 @@ fn a_running_tool_shows_its_progress_under_its_row_until_it_ends() {
 }
 
 #[test]
-fn a_run_of_tool_calls_is_one_row_that_counts_them_by_kind() {
-    let call = |name: &str, input: Value, output: Option<&str>| Item::Tool {
-        id: "t".into(),
-        name: name.into(),
-        input,
-        result: output.map(|output| (output.to_string(), false)),
-        progress: None,
-        started: None,
-    };
-    let mut calls = vec![
-        call("Read", json!({"file_path": "a.rs"}), Some("ok")),
-        call("Read", json!({"file_path": "a.rs", "offset": 40}), Some("ok")),
-        call("Read", json!({"paths": ["b.rs", {"file_path": "c.rs"}]}), Some("ok")),
-        call("Grep", json!({"pattern": "x"}), Some("ok")),
-        call("Edit", json!({"file_path": "a.rs"}), Some("ok")),
-        call("Bash", json!({"command": "cargo test"}), Some("ok")),
-    ];
-    let rows = |calls: &[Item]| tool_run_lines(&calls.iter().collect::<Vec<_>>(), 120, Path::new("/repo"), None).iter().map(text).collect::<Vec<_>>();
-    assert_eq!(rows(&calls), ["✓ Read 3 files, searched for 1 pattern, ran 1 command, edited 1 file (ctrl+o to expand)"]);
-    calls.push(call("Bash", json!({"command": "cargo clippy"}), None));
-    assert_eq!(rows(&calls), ["• Read 3 files, searched for 1 pattern, running 2 commands, edited 1 file… (ctrl+o to expand)", "└ Bash cargo clippy"]);
-}
-
-#[test]
-fn folding_spans_collapsed_thinking_and_leaves_failed_and_lone_calls_their_rows() {
-    let entry = |item: Item| Entry { item, cache: None };
-    let call =
-        |name: &str, failed: bool| entry(Item::Tool { id: "t".into(), name: name.into(), input: json!({"file_path": "a.rs"}), result: Some(("ok".into(), failed)), progress: None, started: None });
-    let thinking = entry(Item::Assistant { text: String::new(), thinking: "hm".into() });
-    let mut entries = [call("Read", false), thinking, call("Edit", false), call("Read", true), call("Write", false)];
-    let folded = folded_tools(&mut entries, 80, Path::new("/repo"), None);
-    assert_eq!(text(&folded[&0][0]), "✓ Read 1 file, edited 1 file (ctrl+o to expand)");
-    assert!(folded[&2].is_empty());
-    assert_eq!(folded.len(), 2);
-}
-
-#[test]
-fn the_transcript_folds_a_run_of_tool_calls_until_expanded() {
-    let home = std::env::temp_dir().join(format!("agent-tui-fold-{}", std::process::id()));
+fn the_collapsed_transcript_shows_each_tool_call_on_its_own_row() {
+    let home = std::env::temp_dir().join(format!("agent-tui-calls-{}", std::process::id()));
     let mut app = test_app(&home);
     std::fs::remove_dir_all(&home).ok();
     for path in ["a.rs", "b.rs"] {
         app.push(Item::Tool { id: path.into(), name: "Read".into(), input: json!({"file_path": path}), result: Some(("ok".into(), false)), progress: None, started: None });
     }
-    let tail = |app: &mut App, rows: usize| app.transcript_tail(80, rows).0.iter().map(text).collect::<Vec<_>>();
-    assert_eq!(tail(&mut app, 1), ["✓ Read 2 files (ctrl+o to expand)"]);
-    app.expanded = true;
-    assert_eq!(tail(&mut app, 4), ["✓ Read a.rs", "└ ok", "✓ Read b.rs", "└ ok"]);
+    let tail = app.transcript_tail(80, 2).0.iter().map(text).collect::<Vec<_>>();
+    assert_eq!(tail, ["✓ Read a.rs · ok", "✓ Read b.rs · ok"]);
 }
 
 #[test]

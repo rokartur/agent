@@ -227,7 +227,6 @@ impl App {
         }
         let expanded = self.expanded;
         let spinner = self.working.map(|started| crate::spinner::FRAMES[(started.elapsed().as_millis() / ANIMATION_TICK.as_millis()) as usize % crate::spinner::FRAMES.len()]);
-        let folded = if expanded { HashMap::new() } else { folded_tools(&mut self.entries, width, &self.cwd, spinner) };
         let mut chunks: Vec<Vec<Line>> = Vec::new();
         let mut count = 0;
         let mut prompts = Vec::new();
@@ -237,15 +236,12 @@ impl App {
             let gap = below.is_some_and(|below: usize| blank_between(&self.entries[index].item, &self.entries[below].item));
             let is_prompt = matches!(self.entries[index].item, Item::User(_));
             let running = match &self.entries[index].item {
-                Item::Tool { result: None, started, .. } if !folded.contains_key(&index) => Some(*started),
+                Item::Tool { result: None, started, .. } => Some(*started),
                 _ => None,
             };
             let last = index == self.entries.len() - 1;
             let done_for = matches!(self.entries[index].item, Item::Done { .. }).then(|| self.turn_ended.filter(|_| last).map_or(DONE_FLASH, |ended| ended.elapsed()));
-            let lines = match folded.get(&index) {
-                Some(lines) => lines,
-                None => self.entries[index].lines(width, expanded, &self.cwd),
-            };
+            let lines = self.entries[index].lines(width, expanded, &self.cwd);
             if lines.is_empty() {
                 continue;
             }

@@ -180,14 +180,10 @@ impl RunView {
 pub(super) fn subagent_lines(path: &Path, width: usize, cwd: &Path) -> Result<Vec<Line>, String> {
     let saved = Session::history(path)?;
     let mut entries: Vec<Entry> = history_items(&saved.history.messages).into_iter().map(|item| Entry { item, cache: None }).collect();
-    let mut folded = folded_tools(&mut entries, width, cwd, None);
     let mut lines = Vec::new();
     let mut previous_run = None;
-    for (index, entry) in entries.iter_mut().enumerate() {
-        let item_lines = match folded.remove(&index) {
-            Some(lines) => lines,
-            None => entry.lines(width, false, cwd).clone(),
-        };
+    for entry in &mut entries {
+        let item_lines = entry.lines(width, false, cwd).clone();
         if item_lines.is_empty() {
             continue;
         }
