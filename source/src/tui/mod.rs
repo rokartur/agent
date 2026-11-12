@@ -5057,6 +5057,10 @@ impl App {
             self.shown_output = count_toward(self.shown_output, output);
             status.push(span(format!(" {} · ↓ {} tokens", duration(started.elapsed()), tokens(self.shown_output)), DIM));
         }
+        // Queued prompts, todos and the menu lead with a blank line; without them the rule needs its own gap.
+        if bottom.is_empty() {
+            bottom.push(Vec::new());
+        }
         bottom.push(rule(status, MUTED, width));
         if self.editor_width != width {
             // The selection counts wrapped rows, which a new width renumbers; input_line would index past them.
