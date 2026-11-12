@@ -3,30 +3,18 @@ use super::*;
 impl App {
     pub(super) fn resume_key(&mut self, code: KeyCode) {
         let cwd = self.cwd.display().to_string();
-        let Some(Panel::Resume { all, index, sessions }) = self.panel.as_mut() else { return };
-        let visible: Vec<&SessionInfo> = sessions.iter().filter(|s| *all || s.cwd == cwd).collect();
-        match code {
-            KeyCode::Up => *index = index.saturating_sub(1),
-            KeyCode::Down => *index = (*index + 1).min(visible.len().saturating_sub(1)),
-            KeyCode::Tab | KeyCode::BackTab => {
-                *all = !*all;
-                *index = 0;
-            }
-            KeyCode::Enter => {
-                let Some(session) = visible.get(*index) else { return };
-                let id = session.id.clone();
-                self.panel = None;
-                self.start(Command::Resume(id));
-            }
-            _ => {}
+        let Some(Panel::Resume(resume)) = self.panel.as_mut() else { return };
+        if let Some(id) = resume.key(code, &cwd) {
+            self.panel = None;
+            self.start(Command::Resume(id));
         }
     }
 
-    pub(super) fn resume_panel(&self, all: &bool, index: &usize, sessions: &[SessionInfo], width: usize) -> Vec<Line> {
-        let cwd = self.cwd.display().to_string();
-        let rows: Vec<list::Row> = sessions
-            .iter()
-            .filter(|s| *all || s.cwd == cwd)
+    pub(super) fn resume_panel(&self, resume: &ResumePanel, width: usize) -> Vec<Line> {
+        let ResumePanel { all, index, .. } = resume;
+        let rows: Vec<list::Row> = resume
+            .visible(&self.cwd.display().to_string())
+            .into_iter()
             .enumerate()
             .map(|(row, s)| {
                 let workspace = Path::new(&s.cwd).file_name().map_or(s.cwd.clone(), |n| n.to_string_lossy().into_owned());
@@ -70,42 +58,22 @@ impl App {
     pub(super) fn open_history(&mut self) {
         let mut entries = history::load(&self.home.join(".agents"));
         entries.reverse();
-        self.panel = Some(Panel::History { entries, tab: 0, query: Editor::new(), index: 0 });
+        self.panel = Some(Panel::History(HistoryPanel { entries, tab: 0, query: Editor::new(), index: 0 }));
     }
 
     pub(super) fn history_key(&mut self, key: KeyEvent) {
-        let Some(Panel::History { entries, tab, query, index }) = self.panel.as_mut() else { return };
-        let code = key.code;
-        let scope = *tab;
-        let matches = matching_prompts(entries, &query.text(), |entry| entry.in_scope(scope, &self.cwd, &self.session_id));
-        match code {
-            KeyCode::Up => *index = index.saturating_sub(1),
-            KeyCode::Down => *index = (*index + 1).min(matches.len().saturating_sub(1)),
-            KeyCode::Enter => {
-                let Some(prompt) = matches.get(*index).map(|prompt| prompt.to_string()) else { return };
-                self.panel = None;
-                self.editor.set(&prompt);
-                // The old selection may reach rows a shorter prompt no longer has.
-                self.input_selection = Selection::default();
-            }
-            KeyCode::Tab | KeyCode::BackTab => {
-                let tabs = history::SCOPES.len();
-                *tab = if code == KeyCode::Tab { (*tab + 1) % tabs } else { (*tab + tabs - 1) % tabs };
-                *index = 0;
-            }
-            _ => {
-                if query.edit_key(key) {
-                    *index = 0;
-                }
-            }
-        }
+        let Some(Panel::History(history)) = self.panel.as_mut() else { return };
+        let Some(prompt) = history.key(key, &self.cwd, &self.session_id) else { return };
+        self.panel = None;
+        self.editor.set(&prompt);
+        // The old selection may reach rows a shorter prompt no longer has.
+        self.input_selection = Selection::default();
     }
 
-    pub(super) fn history_panel(&self, entries: &[history::Entry], tab: &usize, query: &Editor, index: &usize, width: usize) -> Vec<Line> {
-        let rows: Vec<list::Row> = matching_prompts(entries, &query.text(), |entry| entry.in_scope(*tab, &self.cwd, &self.session_id))
-            .iter()
-            .map(|prompt| list::Row { left: prompt.split_whitespace().collect::<Vec<_>>().join(" "), right: Vec::new() })
-            .collect();
+    pub(super) fn history_panel(&self, history: &HistoryPanel, width: usize) -> Vec<Line> {
+        let HistoryPanel { tab, query, index, .. } = history;
+        let rows: Vec<list::Row> =
+            history.matches(&self.cwd, &self.session_id).iter().map(|prompt| list::Row { left: prompt.split_whitespace().collect::<Vec<_>>().join(" "), right: Vec::new() }).collect();
         let view = list::List {
             title: "History".into(),
             tabs: &history::SCOPES,
@@ -170,24 +138,16 @@ impl App {
     }
 
     pub(super) fn worktrees_key(&mut self, code: KeyCode) {
-        let Some(Panel::Worktrees { index, worktrees, confirm, current }) = self.panel.as_mut() else { return };
-        let confirmed = std::mem::take(confirm);
-        match code {
-            KeyCode::Up => *index = index.saturating_sub(1),
-            KeyCode::Down => *index = (*index + 1).min(worktrees.len() - 1),
-            KeyCode::Enter => {
-                let path = worktrees[*index].path.clone();
-                let moves = path != *current;
+        let Some(Panel::Worktrees(worktrees)) = self.panel.as_mut() else { return };
+        match worktrees.key(code) {
+            WorktreesKey::Stay => {}
+            WorktreesKey::Warn(text) => self.warn("worktree", text),
+            WorktreesKey::Close => self.panel = None,
+            WorktreesKey::Move(path) => {
                 self.panel = None;
-                if moves {
-                    self.start(Command::Worktree(path));
-                }
+                self.start(Command::Worktree(path));
             }
-            KeyCode::Char('d') if *index == 0 => self.warn("worktree", "The main worktree cannot be removed."),
-            KeyCode::Char('d') if worktrees[*index].path == *current => self.warn("worktree", "This session runs in that worktree; move it first."),
-            KeyCode::Char('d') if !confirmed => *confirm = true,
-            KeyCode::Char('d') => {
-                let path = worktrees[*index].path.clone();
+            WorktreesKey::Remove(path) => {
                 self.panel = None;
                 // Deleting a checkout with node_modules takes seconds, so it runs off the UI thread.
                 self.system("worktree", format!("Removing {}", path.display()));
@@ -197,11 +157,11 @@ impl App {
                     let _ = events.send(Msg::WorktreeRemoved(path, result));
                 });
             }
-            _ => {}
         }
     }
 
-    pub(super) fn worktrees_panel(&self, confirm: &bool, index: &usize, worktrees: &[Worktree], current: &Path, width: usize) -> Vec<Line> {
+    pub(super) fn worktrees_panel(&self, worktrees: &WorktreesPanel, width: usize) -> Vec<Line> {
+        let WorktreesPanel { confirm, index, worktrees, current } = worktrees;
         let home = std::env::var("HOME").unwrap_or_default();
         let rows: Vec<list::Row> = worktrees
             .iter()
@@ -499,4 +459,157 @@ pub(super) fn account_rows(accounts: &[AccountView], labels: &[(String, HashMap<
         })
         .collect();
     (rows, account_rows)
+}
+
+pub(super) struct ResumePanel {
+    pub(super) all: bool,
+    pub(super) index: usize,
+    pub(super) sessions: Vec<SessionInfo>,
+}
+
+impl ResumePanel {
+    /// The sessions the open tab lists: those started in `cwd`, or all of them.
+    pub(super) fn visible(&self, cwd: &str) -> Vec<&SessionInfo> {
+        self.sessions.iter().filter(|s| self.all || s.cwd == cwd).collect()
+    }
+
+    /// The id of the session Enter picked.
+    pub(super) fn key(&mut self, code: KeyCode, cwd: &str) -> Option<String> {
+        let count = self.visible(cwd).len();
+        match code {
+            KeyCode::Up => self.index = self.index.saturating_sub(1),
+            KeyCode::Down => self.index = (self.index + 1).min(count.saturating_sub(1)),
+            KeyCode::Tab | KeyCode::BackTab => (self.all, self.index) = (!self.all, 0),
+            KeyCode::Enter => return self.visible(cwd).get(self.index).map(|session| session.id.clone()),
+            _ => {}
+        }
+        None
+    }
+}
+
+/// /history: saved prompts, newest first, in the `history::SCOPES` tab `tab`. Typing filters, Enter puts the prompt in the editor.
+pub(super) struct HistoryPanel {
+    pub(super) entries: Vec<history::Entry>,
+    pub(super) tab: usize,
+    pub(super) query: Editor,
+    pub(super) index: usize,
+}
+
+impl HistoryPanel {
+    /// The prompts the open tab and the query leave, for a session `session` running in `cwd`.
+    pub(super) fn matches(&self, cwd: &Path, session: &str) -> Vec<&str> {
+        matching_prompts(&self.entries, &self.query.text(), |entry| entry.in_scope(self.tab, cwd, session))
+    }
+
+    /// The prompt Enter picked.
+    pub(super) fn key(&mut self, key: KeyEvent, cwd: &Path, session: &str) -> Option<String> {
+        let count = self.matches(cwd, session).len();
+        match key.code {
+            KeyCode::Up => self.index = self.index.saturating_sub(1),
+            KeyCode::Down => self.index = (self.index + 1).min(count.saturating_sub(1)),
+            KeyCode::Enter => return self.matches(cwd, session).get(self.index).map(|prompt| prompt.to_string()),
+            KeyCode::Tab | KeyCode::BackTab => {
+                let tabs = history::SCOPES.len();
+                self.tab = if key.code == KeyCode::Tab { (self.tab + 1) % tabs } else { (self.tab + tabs - 1) % tabs };
+                self.index = 0;
+            }
+            _ => {
+                if self.query.edit_key(key) {
+                    self.index = 0;
+                }
+            }
+        }
+        None
+    }
+}
+
+/// `confirm`: d was pressed once, and the next d removes the selected worktree.
+pub(super) struct WorktreesPanel {
+    pub(super) confirm: bool,
+    pub(super) index: usize,
+    pub(super) worktrees: Vec<Worktree>,
+    pub(super) current: PathBuf,
+}
+
+#[derive(Debug, PartialEq)]
+pub(super) enum WorktreesKey {
+    Stay,
+    Warn(&'static str),
+    /// Enter on the worktree the session already runs in.
+    Close,
+    Move(PathBuf),
+    Remove(PathBuf),
+}
+
+impl WorktreesPanel {
+    pub(super) fn key(&mut self, code: KeyCode) -> WorktreesKey {
+        let confirmed = std::mem::take(&mut self.confirm);
+        let selected = self.worktrees[self.index].path.clone();
+        match code {
+            KeyCode::Up => self.index = self.index.saturating_sub(1),
+            KeyCode::Down => self.index = (self.index + 1).min(self.worktrees.len() - 1),
+            KeyCode::Enter if selected == self.current => return WorktreesKey::Close,
+            KeyCode::Enter => return WorktreesKey::Move(selected),
+            KeyCode::Char('d') if self.index == 0 => return WorktreesKey::Warn("The main worktree cannot be removed."),
+            KeyCode::Char('d') if selected == self.current => return WorktreesKey::Warn("This session runs in that worktree; move it first."),
+            KeyCode::Char('d') if !confirmed => self.confirm = true,
+            KeyCode::Char('d') => return WorktreesKey::Remove(selected),
+            _ => {}
+        }
+        WorktreesKey::Stay
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn session(id: &str, cwd: &str) -> SessionInfo {
+        SessionInfo { id: id.into(), cwd: cwd.into(), name: None, title: String::new(), turns: 1, modified: std::time::SystemTime::UNIX_EPOCH }
+    }
+
+    #[test]
+    fn resume_picks_from_the_list_the_open_tab_shows() {
+        let mut resume = ResumePanel { all: false, index: 0, sessions: vec![session("other", "/b"), session("here", "/a"), session("here too", "/a")] };
+        assert_eq!(resume.key(KeyCode::Down, "/a"), None);
+        assert_eq!(resume.key(KeyCode::Down, "/a"), None);
+        assert_eq!(resume.key(KeyCode::Enter, "/a").as_deref(), Some("here too"));
+        assert_eq!(resume.key(KeyCode::Tab, "/a"), None);
+        assert_eq!(resume.key(KeyCode::Enter, "/a").as_deref(), Some("other"));
+    }
+
+    #[test]
+    fn history_picks_from_the_prompts_the_tab_and_query_leave() {
+        let entry = |prompt: &str, cwd: &str| history::Entry { prompt: prompt.into(), cwd: PathBuf::from(cwd), session: "s".into() };
+        let entries = vec![entry("fix the bug", "/b"), entry("fix the test", "/a"), entry("write docs", "/a")];
+        let mut history = HistoryPanel { entries, tab: 1, query: Editor::new(), index: 0 };
+        for key in "fix".chars() {
+            assert_eq!(history.key(KeyEvent::from(KeyCode::Char(key)), Path::new("/a"), "s"), None);
+        }
+        assert_eq!(history.key(KeyEvent::from(KeyCode::Down), Path::new("/a"), "s"), None);
+        assert_eq!(history.key(KeyEvent::from(KeyCode::Enter), Path::new("/a"), "s").as_deref(), Some("fix the test"));
+    }
+
+    #[test]
+    fn d_refuses_the_main_and_the_current_worktree_and_removes_another_on_the_second_press() {
+        let worktree = |path: &str| Worktree { path: PathBuf::from(path), branch: path.into() };
+        let mut panel = WorktreesPanel { confirm: false, index: 0, worktrees: vec![worktree("/main"), worktree("/here"), worktree("/other")], current: PathBuf::from("/here") };
+        let d = KeyCode::Char('d');
+        assert_eq!(panel.key(d), WorktreesKey::Warn("The main worktree cannot be removed."));
+        panel.current = PathBuf::from("/main");
+        assert_eq!(panel.key(d), WorktreesKey::Warn("The main worktree cannot be removed."));
+        panel.current = PathBuf::from("/here");
+        panel.key(KeyCode::Down);
+        assert_eq!(panel.key(d), WorktreesKey::Warn("This session runs in that worktree; move it first."));
+        assert_eq!(panel.key(KeyCode::Enter), WorktreesKey::Close);
+        panel.key(KeyCode::Down);
+        assert_eq!(panel.key(d), WorktreesKey::Stay);
+        assert!(panel.confirm);
+        assert_eq!(panel.key(d), WorktreesKey::Remove(PathBuf::from("/other")));
+        panel.key(d);
+        assert_eq!(panel.key(KeyCode::Up), WorktreesKey::Stay);
+        assert!(!panel.confirm, "any other key cancels the pending removal");
+        assert_eq!(panel.key(KeyCode::Down), WorktreesKey::Stay);
+        assert_eq!(panel.key(KeyCode::Enter), WorktreesKey::Move(PathBuf::from("/other")));
+    }
 }

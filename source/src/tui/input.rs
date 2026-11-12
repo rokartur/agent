@@ -165,7 +165,7 @@ impl App {
                 Panel::Models { query, index, .. }
                 | Panel::ContextWindows { query, index, .. }
                 | Panel::Accounts { query, index, .. }
-                | Panel::History { query, index, .. }
+                | Panel::History(HistoryPanel { query, index, .. })
                 | Panel::Skills { query, index },
             ) => {
                 query.insert(&line);

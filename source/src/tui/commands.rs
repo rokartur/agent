@@ -464,7 +464,7 @@ impl App {
     pub(super) fn worktree(&mut self, name: &str) -> Result<(), String> {
         let (worktrees, current) = worktree::list(&self.cwd)?;
         if name.is_empty() {
-            self.panel = Some(Panel::Worktrees { confirm: false, index: 0, worktrees, current });
+            self.panel = Some(Panel::Worktrees(WorktreesPanel { confirm: false, index: 0, worktrees, current }));
             return Ok(());
         }
         let path = worktree::open(&self.cwd, &worktrees, name)?;

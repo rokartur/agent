@@ -1,4 +1,3 @@
-use super::session_panels::*;
 use super::*;
 use serde_json::json;
 
@@ -128,7 +127,7 @@ fn esc_closes_an_empty_mcp_list_and_the_worktrees_list() {
     app.key(KeyEvent::from(KeyCode::Esc));
     assert!(app.panel.is_none());
     let worktrees = vec![crate::worktree::Worktree { path: app.cwd.clone(), branch: "main".into() }];
-    app.panel = Some(Panel::Worktrees { confirm: false, index: 0, worktrees, current: app.cwd.clone() });
+    app.panel = Some(Panel::Worktrees(WorktreesPanel { confirm: false, index: 0, worktrees, current: app.cwd.clone() }));
     app.key(KeyEvent::from(KeyCode::Esc));
     assert!(app.panel.is_none());
 }

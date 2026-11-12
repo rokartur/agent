@@ -73,6 +73,7 @@ use editor::Editor;
 use panels::*;
 use render::{BRIGHT, DIM, Line, MUTED, PLAIN, Span, Style, line_width, link_at, overlay_center, overlay_right, plain_text, select, span, take_cursor, text_in, truncate, width, wrap};
 use selection::{Point, Selection};
+use session_panels::*;
 use settings_panels::*;
 use transcript::*;
 use view::*;
@@ -1324,7 +1325,7 @@ impl App {
 
     fn open_resume(&mut self) {
         let sessions: Vec<SessionInfo> = Session::list(&self.sessions_dir).into_iter().filter(|s| s.id != self.session_id).collect();
-        self.panel = Some(Panel::Resume { all: false, index: 0, sessions });
+        self.panel = Some(Panel::Resume(ResumePanel { all: false, index: 0, sessions }));
     }
 
     fn refresh_usage_in_background(&self) {

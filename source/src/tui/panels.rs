@@ -2,11 +2,7 @@ use super::*;
 
 /// The bottom panel that takes over the keys while it is open.
 pub(super) enum Panel {
-    Resume {
-        all: bool,
-        index: usize,
-        sessions: Vec<SessionInfo>,
-    },
+    Resume(ResumePanel),
     /// /attach: the other sessions running on this session's computer.
     Running {
         index: usize,
@@ -148,13 +144,7 @@ pub(super) enum Panel {
         /// Keys wait out `PERMISSION_SETTLE` from here.
         opened: Instant,
     },
-    /// `confirm`: d was pressed once, and the next d removes the selected worktree.
-    Worktrees {
-        confirm: bool,
-        index: usize,
-        worktrees: Vec<Worktree>,
-        current: PathBuf,
-    },
+    Worktrees(WorktreesPanel),
     Login(login::Login),
     /// /account pins the chosen account, /logout removes it. Typing filters by name or provider.
     Accounts {
@@ -162,13 +152,7 @@ pub(super) enum Panel {
         query: Editor,
         index: usize,
     },
-    /// /history: saved prompts, newest first, in the `history::SCOPES` tab `tab`. Typing filters, Enter puts the prompt in the editor.
-    History {
-        entries: Vec<history::Entry>,
-        tab: usize,
-        query: Editor,
-        index: usize,
-    },
+    History(HistoryPanel),
     /// Double Esc while idle: the prompts from `agent::rewind_points` to go back to.
     Rewind {
         index: usize,
@@ -230,37 +214,37 @@ impl App {
             Panel::Workflows { .. } | Panel::WorkflowRun { .. } | Panel::WorkflowSave { .. } => self.workflow_key(key.code),
             Panel::PluginSettings { .. } => self.plugin_settings_key(key),
             Panel::Plugin { .. } => self.plugin_key(key.code),
-            Panel::Resume { .. }
+            Panel::Resume(_)
             | Panel::Settings { .. }
             | Panel::Todos { .. }
             | Panel::Usage { .. }
             | Panel::Skills { .. }
             | Panel::Mcp { .. }
             | Panel::Plugins { .. }
-            | Panel::Worktrees { .. }
+            | Panel::Worktrees(_)
             | Panel::Agents { .. }
             | Panel::Tasks { .. }
             | Panel::Rewind { .. }
             | Panel::Changes { .. }
-            | Panel::History { .. }
+            | Panel::History(_)
             | Panel::Accounts { .. }
                 if key.code == KeyCode::Esc =>
             {
                 self.panel = None
             }
-            Panel::Resume { .. } => self.resume_key(key.code),
+            Panel::Resume(_) => self.resume_key(key.code),
             Panel::Settings { .. } => self.settings_key(key),
             Panel::Todos { .. } => self.todos_key(key.code),
             Panel::Usage { .. } => self.usage_key(key.code),
             Panel::Skills { .. } => self.skills_key(key),
             Panel::Mcp { .. } => self.mcp_key(key),
             Panel::Plugins { .. } => self.plugins_key(key.code),
-            Panel::Worktrees { .. } => self.worktrees_key(key.code),
+            Panel::Worktrees(_) => self.worktrees_key(key.code),
             Panel::Agents { .. } => self.agents_key(key.code),
             Panel::Tasks { .. } => self.tasks_key(key.code),
             Panel::Rewind { .. } => self.rewind_key(key.code),
             Panel::Changes { .. } => self.changes_key(key.code),
-            Panel::History { .. } => self.history_key(key),
+            Panel::History(_) => self.history_key(key),
             Panel::Accounts { .. } => self.accounts_key(key),
         }
     }
@@ -362,7 +346,7 @@ impl App {
 
     pub(super) fn render_panel(&self, panel: &Panel, width: usize) -> Vec<Line> {
         match panel {
-            Panel::Resume { all, index, sessions } => self.resume_panel(all, index, sessions, width),
+            Panel::Resume(resume) => self.resume_panel(resume, width),
             Panel::Running { index, sessions, confirm } => self.running_panel(index, sessions, confirm, width),
             Panel::Settings { row, query } => self.settings_panel(row, query, width),
             Panel::Models { row, query, index, .. } => self.models_panel(row, query, index, width),
@@ -387,10 +371,10 @@ impl App {
             Panel::Terminal { .. } | Panel::Diff { .. } => unreachable!("frame draws the full-screen view instead of a panel"),
             Panel::Btw => self.btw.as_ref().expect("the btw panel opens with a thread").render(width),
             Panel::Trust { root, files, .. } => self.trust_panel(root, files, width),
-            Panel::Worktrees { confirm, index, worktrees, current } => self.worktrees_panel(confirm, index, worktrees, current, width),
+            Panel::Worktrees(worktrees) => self.worktrees_panel(worktrees, width),
             Panel::Login(login) => login.render(width, PANEL_ROWS),
             Panel::Accounts { logout, query, index } => self.accounts_panel(logout, query, index, width),
-            Panel::History { entries, tab, query, index } => self.history_panel(entries, tab, query, index, width),
+            Panel::History(history) => self.history_panel(history, width),
             Panel::Rewind { index, points } => self.rewind_panel(index, points, width),
             Panel::Changes { files, index } => self.changes_panel(files, index, width),
             Panel::Plan { index } => plan_lines(*index),
