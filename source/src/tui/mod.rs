@@ -5012,14 +5012,20 @@ impl App {
             return (self.terminal_view(width, height), (0, height.saturating_sub(1) as u16));
         }
         let mut bottom: Vec<Line> = Vec::new();
-        let steering = self.steering.lock().unwrap().clone();
-        let queued: Vec<&String> = steering.iter().chain(&self.queued_commands).map(|(text, _)| text).collect();
-        if !queued.is_empty() {
+        let steering: Vec<String> = self.steering.lock().unwrap().iter().map(|(text, _)| text.clone()).collect();
+        let queued: Vec<String> = self.queued_commands.iter().map(|(text, _)| text.clone()).collect();
+        if !steering.is_empty() || !queued.is_empty() {
             bottom.push(Vec::new());
-            for text in queued {
-                bottom.extend(prompt_rows(text, MUTED, width));
+            for (name, when, messages) in [("Steering", "model reads it after the current tool", steering), ("Queued", "sent when the turn ends", queued)] {
+                if messages.is_empty() {
+                    continue;
+                }
+                bottom.push(vec![span(format!("  {name}"), TOOL_NAME.bold()), span(format!(" · {when}"), DIM)]);
+                for text in &messages {
+                    bottom.extend(prompt_rows(text, MUTED, width));
+                }
             }
-            bottom.push(vec![span(format!("  {ALT}+Up to edit queued messages"), DIM)]);
+            bottom.push(vec![span(format!("  {ALT}+Up to edit"), DIM)]);
         }
         if let Some(recording) = &self.recording {
             bottom.push(Vec::new());
@@ -6884,6 +6890,20 @@ mod tests {
 
         app.images = vec![Value::Null, image.clone()];
         assert_eq!(app.take_images("[Image #1] typed by hand, [Image #2]").len(), 1);
+    }
+
+    #[test]
+    fn pending_messages_say_whether_they_steer_or_wait() {
+        let home = std::env::temp_dir().join(format!("agent-tui-pending-{}", std::process::id()));
+        let mut app = test_app(&home);
+        std::fs::remove_dir_all(&home).ok();
+        app.working = Some(Instant::now());
+        app.settings.mid_turn = "steering".into();
+        app.submit("now".into(), false);
+        app.submit("later".into(), true);
+        let rows: Vec<String> = app.frame(40, 20).0.iter().map(text).collect();
+        let start = rows.iter().position(|row| row.starts_with("  Steering")).expect("a steering header");
+        assert_eq!(rows[start + 1..start + 4], ["❯ now", "  Queued · sent when the turn ends", "❯ later"], "{rows:?}");
     }
 
     #[test]
