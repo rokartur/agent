@@ -92,12 +92,19 @@ jobs:
           tar xzf ripgrep-15.2.0-aarch64-apple-darwin.tar.gz -C bin --strip-components=1 ripgrep-15.2.0-aarch64-apple-darwin/rg
           tar xzf fd-v10.5.1-aarch64-apple-darwin.tar.gz -C bin --strip-components=1 fd-v10.5.1-aarch64-apple-darwin/fd
           echo "$PWD/bin" >> "$GITHUB_PATH"
-      # choco puts rg and fd shims on PATH; ImageMagick's installer changes PATH only for later shells.
+      # Release zips, as choco took 17 s, 5 of them only to start and find the image's ImageMagick already installed.
       - if: runner.os == 'Windows'
+        working-directory: ${{ runner.temp }}
         run: |
-          choco install -y --no-progress ripgrep --version 15.2.0
-          choco install -y --no-progress fd --version 10.5.2
-          choco install -y --no-progress imagemagick.app --version 7.1.2.2500
+          curl -fsSLO --retry 3 https://github.com/BurntSushi/ripgrep/releases/download/15.2.0/ripgrep-15.2.0-x86_64-pc-windows-msvc.zip
+          curl -fsSLO --retry 3 https://github.com/sharkdp/fd/releases/download/v10.5.2/fd-v10.5.2-x86_64-pc-windows-msvc.zip
+          sha256sum -c - <<'EOF'
+          71b2fef860abe467217a538ff31de02f5258807c0129f771846f87bd029aafc5  ripgrep-15.2.0-x86_64-pc-windows-msvc.zip
+          7edac75ef96b7e9a01ebb251a21ee86ea365a09adcfb865f1ec3346a906153b6  fd-v10.5.2-x86_64-pc-windows-msvc.zip
+          EOF
+          unzip -jq ripgrep-15.2.0-x86_64-pc-windows-msvc.zip ripgrep-15.2.0-x86_64-pc-windows-msvc/rg.exe -d bin
+          unzip -jq fd-v10.5.2-x86_64-pc-windows-msvc.zip fd-v10.5.2-x86_64-pc-windows-msvc/fd.exe -d bin
+          cygpath -w "$PWD/bin" >> "$GITHUB_PATH"
           cygpath -w "/c/Program Files"/ImageMagick-* >> "$GITHUB_PATH"
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
