@@ -302,7 +302,13 @@ pub fn subjects(tool: &str, input: &Value, files: &[PathBuf], cwd: &Path) -> Vec
             let paths: Vec<&Value> = ranges.chain([&input["file_path"]]).collect();
             strings(&paths).iter().map(|path| real(crate::tools::hashline::resolve(cwd, path))).collect()
         }
-        "Grep" => strings(&[&input["path"]]).iter().map(|path| real(crate::tools::hashline::resolve(cwd, path))).collect(),
+        "Grep" => {
+            let root = real(crate::tools::hashline::resolve(cwd, input["path"].as_str().unwrap_or(".")));
+            // A folder search reads every file rg lists there, so `Grep(.env*)` holds for a search of the folder around `.env`.
+            let listed = if Path::new(&root).is_dir() { crate::tools::grep_files(input, Path::new(&root)).unwrap_or_default() } else { String::new() };
+            let files = listed.lines().map(|file| format!("{root}/{}", file.replace(std::path::MAIN_SEPARATOR, "/")));
+            std::iter::once(root.clone()).chain(files).collect()
+        }
         "WebFetch" => strings(&input["urls"].as_array().into_iter().flatten().chain([&input["url"]]).collect::<Vec<_>>()),
         "Video" => strings(&[&input["source"]]),
         _ => Vec::new(),
@@ -562,9 +568,27 @@ mod tests {
         assert_eq!(read, [real.clone(), real.clone(), real]);
         assert_eq!(subjects("Bash", &json!({"command": "ls"}), &[], &dir), ["ls"]);
         assert_eq!(subjects("WebFetch", &json!({"urls": ["a"], "url": "b"}), &[], &dir), ["a", "b"]);
-        assert!(subjects("Grep", &json!({"pattern": "x"}), &[], &dir).is_empty());
+        assert_eq!(subjects("Grep", &json!({"pattern": "x", "path": "/nowhere"}), &[], &dir).len(), 1);
         // Windows puts a drive in front.
         assert!(subjects("Grep", &json!({"pattern": "x", "path": "/nowhere/.env"}), &[], &dir)[0].ends_with("/nowhere/.env"));
+    }
+
+    #[test]
+    fn a_grep_rule_holds_for_the_files_a_folder_search_reads() {
+        let dir = std::env::temp_dir().join(format!("agent-grep-subjects-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("sub/.env"), "KEY=1").unwrap();
+        std::fs::write(dir.join("sub/main.rs"), "").unwrap();
+        let denied = |input: Value| verdict(&rules(&[], &[], &["Grep(.env*)"]), "Grep", &subjects("Grep", &input, &[], &dir), &dir).is_some();
+        let outcomes = [
+            denied(json!({"pattern": "KEY", "hidden": true})),
+            denied(json!({"pattern": "KEY", "hidden": true, "path": "sub"})),
+            denied(json!({"pattern": "KEY", "path": "sub/.env"})),
+            denied(json!({"pattern": "KEY"})),
+            denied(json!({"pattern": "KEY", "hidden": true, "glob": "*.rs"})),
+        ];
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(outcomes, [true, true, true, false, false]);
     }
 
     #[test]
