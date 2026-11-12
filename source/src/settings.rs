@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::agent::permissions::Mode;
+use crate::agent::permissions::{Mode, Rules};
 use crate::agent::prompt::Skill;
 use crate::api::accounts::Policy;
 use crate::api::models::{self, Model};
@@ -24,6 +24,8 @@ pub struct Settings {
     /// Anthropic turns send only the new messages and the API keeps the rest (the message threads beta).
     pub message_threads: bool,
     pub permission_mode: Mode,
+    /// Allow, ask and deny rules per tool; edited in the file, not in /settings.
+    pub permissions: Rules,
     /// The auto-mode reviewer; empty means `small_model`.
     pub reviewer_model: String,
     /// ImageGenerate's model: a Codex one (`gpt-image-2`, `openai-codex/` optional) or `google-antigravity/<id>`; empty takes
@@ -378,7 +380,9 @@ pub fn path(home: &Path) -> PathBuf {
 
 /// Defaults for a missing file; an unreadable or broken one is an error, so the next save cannot write defaults over it.
 pub fn load(home: &Path) -> Result<Settings, String> {
-    Ok(from_json(&read(home)?))
+    let settings = from_json(&read(home)?);
+    crate::agent::permissions::check_rules(&settings.permissions).map_err(|e| format!("{}: {e}", path(home).display()))?;
+    Ok(settings)
 }
 
 fn read(home: &Path) -> Result<Value, String> {
@@ -401,6 +405,7 @@ fn from_json(own: &Value) -> Settings {
         cache_ttl: level(&own["cache_ttl"], &CACHE_TTLS, "5m"),
         message_threads: own["message_threads"].as_bool().unwrap_or(true),
         permission_mode: own["permission_mode"].as_str().and_then(Mode::parse).unwrap_or(Mode::Ask),
+        permissions: Rules { allow: string_list(&own["permissions"]["allow"]), ask: string_list(&own["permissions"]["ask"]), deny: string_list(&own["permissions"]["deny"]) },
         reviewer_model: own["reviewer_model"].as_str().unwrap_or_default().to_string(),
         image_model: own["image_model"].as_str().unwrap_or_default().to_string(),
         small_model: own["small_model"].as_str().unwrap_or_default().to_string(),
@@ -545,6 +550,7 @@ fn to_json(settings: &Settings) -> Value {
         "cache_ttl": settings.cache_ttl,
         "message_threads": settings.message_threads,
         "permission_mode": settings.permission_mode.label(),
+        "permissions": {"allow": settings.permissions.allow, "ask": settings.permissions.ask, "deny": settings.permissions.deny},
         "reviewer_model": settings.reviewer_model,
         "image_model": settings.image_model,
         "small_model": settings.small_model,
@@ -616,6 +622,19 @@ mod tests {
             assert_eq!(load(&home).unwrap().condense_min_batch_chars, loaded);
         }
         std::fs::remove_dir_all(&home).unwrap();
+    }
+
+    #[test]
+    fn a_permission_rule_that_does_not_parse_is_an_error_naming_it() {
+        let home = std::env::temp_dir().join(format!("agent-settings-rules-{}", std::process::id()));
+        std::fs::create_dir_all(path(&home).parent().unwrap()).unwrap();
+        std::fs::write(path(&home), r#"{"permissions": {"allow": ["Bash(ls*)"], "deny": ["Read(.env"]}}"#).unwrap();
+        let broken = load(&home);
+        std::fs::write(path(&home), r#"{"permissions": {"allow": ["Bash(ls*)"], "deny": ["Read(.env*)"]}}"#).unwrap();
+        let loaded = load(&home).unwrap().permissions;
+        std::fs::remove_dir_all(&home).unwrap();
+        assert!(broken.unwrap_err().ends_with("permissions.deny: \"Read(.env\" is not Tool or Tool(pattern)"));
+        assert_eq!((loaded.allow, loaded.deny), (vec!["Bash(ls*)".to_string()], vec!["Read(.env*)".to_string()]));
     }
 
     #[test]

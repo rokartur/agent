@@ -39,7 +39,7 @@ use crate::tools::plan::{self, Plan};
 use crate::tools::rtk::Rtk;
 use crate::tools::todo::Todos;
 use condense::Condensed;
-use permissions::{Decision, Grants, Mode, Request};
+use permissions::{Decision, Grants, Mode, Request, Verdict};
 use snapshots::Snapshots;
 use subagent::{Launch, Runs};
 
@@ -261,6 +261,8 @@ pub struct Agent {
     /// Shared with the UI so a mode change applies to the next tool call.
     pub permission_mode: Arc<Mutex<Mode>>,
     pub grants: Grants,
+    /// `settings.permissions`: a deny rule refuses a call in every mode.
+    pub permission_rules: permissions::Rules,
     /// Shared with the UI, which shows it and lets the user edit it in /todos.
     pub todos: Arc<Mutex<Todos>>,
     /// Shared with the UI for the footer and /goal pause, which must work mid-turn.
@@ -473,6 +475,7 @@ impl Agent {
             pages: None,
             permission_mode: Arc::new(Mutex::new(settings.permission_mode)),
             grants: Grants::default(),
+            permission_rules: settings.permissions.clone(),
             todos: Arc::default(),
             goal: Arc::default(),
             user_requests: Vec::new(),
@@ -1650,12 +1653,18 @@ impl Agent {
             _ => Vec::new(),
         };
         let files = if tool == "Workflow" { &saved_file } else { edited_files };
+        // Above request_for: a deny rule also covers Read, which never asks.
+        let verdict = permissions::verdict(&self.permission_rules, tool, &permissions::subjects(tool, input, files, &self.cwd), &self.cwd);
+        if let Some(Verdict::Deny(rule)) = &verdict {
+            return Some(format!("Denied by the permission rule \"{rule}\" in settings.json."));
+        }
         let request = permissions::request_for(tool, input, files)?;
         let mode = *self.permission_mode.lock().unwrap();
-        if mode == Mode::FullAccess || self.grants.allows(&request) {
+        let ask = verdict == Some(Verdict::Ask);
+        if mode == Mode::FullAccess || (!ask && (verdict == Some(Verdict::Allow) || self.grants.allows(&request))) {
             return None;
         }
-        if mode == Mode::Auto {
+        if mode == Mode::Auto && !ask {
             // ImageGenerate counts as an edit but also uploads its prompt and images, so it stays reviewed.
             if tool != "ImageGenerate" && request.kind == permissions::Kind::Edit && permissions::edits_inside_workspace(files, &self.cwd, &self.extra_dirs) {
                 return None;
@@ -1845,6 +1854,7 @@ impl Agent {
     /// Applies settings changed in /settings; `model` is the catalog entry for `settings.model`, `cheap_model` the `small_model` setting or its provider's cheapest.
     fn apply(&mut self, settings: &Settings, model: &Model, cheap_model: &str) {
         self.trusted_projects = settings.trusted_projects.clone();
+        self.permission_rules = settings.permissions.clone();
         self.model = settings.model.clone();
         self.effort = settings.thinking.clone();
         self.speed = settings.speed.clone();
@@ -1970,6 +1980,7 @@ impl Agent {
         self.grants = Grants::default();
         self.shell_context.push(format!("Session moved from {} to {}. Paths and git state from earlier messages refer to the old checkout.", self.cwd.display(), cwd.display()));
         self.trusted_projects = settings.trusted_projects.clone();
+        self.permission_rules = settings.permissions.clone();
         self.system = prompt::system_prompt(&self.agent_dir, &cwd, settings.trusts(&cwd), |skill| settings.skill_enabled(skill), settings.prefer_global());
         let editor = self.anchors.editor.take();
         self.anchors = Anchors::new(&session.id);
@@ -3328,6 +3339,44 @@ mod tests {
         assert_eq!((first, changed), ([None, None], None));
         assert!(missing.unwrap().starts_with("Cannot read"));
         assert_eq!(shown, ["return 1", "return 2"], "one request per content, each showing the script");
+    }
+
+    #[test]
+    fn permission_rules_deny_in_full_access_ask_past_a_grant_and_allow_without_asking() {
+        let home = crate::process::canonicalize(std::env::temp_dir()).unwrap().join(format!("agent-permission-rules-{}", std::process::id()));
+        let cwd = home.join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        std::fs::write(cwd.join(".env"), "").unwrap();
+        let settings = crate::settings::load(&home).unwrap();
+        let session = Session::start(&home.join("sessions"), true, &cwd, "m").unwrap();
+        let mut agent = Agent::new(Client::new(&home).unwrap(), &settings, home.clone(), cwd, session, home.join("sessions"), None);
+        agent.permission_rules = permissions::Rules { allow: vec!["Bash(cargo test*)".into()], ask: vec!["Bash(git push*)".into()], deny: vec!["Bash(rm -rf*)".into(), "Read(.env*)".into()] };
+        agent.grants.add(&permissions::request_for("Bash", &json!({"command": "git push"}), &[]).unwrap());
+        // (refusal, whether the user was asked); the user allows every call they are asked about.
+        let mut check = |mode: Mode, tool: &str, input: Value| {
+            *agent.permission_mode.lock().unwrap() = mode;
+            let mut asked = false;
+            let refusal = agent.check_permission(None, tool, &input, &[], &mut |event| {
+                if let Event::Permission { reply, .. } = event {
+                    asked = true;
+                    reply.send(Decision::Allow).unwrap();
+                }
+            });
+            (refusal, asked)
+        };
+        let denied = |rule: &str| Some(format!("Denied by the permission rule \"{rule}\" in settings.json."));
+        let results = [
+            check(Mode::FullAccess, "Bash", json!({"command": "rm -rf build"})),
+            check(Mode::Ask, "Read", json!({"file_path": ".env"})),
+            check(Mode::Ask, "Bash", json!({"command": "git push"})),
+            check(Mode::Auto, "Bash", json!({"command": "git push"})),
+            check(Mode::Ask, "Bash", json!({"command": "cargo test -q"})),
+            check(Mode::Ask, "Bash", json!({"command": "cargo test; rm x"})),
+        ];
+        let aborted = agent.abort.load(Ordering::Relaxed);
+        std::fs::remove_dir_all(&home).unwrap();
+        assert_eq!(results, [(denied("Bash(rm -rf*)"), false), (denied("Read(.env*)"), false), (None, true), (None, true), (None, false), (None, true)]);
+        assert!(!aborted, "a rule's refusal goes back to the model, the turn goes on");
     }
 
     #[test]

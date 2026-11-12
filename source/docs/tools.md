@@ -36,6 +36,14 @@ Every anchor is four ASCII letters so a long session can hold one per line read 
 
 "Don't ask again" stores a `Grant` keyed by the request's key (a command prefix, a file, a workflow path) for the session. In `Auto` the reviewer sees the request capped at `REVIEW_DETAIL_CHARS`; a longer call is denied unreviewed, since a cut would hide its tail.
 
+`permissions` in `settings.json` holds rules that outlive the session:
+
+```json
+"permissions": {"allow": ["Bash(cargo test*)", "mcp__github__*"], "ask": ["Bash(git push*)"], "deny": ["Read(.env*)", "Edit(**/secrets/**)"]}
+```
+
+A rule is `Tool` or `Tool(pattern)`; `*` in the tool name matches any run of characters. The pattern is matched against the command (`Bash`), the URLs (`WebFetch`, `Video`) or the files (`Read` and the edit tools). In a command or URL `*` matches anything. A file pattern is an edit-hooks glob: without a slash it matches the file name, otherwise the path from the working directory, or an absolute one when it starts with `/` or `~/`. Deny beats ask beats allow. Deny refuses in every mode, `FullAccess` included; ask prompts the user in `Ask` and `Auto` whatever was granted; allow runs the call in `Ask` and `Auto`. Deny and ask also test each part of a chained command, and allow never covers a command that chains, substitutes or redirects, so `Bash(cargo test*)` does not approve `cargo test; rm -rf ~`. A rule that does not parse stops the agent at start (`permissions::check_rules`). Rules are not a sandbox: a deny rule for `Read` does not stop a shell command that reads the same file.
+
 ## Edit hooks and language servers
 
 After each edit the result carries two kinds of feedback: new diagnostics from a language server started for the file's language (`agent/lsp.rs`, configured in settings), and the output of the `onStop` commands in the nearest `.agents/edit-hooks.json` (`agent/edit_hooks.rs`, format in [configuration.md](configuration.md)). Hooks for every file edited this prompt run again when the turn ends; failures go back to the model for a bounded number of fix rounds (`edit_hooks::report`).

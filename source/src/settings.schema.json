@@ -14,6 +14,17 @@
     "cache_ttl": { "enum": ["5m", "1h"], "default": "5m", "description": "Anthropic prompt cache lifetime; 1h writes cost more." },
     "message_threads": { "type": "boolean", "default": true, "description": "Anthropic turns send only the new messages, and the API keeps the conversation between them (message threads beta). Off behind headroom or ANTHROPIC_BASE_URL." },
     "permission_mode": { "enum": ["ask", "auto", "full access"], "default": "ask" },
+    "permissions": {
+      "type": "object",
+      "additionalProperties": false,
+      "default": { "allow": [], "ask": [], "deny": [] },
+      "description": "Rules per tool, each `Tool` or `Tool(pattern)`: `Bash(cargo test*)`, `Read(.env*)`, `Edit(src/**)`, `WebFetch(https://docs.rs/*)`, `mcp__github__*`. Deny beats ask beats allow, and deny holds in every permission mode.",
+      "properties": {
+        "allow": { "type": "array", "items": { "type": "string" }, "default": [], "description": "Calls that run without asking in ask and auto mode. Never covers a command that chains, substitutes or redirects." },
+        "ask": { "type": "array", "items": { "type": "string" }, "default": [], "description": "Calls that ask the user in ask and auto mode, whatever was granted before." },
+        "deny": { "type": "array", "items": { "type": "string" }, "default": [], "description": "Calls that are refused in every mode, full access included." }
+      }
+    },
     "reviewer_model": { "type": "string", "default": "", "description": "Model for the auto-mode reviewer; empty means small_model." },
     "image_model": { "type": "string", "default": "", "description": "Model for ImageGenerate: a Codex image model such as gpt-image-2 (openai-codex/ prefix optional) on a ChatGPT login, or google-antigravity/<model>. Empty means gpt-image-2 when a ChatGPT login exists, else the first image model an Antigravity account lists." },
     "small_model": { "type": "string", "default": "", "description": "Model for small jobs: session titles, long Video descriptions and compaction, and the reviewer and condense when theirs is empty. Empty means the provider's small model (Haiku, Luna)." },
