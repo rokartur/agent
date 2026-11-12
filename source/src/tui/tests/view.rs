@@ -234,7 +234,7 @@ fn subagent_lines_render_its_session_file() {
 }
 
 #[test]
-fn subagent_lines_fold_consecutive_tool_calls_and_keep_tool_rows_together() {
+fn subagent_lines_show_each_tool_call_and_keep_tool_rows_together() {
     let dir = std::env::temp_dir().join(format!("agent-subagent-tools-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let session = dir.join("abc123.jsonl");
@@ -250,10 +250,11 @@ fn subagent_lines_fold_consecutive_tool_calls_and_keep_tool_rows_together() {
     let lines = subagent_lines(&session, 60, Path::new("/repo"));
     std::fs::remove_dir_all(&dir).unwrap();
     let lines: Vec<String> = lines.unwrap().iter().map(text).collect();
-    let folded = lines.iter().position(|line| line.contains("Read 2 files")).unwrap();
+    let first = lines.iter().position(|line| line.contains("one.rs")).unwrap();
     let failed = lines.iter().position(|line| line.contains("three.rs")).unwrap();
     let done = lines.iter().position(|line| line.contains("Done.")).unwrap();
-    assert_eq!(failed, folded + 1, "{lines:#?}");
+    assert!(lines[first + 1].contains("two.rs"), "{lines:#?}");
+    assert_eq!(failed, first + 2, "{lines:#?}");
     assert!(lines[failed..done].iter().any(|line| line.trim().is_empty()), "{lines:#?}");
 }
 

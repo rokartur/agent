@@ -3,7 +3,7 @@ use super::*;
 pub(super) fn update_todos_lines(tasks: &[Task], width: usize) -> Vec<Line> {
     let mut lines = vec![vec![span("✓", OK), span(" Update Todos", TOOL_NAME)]];
     for (index, task) in tasks.iter().enumerate() {
-        let gutter = if index == 0 { "  ⎿  " } else { "     " };
+        let gutter = if index == 0 { "  ⎿ " } else { "    " };
         let mut row = vec![span(gutter, MUTED)];
         row.extend(todo_spans(task.status, &task.subject));
         lines.push(truncate(&row, width));
@@ -203,97 +203,6 @@ pub(super) fn render_tool(name: &str, input: &Value, result: Option<&(String, bo
         lines.push(vec![span(format!("  … {hidden} more lines"), MUTED)]);
     }
     lines
-}
-
-/// Collapsed, two or more tool calls in a row are one row. Maps each of their entries to the lines it draws: the row for the first, none for the rest.
-pub(super) fn folded_tools(entries: &mut [Entry], width: usize, cwd: &Path, spinner: Option<&str>) -> HashMap<usize, Vec<Line>> {
-    let mut folded = HashMap::new();
-    let mut run: Vec<usize> = Vec::new();
-    // The pass past the last entry ends the last run.
-    for index in 0..=entries.len() {
-        if let Some(entry) = entries.get_mut(index) {
-            if folds_into_run(&entry.item) {
-                run.push(index);
-                continue;
-            }
-            // Collapsed thinking draws nothing, so it does not end the run.
-            if entry.lines(width, false, cwd).is_empty() {
-                continue;
-            }
-        }
-        if run.len() > 1 {
-            let calls: Vec<&Item> = run.iter().map(|&member| &entries[member].item).collect();
-            folded.insert(run[0], tool_run_lines(&calls, width, cwd, spinner));
-            folded.extend(run[1..].iter().map(|&member| (member, Vec::new())));
-        }
-        run.clear();
-    }
-    folded
-}
-
-/// A failed call, a question, a skill and a todo edit keep their own rows.
-pub(super) fn folds_into_run(item: &Item) -> bool {
-    let Item::Tool { name, input, result, .. } = item else { return false };
-    !matches!(result, Some((_, true))) && name != "AskUserQuestion" && !edits_todos(name, input) && skill_name(name, input).is_none()
-}
-
-/// "Read 3 files, searched for 2 patterns, running 1 command… (ctrl+o to expand)", then the call still running under a hook.
-pub(super) fn tool_run_lines(calls: &[&Item], width: usize, cwd: &Path, spinner: Option<&str>) -> Vec<Line> {
-    const KINDS: [(&str, &str, &str); 5] =
-        [("read", "reading", "file"), ("searched for", "searching for", "pattern"), ("ran", "running", "command"), ("edited", "editing", "file"), ("called", "calling", "tool")];
-    let mut counts = [0; 5];
-    let mut running = [false; 5];
-    let mut files = Vec::new();
-    let mut unfinished = None;
-    for call in calls {
-        let Item::Tool { name, input, result, progress, started, .. } = call else { unreachable!("folds_into_run checks the item") };
-        let kind = match name.as_str() {
-            "Read" => 0,
-            "Grep" => 1,
-            "Bash" => 2,
-            "Write" | "ReplaceLines" | "Edit" | "InsertLines" => 3,
-            _ => 4,
-        };
-        if result.is_none() {
-            running[kind] = true;
-            unfinished = Some((name, input, progress, started));
-        }
-        if KINDS[kind].2 != "file" {
-            counts[kind] += 1;
-            continue;
-        }
-        // A file read or edited twice counts once.
-        let paths = input["paths"].as_array().into_iter().flatten().filter_map(|entry| entry.as_str().or(entry["file_path"].as_str())).chain(input["file_path"].as_str());
-        for path in paths {
-            if !files.contains(&(kind, path)) {
-                files.push((kind, path));
-                counts[kind] += 1;
-            }
-        }
-    }
-    let mut parts = Vec::new();
-    for (kind, (done, doing, unit)) in KINDS.into_iter().enumerate() {
-        if counts[kind] > 0 {
-            let verb = if running[kind] { doing } else { done };
-            let plural = if counts[kind] == 1 { "" } else { "s" };
-            parts.push(format!("{verb} {} {unit}{plural}", counts[kind]));
-        }
-    }
-    let mut summary = parts.join(", ");
-    // Empty when the only calls are file calls without a path.
-    if let Some(first) = summary.get_mut(..1) {
-        first.make_ascii_uppercase();
-    }
-    let Some((name, input, progress, started)) = unfinished else {
-        return vec![truncate(&vec![span("✓", OK), span(format!(" {summary}"), TOOL_NAME), span(" (ctrl+o to expand)", DIM)], width)];
-    };
-    let tool = mcp_tool(name).map_or(name.to_string(), |(_, tool)| tool);
-    let about = progress.clone().unwrap_or_else(|| tool_args(name, input, cwd));
-    let mut hook = truncate(&vec![span(format!("└ {tool} {about}"), MUTED)], width);
-    if spinner.is_some() {
-        hook.extend(running_seconds(*started));
-    }
-    vec![truncate(&vec![span(spinner.unwrap_or("•"), MUTED), span(format!(" {summary}…"), TOOL_NAME), span(" (ctrl+o to expand)", DIM)], width), hook]
 }
 
 /// What a collapsed call says about its result: an error's last line, a one-line result itself, or how many lines came back.
