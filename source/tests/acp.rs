@@ -831,7 +831,7 @@ fn a_hung_mcp_server_delays_a_new_session_by_seconds_and_the_user_learns_of_it()
     assert!(notice["params"]["update"]["title"].as_str().unwrap().starts_with("MCP server hung did not connect"), "{notice}");
 }
 
-/// An MCP server over stdio with one tool, `echo`.
+/// An MCP server over stdio with one tool, `echo`; it creates the file named by its first argument once it has listed its tools.
 const FAKE_MCP_SERVER: &str = r#"
 import json, sys
 for line in sys.stdin:
@@ -845,6 +845,8 @@ for line in sys.stdin:
     else:
         r = {"content": [{"type": "text", "text": "echo"}]}
     print(json.dumps({"jsonrpc": "2.0", "id": m["id"], "result": r}), flush=True)
+    if m["method"] == "tools/list":
+        open(sys.argv[1], "w").close()
 "#;
 
 #[test]
@@ -856,9 +858,16 @@ fn a_subagent_gets_the_mcp_servers_of_the_editor() {
         reply(&[text("The child said hi.")], "end_turn"),
     ]);
     let mut editor = Editor::start(&home, &api);
-    let servers = json!([{"name": "fake", "command": "python3", "args": ["-c", FAKE_MCP_SERVER], "env": []}]);
+    let listed = home.dir.join("mcp-listed");
+    let servers = json!([{"name": "fake", "command": "python3", "args": ["-c", FAKE_MCP_SERVER, listed], "env": []}]);
     let session = editor.request("session/new", json!({"cwd": home.project(), "mcpServers": servers})).unwrap();
 
+    // session/new waits at most 5 s for the server, which slow Windows runners exceeded; its tools join the session once listed.
+    let started = std::time::Instant::now();
+    while !listed.exists() {
+        assert!(started.elapsed() < WAIT, "the MCP server did not list its tools");
+        std::thread::sleep(Duration::from_millis(20));
+    }
     editor.prompt(session["sessionId"].as_str().unwrap(), "Ask a subagent.").unwrap();
 
     let parent = api.requests.recv_timeout(WAIT).unwrap();
