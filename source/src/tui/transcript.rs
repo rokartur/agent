@@ -4,7 +4,9 @@ pub(super) fn update_todos_lines(tasks: &[Task], width: usize) -> Vec<Line> {
     let mut lines = vec![vec![span("✓", OK), span(" Update Todos", TOOL_NAME)]];
     for (index, task) in tasks.iter().enumerate() {
         let gutter = if index == 0 { "  ⎿  " } else { "     " };
-        lines.push(truncate(&vec![span(gutter, MUTED), todo_span(task.status, &task.subject)], width));
+        let mut row = vec![span(gutter, MUTED)];
+        row.extend(todo_spans(task.status, &task.subject));
+        lines.push(truncate(&row, width));
     }
     lines
 }
@@ -13,12 +15,12 @@ pub(super) fn edits_todos(name: &str, input: &Value) -> bool {
     name == "Todo" && !matches!(input["action"].as_str(), Some("list" | "get"))
 }
 
-/// `✔` done and struck through, `◼` in progress and bold, `◻` pending.
-pub(super) fn todo_span(status: Status, text: &str) -> Span {
+/// The tool call glyphs: `✓` done with its text struck through, `•` in progress and bold, `○` pending and dim.
+pub(super) fn todo_spans(status: Status, text: &str) -> Line {
     match status {
-        Status::Completed | Status::Deleted => span(format!("✔ {text}"), Style { strikethrough: true, ..DIM }),
-        Status::InProgress => span(format!("◼ {text}"), Style { bold: true, ..BRIGHT }),
-        Status::Pending => span(format!("◻ {text}"), PLAIN),
+        Status::Completed | Status::Deleted => vec![span("✓ ", OK), span(text, Style { strikethrough: true, ..DIM })],
+        Status::InProgress => vec![span(format!("• {text}"), Style { bold: true, ..BRIGHT })],
+        Status::Pending => vec![span("○ ", DIM), span(text, PLAIN)],
     }
 }
 
