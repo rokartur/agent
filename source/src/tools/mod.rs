@@ -16,6 +16,7 @@ pub mod goal;
 pub mod guard;
 pub mod hashline;
 pub mod page;
+pub mod pdf;
 pub mod plan;
 pub mod rtk;
 pub mod todo;
@@ -89,7 +90,10 @@ fn collect_undeclared(value: &Value, schema: &Value, at: &str, undeclared: &mut 
 /// Runs one tool call. The bool is true when the result is an error. Setting `abort` kills a running bash or rg.
 pub fn run(name: &str, input: &Value, cwd: &Path, anchors: &mut Anchors, rtk: &Rtk, abort: &AtomicBool) -> (String, bool) {
     let result = match name {
-        "Read" => anchors.read(cwd, input),
+        "Read" => match input["file_path"].as_str().map(|path| hashline::resolve(cwd, path)).filter(|path| pdf::is_pdf(path)) {
+            Some(path) => pdf::read(&path, input),
+            None => anchors.read(cwd, input),
+        },
         "Bash" => bash(input, cwd, rtk, abort, None),
         "Write" => write(input, cwd, anchors.editor.as_deref()),
         "ReplaceLines" => anchors.replace(input),

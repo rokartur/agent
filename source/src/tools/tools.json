@@ -1,13 +1,17 @@
 [
   {
     "name": "Read",
-    "description": "Read a text file as `anchor│content` rows (anchor: 4 letters), 2000 lines or 50KB per page; continue from the hint's `offset`. `paths` reads several files or ranges at once. Images come back as images.",
+    "description": "Read a text file as `anchor│content` rows (anchor: 4 letters), 2000 lines or 50KB per page; continue from the hint's `offset`. `paths` reads several files or ranges at once. Images come back as images. A PDF comes back as text, 20 pages per call; `pages` picks the range.",
     "eager_input_streaming": true,
     "input_schema": {
       "type": "object",
       "properties": {
         "file_path": {
           "type": "string"
+        },
+        "pages": {
+          "type": "string",
+          "description": "PDF only: a page or range, e.g. \"3\" or \"21-40\""
         },
         "paths": {
           "type": "array",

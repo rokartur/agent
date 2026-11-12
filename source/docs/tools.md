@@ -22,6 +22,10 @@ Built-in tools are defined in `tools/mod.rs` (`schemas` gives the JSON schema li
 
 Every anchor is four ASCII letters so a long session can hold one per line read without growing the context much.
 
+## PDF
+
+`Read` on a file that starts with `%PDF-` returns its text through poppler's `pdftotext -layout` (`tools/pdf.rs`), with no anchors: 20 pages per call, `pages` (`"3"`, `"21-40"`) picks others, 50KB at most. A scan has no text, so the result names the `pdftoppm` command that renders its pages to PNG files, which `Read` shows as images.
+
 ## Bash
 
 `Bash` runs `sh -c` with the command first passed through `rtk rewrite` when `rtk` is on and installed (`tools/rtk.rs`): rtk exits 0 or 3 with a replacement, 1 when it has none, 2 when it refuses. Output loses ANSI sequences and keeps its last `max_bytes`; the full log lands in a temp file named at the end.
