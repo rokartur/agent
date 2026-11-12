@@ -1,5 +1,55 @@
 use super::*;
 
+/// Where the last frame put each part of the screen, so mouse and keys hit what is drawn.
+#[derive(Default)]
+pub(super) struct Layout {
+    pub width: usize,
+    /// Transcript wrap width: `width` less the gap and scrollbar columns.
+    pub content_width: usize,
+    /// Transcript rows on screen.
+    pub transcript_rows: usize,
+    /// Transcript line count at `content_width`.
+    pub transcript_total: usize,
+    /// Screen row of the first shown editor row.
+    pub input_top: usize,
+    pub input_rows: usize,
+    /// Editor rows hidden below the shown ones.
+    pub input_below: usize,
+    /// First editor row shown when the editor is taller than `EDITOR_ROWS`.
+    pub editor_first: usize,
+    /// Screen row of the open panel's first row.
+    pub panel_top: usize,
+    pub panel_lines: Vec<Line>,
+}
+
+impl Layout {
+    pub fn on_input(&self, row: usize) -> bool {
+        (self.input_top..self.input_top + self.input_rows).contains(&row)
+    }
+
+    /// Transcript point under screen `row`, its line counted up from the last one.
+    pub fn transcript_point(&self, scroll: usize, row: usize, column: u16) -> Point {
+        Point { line: scroll + self.transcript_rows - 1 - row, column: column as usize }
+    }
+
+    /// Editor point under screen `row`, counted up from the last editor row; a row outside the editor clamps to its edge row.
+    pub fn input_point(&self, row: usize, column: u16) -> Point {
+        let row = row.clamp(self.input_top, self.input_top + self.input_rows - 1) - self.input_top;
+        Point { line: self.input_below + self.input_rows - 1 - row, column: column as usize }
+    }
+
+    /// The pill sits centered on the last transcript row while the view is scrolled up.
+    pub fn on_jump_pill(&self, scroll: usize, row: usize, column: usize) -> bool {
+        let pill = line_width(&vec![span(jump_pill(), PLAIN)]);
+        let start = self.content_width.saturating_sub(pill) / 2;
+        scroll > 0 && self.transcript_rows > 0 && row == self.transcript_rows - 1 && (start..start + pill).contains(&column)
+    }
+
+    pub fn panel_line(&self, row: usize) -> Option<&Line> {
+        row.checked_sub(self.panel_top).and_then(|at| self.panel_lines.get(at))
+    }
+}
+
 impl App {
     /// The whole screen: transcript, then status, open panel or slash menu, editor and footer pinned to the last rows.
     pub(super) fn frame(&mut self, width: usize, height: usize) -> (Vec<Line>, (u16, u16)) {
@@ -70,10 +120,9 @@ impl App {
             bottom.push(status);
             bottom.push(Vec::new());
         }
-        if self.editor_width != width {
+        if self.layout.width != width {
             // The selection counts wrapped rows, which a new width renumbers; input_line would index past them.
             self.input_selection = Selection::default();
-            self.editor_width = width;
         }
         let (mut editor_rows, (cursor_x, cursor_row)) = self.editor.render(width);
         if self.editor.text().is_empty() {
@@ -81,17 +130,17 @@ impl App {
         }
         let editor_top = bottom.len();
         let shown = editor_rows.len().min(EDITOR_ROWS);
-        self.input_top = self.input_top.clamp((cursor_row + 1).saturating_sub(shown), cursor_row).min(editor_rows.len() - shown);
-        let below = editor_rows.len() - self.input_top - shown;
-        editor_rows.truncate(self.input_top + shown);
-        editor_rows.drain(..self.input_top);
+        let editor_first = self.layout.editor_first.clamp((cursor_row + 1).saturating_sub(shown), cursor_row).min(editor_rows.len() - shown);
+        let below = editor_rows.len() - editor_first - shown;
+        editor_rows.truncate(editor_first + shown);
+        editor_rows.drain(..editor_first);
         for (row, line) in editor_rows.iter_mut().enumerate() {
             if let Some((from, to)) = self.input_selection.columns(below + shown - 1 - row) {
                 *line = select(line, from, to);
             }
         }
         bottom.extend(editor_rows);
-        let cursor = panel_cursor.unwrap_or((cursor_x, editor_top + cursor_row - self.input_top));
+        let cursor = panel_cursor.unwrap_or((cursor_x, editor_top + cursor_row - editor_first));
         bottom.extend(self.footer(width));
         let focus = match self.panel {
             Some(Panel::Agents { row }) => Some(row.min(pills + workflows.len())),
@@ -107,7 +156,7 @@ impl App {
         let content_width = width.saturating_sub(2);
         let (mut transcript, mut total, mut prompts) = self.transcript_tail(content_width, room + self.scroll);
         // Scroll counts lines up from the bottom, so a scrolled-up view or a drag in progress moves up by what streamed in below it.
-        let (last_total, last_width) = self.transcript_size;
+        let (last_total, last_width) = (self.layout.transcript_total, self.layout.content_width);
         // A new width rewraps every line, so the selected lines no longer hold the selected text.
         if content_width != last_width {
             self.selection = Selection::default();
@@ -120,13 +169,11 @@ impl App {
                 (transcript, total, prompts) = self.transcript_tail(content_width, room + self.scroll);
             }
         }
-        self.transcript_size = (total, content_width);
         self.scroll = self.scroll.min(transcript.len().saturating_sub(room));
         let end = transcript.len() - self.scroll;
         let start = end.saturating_sub(room);
         let mut rows: Vec<Line> = transcript[start..end].to_vec();
         let visible = rows.len();
-        self.transcript_view = (visible, content_width);
         // Sticky header: the prompt of the turn at the top of the view, once its first line scrolls out above.
         if let Some(&(_, index)) = prompts.iter().find(|(top, _)| *top >= self.scroll + visible) {
             // shortcut: clicks and selection on the pinned rows hit the transcript lines under them.
@@ -150,8 +197,19 @@ impl App {
             rows[row].push(span(format!("{} {glyph}", " ".repeat(pad)), MUTED));
         }
         rows.resize(room, Vec::new());
-        self.input_view = (rows.len() + editor_top, shown, below);
-        self.panel_view = (rows.len() + panel_view.0, panel_view.1);
+        let (panel_top, panel_lines) = panel_view;
+        self.layout = Layout {
+            width,
+            content_width,
+            transcript_rows: visible,
+            transcript_total: total,
+            input_top: rows.len() + editor_top,
+            input_rows: shown,
+            input_below: below,
+            editor_first,
+            panel_top: rows.len() + panel_top,
+            panel_lines,
+        };
         let cursor_y = rows.len() + cursor.1;
         rows.extend(bottom);
         rows.truncate(height);

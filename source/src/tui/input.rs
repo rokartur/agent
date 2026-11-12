@@ -7,26 +7,24 @@ impl App {
         if matches!(self.panel, Some(Panel::Diff { .. } | Panel::Terminal { .. })) {
             return;
         }
-        let (visible, _) = self.transcript_view;
+        let visible = self.layout.transcript_rows;
         let row = mouse.row as usize;
         self.edge_drag = None;
-        if mouse.kind == MouseEventKind::Down(MouseButton::Left) && self.on_jump_pill(row, mouse.column as usize) {
+        if mouse.kind == MouseEventKind::Down(MouseButton::Left) && self.layout.on_jump_pill(self.scroll, row, mouse.column as usize) {
             self.scroll = 0;
             return;
         }
         if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
-            let (top, rows, _) = self.input_view;
-            self.selecting_input = (top..top + rows).contains(&row);
+            self.selecting_input = self.layout.on_input(row);
             // A press inside keeps the selection: `press` needs its last click to count double and triple clicks.
             if !self.selecting_input {
                 self.input_selection = Selection::default();
             }
         }
         let wheel = matches!(mouse.kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollDown);
-        let (top, rows, _) = self.input_view;
-        if wheel && (top..top + rows).contains(&row) {
+        if wheel && self.layout.on_input(row) {
             let step = self.settings.scroll_lines as isize;
-            self.editor.scroll(self.editor_width, if mouse.kind == MouseEventKind::ScrollUp { -step } else { step });
+            self.editor.scroll(self.layout.width, if mouse.kind == MouseEventKind::ScrollUp { -step } else { step });
             return;
         }
         if self.selecting_input && !wheel {
@@ -37,14 +35,14 @@ impl App {
             MouseEventKind::ScrollUp => self.scroll += self.settings.scroll_lines,
             MouseEventKind::ScrollDown => self.scroll = self.scroll.saturating_sub(self.settings.scroll_lines),
             MouseEventKind::Down(MouseButton::Left) if row < visible => {
-                let point = self.point_at(row, mouse.column);
+                let point = self.layout.transcript_point(self.scroll, row, mouse.column);
                 let text = self.transcript_text(point.line);
                 self.selection.press(point, &text);
             }
             MouseEventKind::Down(MouseButton::Left) => self.selection = Selection::default(),
             MouseEventKind::Drag(MouseButton::Left) if visible > 0 => {
                 // Edge scroll stops at either end, so a drag whose button-up never arrives cannot scroll forever.
-                let max_scroll = self.transcript_size.0.saturating_sub(visible);
+                let max_scroll = self.layout.transcript_total.saturating_sub(visible);
                 if self.selection.dragging && row == 0 && self.scroll < max_scroll {
                     self.scroll += 1;
                     self.edge_drag = Some((mouse, Instant::now()));
@@ -52,7 +50,7 @@ impl App {
                     self.scroll -= 1;
                     self.edge_drag = Some((mouse, Instant::now()));
                 }
-                let point = self.point_at(row.min(visible - 1), mouse.column);
+                let point = self.layout.transcript_point(self.scroll, row.min(visible - 1), mouse.column);
                 let text = self.transcript_text(point.line);
                 self.selection.drag(point, &text);
             }
@@ -63,14 +61,13 @@ impl App {
                 }
             }
             MouseEventKind::Up(MouseButton::Left) if row < visible => {
-                let point = self.point_at(row, mouse.column);
+                let point = self.layout.transcript_point(self.scroll, row, mouse.column);
                 let line = self.transcript_line(point.line);
                 let Some(url) = link_at(&line, point.column) else { return };
                 self.ask_terminal(json!({"open": url}));
             }
             MouseEventKind::Up(MouseButton::Left) => {
-                let (top, lines) = &self.panel_view;
-                let Some(line) = row.checked_sub(*top).and_then(|at| lines.get(at)) else { return };
+                let Some(line) = self.layout.panel_line(row) else { return };
                 let Some(url) = link_at(line, mouse.column as usize) else { return };
                 self.ask_terminal(json!({"open": url}));
             }
@@ -80,17 +77,15 @@ impl App {
 
     /// Same selection as the transcript, over the editor rows; a drag outside them clamps to the edge row.
     pub(super) fn input_mouse(&mut self, kind: MouseEventKind, row: usize, column: u16) {
-        let (top, rows, below) = self.input_view;
-        let row = row.clamp(top, top + rows - 1) - top;
-        let point = Point { line: below + rows - 1 - row, column: column as usize };
+        let point = self.layout.input_point(row, column);
         let text = text_in(&self.input_line(point.line), 0, usize::MAX);
         match kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 self.selection = Selection::default();
                 self.input_selection.press(point, &text);
-                let total = self.editor.render(self.editor_width).0.len();
+                let total = self.editor.render(self.layout.width).0.len();
                 if let Some(row) = total.checked_sub(point.line + 1) {
-                    self.editor.click(self.editor_width, row, point.column);
+                    self.editor.click(self.layout.width, row, point.column);
                 }
             }
             MouseEventKind::Drag(MouseButton::Left) => self.input_selection.drag(point, &text),
@@ -116,7 +111,7 @@ impl App {
     /// Editor row `line`, counted up from the last row, prompt included like transcript gutters.
     /// Empty when a paste, slash command or transcript shrank the editor under a selection made earlier.
     pub(super) fn input_line(&self, line: usize) -> Line {
-        let (mut rows, _) = self.editor.render(self.editor_width);
+        let (mut rows, _) = self.editor.render(self.layout.width);
         let Some(index) = rows.len().checked_sub(line + 1) else { return Line::new() };
         rows.swap_remove(index)
     }
@@ -134,27 +129,13 @@ impl App {
         self.pending_copy = Some(copied);
     }
 
-    /// The pill sits centered on the last transcript row while the view is scrolled up.
-    pub(super) fn on_jump_pill(&self, row: usize, column: usize) -> bool {
-        let (visible, width) = self.transcript_view;
-        let pill = line_width(&vec![span(jump_pill(), PLAIN)]);
-        let start = width.saturating_sub(pill) / 2;
-        self.scroll > 0 && visible > 0 && row == visible - 1 && (start..start + pill).contains(&column)
-    }
-
-    pub(super) fn point_at(&self, row: usize, column: u16) -> Point {
-        let (visible, _) = self.transcript_view;
-        Point { line: self.scroll + visible - 1 - row, column: column as usize }
-    }
-
     /// Plain text of transcript line `line` (counted up from the last one) as rendered at the last frame's width.
     pub(super) fn transcript_text(&mut self, line: usize) -> String {
         self.transcript_line(line).iter().map(|s| s.text.as_str()).collect()
     }
 
     pub(super) fn transcript_line(&mut self, line: usize) -> Line {
-        let (_, width) = self.transcript_view;
-        let (mut tail, _, _) = self.transcript_tail(width, line + 1);
+        let (mut tail, _, _) = self.transcript_tail(self.layout.content_width, line + 1);
         let Some(index) = tail.len().checked_sub(line + 1) else { return Line::new() };
         tail.swap_remove(index)
     }
@@ -162,8 +143,7 @@ impl App {
     /// shortcut: copies gutters at the start of each source line, except a user prompt's `❯ ` and indent; strip them if that gets in the way.
     pub(super) fn selected_text(&mut self) -> String {
         let Some((start, end)) = self.selection.range() else { return String::new() };
-        let (_, width) = self.transcript_view;
-        let (tail, _, _) = self.transcript_tail(width, start.line + 1);
+        let (tail, _, _) = self.transcript_tail(self.layout.content_width, start.line + 1);
         let mut rows = Vec::new();
         for line in (end.line..=start.line).rev() {
             let Some(index) = tail.len().checked_sub(line + 1) else { continue };
@@ -335,15 +315,15 @@ impl App {
                 }
             }
             KeyCode::Down if alt => self.scroll = 0,
-            KeyCode::PageUp => self.scroll += self.transcript_view.0.max(1),
-            KeyCode::PageDown => self.scroll = self.scroll.saturating_sub(self.transcript_view.0.max(1)),
-            KeyCode::Up => self.editor.up(self.editor_width),
+            KeyCode::PageUp => self.scroll += self.layout.transcript_rows.max(1),
+            KeyCode::PageDown => self.scroll = self.scroll.saturating_sub(self.layout.transcript_rows.max(1)),
+            KeyCode::Up => self.editor.up(self.layout.width),
             KeyCode::Down
                 if self.editor.is_empty() && (footer_agents(&self.subagents.lock().unwrap()) > 0 || self.terminals.lock().unwrap().running() > 0 || !footer_workflows(&self.workflows).is_empty()) =>
             {
                 self.panel = Some(Panel::Agents { row: 1 });
             }
-            KeyCode::Down => self.editor.down(self.editor_width),
+            KeyCode::Down => self.editor.down(self.layout.width),
             KeyCode::Char('v') if ctrl => self.ask_terminal(json!({"paste_image": true})),
             _ => _ = self.editor.edit_key(key),
         }

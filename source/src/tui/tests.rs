@@ -229,6 +229,65 @@ fn a_jump_to_the_bottom_follows_new_output_while_a_finished_selection_is_still_h
 }
 
 #[test]
+fn a_click_on_the_jump_pill_returns_to_the_bottom() {
+    let home = std::env::temp_dir().join(format!("agent-tui-pill-{}", std::process::id()));
+    let mut app = test_app(&home);
+    let _ = std::fs::remove_dir_all(&home);
+    for _ in 0..30 {
+        app.handle(Msg::ModesFetched(Err("offline".into())));
+    }
+    let click = |app: &mut App, row: usize, column: usize| {
+        app.scroll = 5;
+        let rows: Vec<String> = app.frame(80, 20).0.iter().map(text).collect();
+        assert_eq!(app.scroll, 5);
+        app.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), row: row as u16, column: column as u16, modifiers: KeyModifiers::NONE });
+        app.mouse(MouseEvent { kind: MouseEventKind::Up(MouseButton::Left), row: row as u16, column: column as u16, modifiers: KeyModifiers::NONE });
+        (rows, app.scroll)
+    };
+    let (rows, _) = click(&mut app, 0, 0);
+    let pill = jump_pill();
+    let row = rows.iter().position(|row| row.contains(&pill)).expect("the pill is drawn");
+    let first = width(&rows[row][..rows[row].find(&pill).unwrap()]);
+    let last = first + width(&pill) - 1;
+    assert_eq!(click(&mut app, row, first - 1).1, 5, "left of the pill");
+    assert_eq!(click(&mut app, row, last + 1).1, 5, "right of the pill");
+    assert_eq!(click(&mut app, row, first).1, 0);
+    assert_eq!(click(&mut app, row, last).1, 0);
+}
+
+#[test]
+fn a_click_on_a_shown_editor_row_moves_the_cursor_there() {
+    let home = std::env::temp_dir().join(format!("agent-tui-editor-click-{}", std::process::id()));
+    let mut app = test_app(&home);
+    let _ = std::fs::remove_dir_all(&home);
+    let draft: Vec<String> = (1..=12).map(|n| format!("l{n}")).collect();
+    app.editor.set(&draft.join("\n"));
+    let rows: Vec<String> = app.frame(80, 30).0.iter().map(text).collect();
+    assert!(!rows.iter().any(|row| row.trim_end() == "  l1"), "12 rows do not fit in the editor: {rows:?}");
+    let row = rows.iter().position(|row| row.trim_end() == "  l5").expect("l5 is shown") as u16;
+    app.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), row, column: 4, modifiers: KeyModifiers::NONE });
+    app.mouse(MouseEvent { kind: MouseEventKind::Up(MouseButton::Left), row, column: 4, modifiers: KeyModifiers::NONE });
+    app.key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+    assert!(app.editor.text().contains("\nl5x\n"), "{}", app.editor.text());
+}
+
+#[test]
+fn a_drag_outside_the_editor_clamps_to_its_edge_row() {
+    let layout = Layout { input_top: 20, input_rows: 3, input_below: 2, ..Layout::default() };
+    assert_eq!(layout.input_point(0, 7), Point { line: 4, column: 7 }, "above the editor: its first shown row");
+    assert_eq!(layout.input_point(22, 7), Point { line: 2, column: 7 });
+    assert_eq!(layout.input_point(40, 7), Point { line: 2, column: 7 }, "below the editor: its last shown row");
+}
+
+#[test]
+fn transcript_points_count_up_from_the_last_line() {
+    let layout = Layout { transcript_rows: 10, ..Layout::default() };
+    assert_eq!(layout.transcript_point(0, 9, 3), Point { line: 0, column: 3 });
+    assert_eq!(layout.transcript_point(0, 0, 3), Point { line: 9, column: 3 });
+    assert_eq!(layout.transcript_point(4, 9, 3), Point { line: 4, column: 3 });
+}
+
+#[test]
 fn a_subagent_on_another_computer_shows_its_task_not_its_session_file_path_there() {
     let shown = |run: crate::agent::subagent::Run| {
         run.state.lock().unwrap().session = Some("/nonexistent/agent-remote-session.jsonl".into());

@@ -437,21 +437,10 @@ struct App {
     selection: Selection,
     /// A selection drag held on the transcript's top row or below it, replayed on a timer so the view keeps scrolling without mouse motion.
     edge_drag: Option<(MouseEvent, Instant)>,
-    /// Transcript rows on screen and the screen width, from the last frame.
-    transcript_view: (usize, usize),
-    /// Transcript line count and the width it was wrapped to, from the last frame.
-    transcript_size: (usize, usize),
-    /// Width the editor wrapped to in the last frame, so Up/Down move by screen rows.
-    editor_width: usize,
+    layout: Layout,
     input_selection: Selection,
     /// The last left press landed on the editor, so drags and the release belong to `input_selection`.
     selecting_input: bool,
-    /// Screen row of the first shown editor row, the shown row count, and the editor rows hidden below them, in the last frame.
-    input_view: (usize, usize, usize),
-    /// Screen row of the open panel's first row and its rows, in the last frame, so a click opens a link in it.
-    panel_view: (usize, Vec<Line>),
-    /// First editor row shown when the editor is taller than `EDITOR_ROWS`.
-    input_top: usize,
     todos: Arc<Mutex<Todos>>,
     goal: Arc<Mutex<Option<Goal>>>,
     plan: Arc<Mutex<Plan>>,
@@ -740,14 +729,9 @@ impl App {
             panel: None,
             selection: Selection::default(),
             edge_drag: None,
-            transcript_view: (0, 0),
-            transcript_size: (0, 0),
-            editor_width: 0,
+            layout: Layout::default(),
             input_selection: Selection::default(),
             selecting_input: false,
-            input_view: (0, 0, 0),
-            panel_view: (0, Vec::new()),
-            input_top: 0,
             todos: agent.todos.clone(),
             goal: agent.goal.clone(),
             plan: agent.plan.clone(),
