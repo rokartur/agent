@@ -475,9 +475,44 @@ pub fn install(home: &Path, source: &str) -> Result<String, String> {
     Ok(source.to_string())
 }
 
+/// What `update` did to one installed plugin, whose version was `from`.
+#[derive(Debug, PartialEq)]
+pub struct Update {
+    pub name: String,
+    pub from: String,
+    pub outcome: Result<Outcome, String>,
+}
+
+#[derive(Debug, PartialEq)]
+pub enum Outcome {
+    /// Copied again from `source`, its install directory, or from the bundled copy when None.
+    Copied {
+        version: String,
+        source: Option<String>,
+    },
+    Newest,
+    /// Neither a directory install nor bundled, so there is nothing to copy from.
+    NoSource,
+}
+
+impl Update {
+    pub fn notice(&self) -> String {
+        let name = &self.name;
+        match &self.outcome {
+            Ok(Outcome::Copied { version, source: Some(source) }) => format!("{name}: updated to {version} from {source}."),
+            Ok(Outcome::Copied { version, source: None }) => format!("{name}: updated to {version}."),
+            Ok(Outcome::Newest) => format!("{name}: {} is the newest.", self.from),
+            Ok(Outcome::NoSource) => format!("{name}: {}", NO_SOURCE),
+            Err(error) => format!("{name}: {error}"),
+        }
+    }
+}
+
+pub const NO_SOURCE: &str = "not installed from a directory; install it again with agent plugin install <path>.";
+
 /// `agent plugin update [name...]`, every installed plugin when `names` is empty: a directory install is copied again
-/// from its directory, a bundled one updates when the agent has a newer version. Returns one line per plugin.
-pub fn update(home: &Path, names: &[String]) -> Result<Vec<String>, String> {
+/// from its directory, a bundled one updates when the agent has a newer version.
+pub fn update(home: &Path, names: &[String]) -> Result<Vec<Update>, String> {
     let plugins = home.join(".agents/plugins");
     let names = if names.is_empty() { installed(&plugins) } else { names.to_vec() };
     let mut current = Vec::new();
@@ -487,23 +522,21 @@ pub fn update(home: &Path, names: &[String]) -> Result<Vec<String>, String> {
         current.push((name, manifest.version));
     }
     // One failed copy, say a moved source directory, must not stop the plugins after it.
-    Ok(current.into_iter().map(|(name, version)| update_one(home, &name, &version).unwrap_or_else(|error| format!("{name}: {error}"))).collect())
+    Ok(current.into_iter().map(|(name, from)| Update { outcome: update_one(home, &name, &from), name, from }).collect())
 }
 
-fn update_one(home: &Path, name: &str, version: &str) -> Result<String, String> {
+fn update_one(home: &Path, name: &str, version: &str) -> Result<Outcome, String> {
     let dir = home.join(".agents/plugins").join(name);
     if let Ok(source) = std::fs::read_to_string(dir.join(SOURCE_FILE)) {
         install(home, &source)?;
-        return Ok(format!("{name}: updated to {} from {source}.", read_manifest(&dir)?.version));
+        return Ok(Outcome::Copied { version: read_manifest(&dir)?.version, source: Some(source) });
     }
-    let Some(bundled) = bundled_version(name) else {
-        return Ok(format!("{name}: not installed from a directory; install it again with agent plugin install <path>."));
-    };
+    let Some(bundled) = bundled_version(name) else { return Ok(Outcome::NoSource) };
     if !crate::update::is_newer(&bundled, version) {
-        return Ok(format!("{name}: {version} is the newest."));
+        return Ok(Outcome::Newest);
     }
     install(home, name)?;
-    Ok(format!("{name}: updated to {bundled}."))
+    Ok(Outcome::Copied { version: bundled, source: None })
 }
 
 fn bundled_version(name: &str) -> Option<String> {
@@ -884,14 +917,14 @@ done"#;
 
         let bundled = read_manifest(&home.join(".agents/plugins/usagefleet")).unwrap().version;
         assert_eq!(
-            update(&home, &[]),
+            update(&home, &[]).map(|updates| updates.iter().map(Update::notice).collect()),
             Ok(vec![
                 format!("mine: updated to 1.1.0 from {}.", crate::process::canonicalize(&source).unwrap().display()),
                 "old: not installed from a directory; install it again with agent plugin install <path>.".to_string(),
                 format!("usagefleet: {bundled} is the newest."),
             ])
         );
-        assert_eq!(update(&home, &["nope".into()]), Err("nope is not installed.".into()));
+        assert_eq!(update(&home, &["nope".into()]).err(), Some("nope is not installed.".into()));
     }
 
     #[test]

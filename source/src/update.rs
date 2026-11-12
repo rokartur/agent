@@ -5,7 +5,7 @@ use serde_json::Value;
 
 use crate::process;
 
-const RELEASES: &str = "https://github.com/rokartur/agent/releases";
+pub const RELEASES: &str = "https://github.com/rokartur/agent/releases";
 const RELEASES_API: &str = "https://api.github.com/repos/rokartur/agent/releases?per_page=20";
 const CURRENT: &str = env!("CARGO_PKG_VERSION");
 /// `latest` follows stable releases only, `pre-release` also takes pre-releases, `off` never checks.
