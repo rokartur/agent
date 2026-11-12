@@ -34,6 +34,66 @@ const SEARCH_ANCHOR_BUDGET: u32 = 10 * MAX_LINES as u32;
 
 const SCHEMAS: &str = include_str!("tools.json");
 
+/// Safety flags of one built-in tool. Plugin and MCP tools have none; each caller keeps its own default for them.
+pub struct Facts {
+    pub name: &'static str,
+    /// `permissions::request_for` asks before it runs, in some mode. Read only by `asks_matches_request_for`, so a new
+    /// tool cannot skip a permission arm unnoticed: an unlisted tool runs unasked.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub asks: bool,
+    /// Plan mode refuses it: it can change files.
+    pub plan_blocked: bool,
+    /// The work tree is snapshotted around it, so a rewind can undo it.
+    pub changes_files: bool,
+    /// Hidden from subagents.
+    pub root_only: bool,
+    /// Hidden from one-shot runs, which have no UI to show it.
+    pub needs_ui: bool,
+}
+
+#[rustfmt::skip]
+const FACTS: [Facts; 34] = [
+    Facts { name: "Read",             asks: false, plan_blocked: false, changes_files: false, root_only: false, needs_ui: false },
+    Facts { name: "Bash",             asks: true,  plan_blocked: false, changes_files: true,  root_only: false, needs_ui: false },
+    Facts { name: "Write",            asks: true,  plan_blocked: true,  changes_files: true,  root_only: false, needs_ui: false },
+    Facts { name: "ReplaceLines",     asks: true,  plan_blocked: true,  changes_files: true,  root_only: false, needs_ui: false },
+    Facts { name: "Edit",             asks: true,  plan_blocked: true,  changes_files: true,  root_only: false, needs_ui: false },
+    Facts { name: "InsertLines",      asks: true,  plan_blocked: true,  changes_files: true,  root_only: false, needs_ui: false },
+    Facts { name: "ContextTreeQuery", asks: false, plan_blocked: false, changes_files: false, root_only: false, needs_ui: false },
+    Facts { name: "Todo",             asks: false, plan_blocked: false, changes_files: false, root_only: false, needs_ui: false },
+    Facts { name: "Goal",             asks: false, plan_blocked: false, changes_files: false, root_only: false, needs_ui: false },
+    Facts { name: "Agent",            asks: true,  plan_blocked: true,  changes_files: true,  root_only: true,  needs_ui: false },
+    Facts { name: "Workflow",         asks: true,  plan_blocked: false, changes_files: false, root_only: true,  needs_ui: false },
+    Facts { name: "WaitForAgents",    asks: false, plan_blocked: false, changes_files: false, root_only: true,  needs_ui: false },
+    Facts { name: "SendMessage",      asks: false, plan_blocked: false, changes_files: false, root_only: false, needs_ui: false },
+    Facts { name: "ListAgents",       asks: false, plan_blocked: false, changes_files: false, root_only: true,  needs_ui: false },
+    Facts { name: "TaskOutput",       asks: false, plan_blocked: false, changes_files: false, root_only: true,  needs_ui: false },
+    Facts { name: "TaskStop",         asks: false, plan_blocked: false, changes_files: false, root_only: true,  needs_ui: false },
+    Facts { name: "CronCreate",       asks: false, plan_blocked: false, changes_files: false, root_only: true,  needs_ui: true  },
+    Facts { name: "CronDelete",       asks: false, plan_blocked: false, changes_files: false, root_only: true,  needs_ui: true  },
+    Facts { name: "CronList",         asks: false, plan_blocked: false, changes_files: false, root_only: true,  needs_ui: true  },
+    Facts { name: "ScheduleWakeup",   asks: false, plan_blocked: false, changes_files: false, root_only: true,  needs_ui: true  },
+    Facts { name: "PushNotification", asks: false, plan_blocked: false, changes_files: false, root_only: true,  needs_ui: true  },
+    Facts { name: "Page",             asks: false, plan_blocked: false, changes_files: false, root_only: false, needs_ui: true  },
+    Facts { name: "AskUserQuestion",  asks: false, plan_blocked: false, changes_files: false, root_only: true,  needs_ui: false },
+    Facts { name: "Skill",            asks: false, plan_blocked: false, changes_files: false, root_only: false, needs_ui: false },
+    Facts { name: "EnterPlanMode",    asks: false, plan_blocked: false, changes_files: false, root_only: true,  needs_ui: false },
+    Facts { name: "EnterWorktree",    asks: true,  plan_blocked: true,  changes_files: false, root_only: true,  needs_ui: false },
+    Facts { name: "ExitWorktree",     asks: true,  plan_blocked: true,  changes_files: false, root_only: true,  needs_ui: false },
+    Facts { name: "Grep",             asks: false, plan_blocked: false, changes_files: false, root_only: false, needs_ui: false },
+    Facts { name: "WebSearch",        asks: true,  plan_blocked: false, changes_files: false, root_only: true,  needs_ui: false },
+    Facts { name: "WebFetch",         asks: true,  plan_blocked: false, changes_files: false, root_only: true,  needs_ui: false },
+    Facts { name: "GetSearchContent", asks: false, plan_blocked: false, changes_files: false, root_only: true,  needs_ui: false },
+    Facts { name: "Video",            asks: true,  plan_blocked: false, changes_files: false, root_only: false, needs_ui: false },
+    Facts { name: "ImageGenerate",    asks: true,  plan_blocked: true,  changes_files: true,  root_only: false, needs_ui: false },
+    Facts { name: "ExitPlanMode",     asks: false, plan_blocked: false, changes_files: false, root_only: false, needs_ui: false },
+];
+
+/// None for a plugin or MCP tool.
+pub fn facts(name: &str) -> Option<&'static Facts> {
+    FACTS.iter().find(|tool| tool.name == name)
+}
+
 /// Every tool in tools.json order; `Agent` carries the swarm prompt like jcode's `swarm`.
 /// One fixed list: the tools head the cached prompt prefix, so changing it mid-session rewrites the whole cache.
 /// `image_generate` is whether an account has an image model; without one ImageGenerate is left out.
@@ -633,6 +693,26 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::sync::Arc;
+
+    #[test]
+    fn every_built_in_tool_states_its_facts() {
+        let schemas: Vec<Value> = serde_json::from_str(SCHEMAS).unwrap();
+        let mut tools: Vec<&str> = schemas.iter().map(|tool| tool["name"].as_str().unwrap()).collect();
+        tools.push("ExitPlanMode");
+        tools.sort();
+        let mut listed: Vec<&str> = FACTS.iter().map(|facts| facts.name).collect();
+        listed.sort();
+        assert_eq!(listed, tools);
+    }
+
+    #[test]
+    fn asks_matches_request_for() {
+        let probe = json!({"source": "https://x", "includeContent": true});
+        for facts in &FACTS {
+            let asks = crate::agent::permissions::request_for(facts.name, &probe, &[]).is_some();
+            assert_eq!(asks, facts.asks, "{}", facts.name);
+        }
+    }
 
     #[test]
     fn only_a_plain_cd_names_a_directory() {

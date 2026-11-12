@@ -635,28 +635,9 @@ fn run(options: Options) -> Result<(), String> {
         agent.announce_session();
         // After settle_model, which resets the tools. Only the root spawns, runs terminals and searches the web, and a child has no UI to ask in.
         if options.parent.is_some() {
-            const ROOT_ONLY: [&str; 18] = [
-                "Agent",
-                "Workflow",
-                "ListAgents",
-                "WaitForAgents",
-                "TaskOutput",
-                "TaskStop",
-                "WebSearch",
-                "WebFetch",
-                "GetSearchContent",
-                "AskUserQuestion",
-                "CronCreate",
-                "CronDelete",
-                "CronList",
-                "ScheduleWakeup",
-                "PushNotification",
-                "EnterPlanMode",
-                "EnterWorktree",
-                "ExitWorktree",
-            ];
             let web = |name: &str| options.web && matches!(name, "WebSearch" | "WebFetch" | "GetSearchContent");
-            let keep = |name: &str| if options.explore { matches!(name, "Read" | "Grep") } else { !ROOT_ONLY.contains(&name) || web(name) };
+            let root_only = |name: &str| tools::facts(name).is_some_and(|facts| facts.root_only);
+            let keep = |name: &str| if options.explore { matches!(name, "Read" | "Grep") } else { !root_only(name) || web(name) };
             if let Some(tools) = agent.tools.as_array_mut() {
                 tools.retain(|tool| keep(tool["name"].as_str().unwrap_or_default()));
                 for tool in tools.iter_mut().filter(|tool| tool["name"] == "Bash") {

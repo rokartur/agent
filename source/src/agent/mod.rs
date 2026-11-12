@@ -1827,7 +1827,6 @@ impl Agent {
     /// Snapshots around a tool that can change files, so a rewind touches only what this session changed.
     /// A file another session edits while this call runs still counts as this session's.
     fn run_tool_with_checkpoint(&mut self, id: &str, name: &str, input: &Value, targets: &[PathBuf], emit: &mut dyn FnMut(Event)) -> Result<(String, bool), String> {
-        const CHANGES_FILES: [&str; 7] = ["Write", "ReplaceLines", "Edit", "InsertLines", "ImageGenerate", "Bash", "Agent"];
         // Before the snapshot: the move swaps the snapshot repo, so before and after would come from different checkouts.
         if name == "Bash"
             && let Some(dir) = tools::cd_target(input["command"].as_str().unwrap_or_default())
@@ -1841,7 +1840,7 @@ impl Agent {
                 Err(text) => (text, true),
             });
         }
-        let Some(snapshots) = self.snapshots.as_ref().filter(|_| CHANGES_FILES.contains(&name)) else {
+        let Some(snapshots) = self.snapshots.as_ref().filter(|_| tools::facts(name).is_some_and(|facts| facts.changes_files)) else {
             return Ok(self.run_tool(id, name, input, targets, emit));
         };
         let files_before = match save_files_left_out(snapshots, targets) {
@@ -2139,8 +2138,7 @@ impl Agent {
         }
         // A one-shot run (-p, --headless, acp, a child) has no UI to notify or schedule in, and asks only through an editor: these tools only fail there.
         if !self.interactive {
-            const NEEDS_UI: [&str; 6] = ["PushNotification", "CronCreate", "CronDelete", "CronList", "ScheduleWakeup", "Page"];
-            list.retain(|tool| !NEEDS_UI.contains(&tool["name"].as_str().unwrap_or_default()));
+            list.retain(|tool| !tools::facts(tool["name"].as_str().unwrap_or_default()).is_some_and(|facts| facts.needs_ui));
         }
         if !self.asks {
             list.retain(|tool| tool["name"] != "AskUserQuestion" && tool["name"] != "EnterPlanMode");

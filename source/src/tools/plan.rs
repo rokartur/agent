@@ -30,8 +30,6 @@ pub const PROMPT: &str = "<plan_mode>
 Plan mode is on. Investigate and design, change nothing. Edits, subagents, plugin and MCP tools and state-changing commands are blocked; Bash runs only read-only commands (ls, cat, rg, fd, git status/log/diff/show, ...). Ask with AskUserQuestion when a decision cannot be inferred. When the plan is ready, call ExitPlanMode with the whole plan in Markdown as your last action. Start the plan with a `# Title` heading. The user then picks: implement in a fresh session, export, or keep planning.
 </plan_mode>";
 
-const EDITING_TOOLS: [&str; 8] = ["Write", "ReplaceLines", "Edit", "InsertLines", "ImageGenerate", "Agent", "EnterWorktree", "ExitWorktree"];
-
 const READ_ONLY_COMMANDS: [&str; 18] = ["ls", "cat", "head", "tail", "wc", "rg", "fd", "pwd", "tree", "file", "stat", "which", "echo", "jq", "diff", "du", "cd", "true"];
 const READ_ONLY_GIT: [&str; 7] = ["status", "log", "diff", "show", "blame", "ls-files", "rev-parse"];
 // Matched as prefixes, so attached values (`--pre=sh`) count too; `--output` writes a file; rg runs `--hostname-bin` for hyperlinks.
@@ -52,7 +50,7 @@ pub fn tool() -> Value {
 /// Why plan mode blocks this tool call, or None when it may run.
 pub fn blocked(tool: &str, input: &Value) -> Option<String> {
     // Plugin and MCP tools (`<plugin>__<name>`, `mcp__<server>__<name>`) may write anything, so they count as editing.
-    if EDITING_TOOLS.contains(&tool) || tool.contains("__") {
+    if super::facts(tool).is_some_and(|facts| facts.plan_blocked) || tool.contains("__") {
         return Some(format!("Plan mode blocks {tool}: it can change files. Finish the plan with ExitPlanMode."));
     }
     let command = input["command"].as_str().unwrap_or_default();
