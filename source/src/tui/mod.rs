@@ -81,11 +81,11 @@ const RUN_VIEW_REFRESH: Duration = Duration::from_millis(250);
 const EDGE_SCROLL: Duration = Duration::from_millis(40);
 const PERMISSION_SETTLE: Duration = Duration::from_millis(400);
 
-const WARN: Style = Style::fg(179);
+const WARN: Style = Style::rgb(0xffb340);
 const FOOTER_SEPARATOR: &str = " · ";
-const SYSTEM: Style = Style::rgb(0x79c0ff);
-const OK: Style = Style::rgb(0x7ee787);
-const ERROR: Style = Style::rgb(0xff7b72);
+const SYSTEM: Style = Style::rgb(0x58a6ff);
+const OK: Style = Style::rgb(0x3fdc6a);
+const ERROR: Style = Style::rgb(0xff5c57);
 const TOOL_NAME: Style = Style::rgb(0xffffff);
 const TOOL_ARGS: Style = Style::rgb(0x858585);
 const TOOL_INPUT: Style = Style::rgb(0xbbbbbb);
@@ -5136,8 +5136,8 @@ impl App {
     fn diff_view(&mut self, width: usize, height: usize) -> Vec<Line> {
         let Some(Panel::Diff { files, index, scroll }) = self.panel.as_mut() else { unreachable!("frame checks the panel") };
         let lines: Vec<Line> = diff_lines(&files[*index]).iter().map(|line| truncate(line, width)).collect();
-        let header = screen_header(vec![span(&files[*index].path, BRIGHT.bold())], *index, files.len(), width);
-        full_screen(header, &lines, scroll, width, height, &[("↑↓", "scroll"), ("←→", "file"), ("esc", "back")])
+        let header = screen_header(vec![span(&files[*index].path, BRIGHT.bold())], *index, files.len());
+        full_screen(header, &lines, scroll, height, "↑↓ scroll     ←→ file     esc back")
     }
 
     fn diff_key(&mut self, code: KeyCode) {
@@ -5186,8 +5186,8 @@ impl App {
         let about = format!(" {} · {} {} · {}", terminal.id, status.as_str(), terminal.elapsed(), short_path(&terminal.cwd.display().to_string()));
         let label = vec![mark, span(" ", PLAIN), span(&terminal.title, BRIGHT.bold()), span(about, DIM)];
         let count = self.terminals.lock().unwrap().list.len();
-        let header = screen_header(label, *index, count, width);
-        full_screen(header, lines, scroll, width, height, &[("↑↓", "scroll"), ("←→", "shell"), ("x", "stop"), ("esc", "back")])
+        let header = screen_header(label, *index, count);
+        full_screen(header, lines, scroll, height, "↑↓ scroll     ←→ shell     x stop     esc back")
     }
 
     fn terminal_key(&mut self, code: KeyCode) {
@@ -5613,7 +5613,7 @@ fn todo_lines(todos: &Todos) -> Vec<Line> {
 }
 
 fn update_todos_lines(tasks: &[Task], width: usize) -> Vec<Line> {
-    let mut lines = vec![vec![span("✓", OK), span(" Update Todos", TOOL_ARGS)]];
+    let mut lines = vec![vec![span("✓", OK), span(" Update Todos", TOOL_NAME)]];
     for (index, task) in tasks.iter().enumerate() {
         let gutter = if index == 0 { "  ⎿  " } else { "     " };
         lines.push(truncate(&vec![span(gutter, MUTED), todo_span(task.status, &task.subject)], width));
@@ -5647,18 +5647,6 @@ fn prompt_rows(text: &str, style: Style, width: usize) -> Vec<Line> {
     let mut rows = wrap(&[span(text, style)], width, &vec![span("  ", PROMPT_LEAD)]);
     rows[0][0] = span("❯ ", PROMPT_LEAD);
     rows
-}
-
-/// `label` set into a horizontal rule that fills `width`; an empty label gives a plain rule.
-fn rule(label: Line, style: Style, width: usize) -> Line {
-    if label.is_empty() {
-        return vec![span("─".repeat(width), style)];
-    }
-    let mut line = vec![span("──── ", style)];
-    line.extend(label);
-    line.push(span(" ", style));
-    line.push(span("─".repeat(width.saturating_sub(line_width(&line))), style));
-    line
 }
 
 fn render_item(item: &Item, width: usize, expanded: bool, cwd: &Path) -> Vec<Line> {
@@ -5759,7 +5747,7 @@ fn subagent_done_lines(run: &Run, width: usize) -> Vec<Line> {
 fn render_tool(name: &str, input: &Value, result: Option<&(String, bool)>, width: usize, expanded: bool, cwd: &Path) -> Vec<Line> {
     // The list itself replaces this row once the call ends; see show_todos.
     if result.is_none() && edits_todos(name, input) {
-        return vec![vec![span("•", MUTED), span(" Update Todos", TOOL_ARGS)]];
+        return vec![vec![span("•", MUTED), span(" Update Todos", TOOL_NAME)]];
     }
     let edits_lines = matches!(name, "ReplaceLines" | "Edit" | "InsertLines");
     let (icon, icon_style) = match result {
@@ -5773,14 +5761,14 @@ fn render_tool(name: &str, input: &Value, result: Option<&(String, bool)>, width
     let header = match skill_name(name, input) {
         Some(skill) => {
             let hint = if expanded { "" } else { " (ctrl+o to expand)" };
-            vec![span(icon, icon_style), span(" Skill ", TOOL_ARGS), span(skill, TOOL_INPUT), span(hint, DIM)]
+            vec![span(icon, icon_style), span(" Skill ", TOOL_NAME), span(skill, TOOL_INPUT), span(hint, DIM)]
         }
         None => {
             let (tool, server) = match mcp_tool(name) {
                 Some((server, tool)) => (tool, Some(server)),
                 None => (name.to_string(), None),
             };
-            let mut header = vec![span(icon, icon_style), span(format!(" {tool}"), TOOL_ARGS)];
+            let mut header = vec![span(icon, icon_style), span(format!(" {tool}"), TOOL_NAME)];
             let args = tool_args(name, input, cwd);
             if !args.is_empty() {
                 header.push(span(format!(" {args}"), TOOL_INPUT));
@@ -5855,7 +5843,7 @@ fn answer_lines(icon: &str, icon_style: Style, answers: &[(String, String)], wid
     for (index, (question, answer)) in answers.iter().enumerate() {
         let mut spans = vec![span(question, TOOL_ARGS)];
         if index == 0 {
-            spans.splice(0..0, [span(icon, icon_style), span(" ", PLAIN), span("AskUserQuestion ", TOOL_ARGS)]);
+            spans.splice(0..0, [span(icon, icon_style), span(" ", PLAIN), span("AskUserQuestion ", TOOL_NAME)]);
         }
         let mut rows = wrap(&spans, width, &vec![span("  ", PLAIN)]);
         if index == 0 {
@@ -6212,35 +6200,25 @@ fn rewind_note(files: Option<RestoredFiles>) -> String {
     note
 }
 
-/// A full-screen read-only view: `header`, the last screenful of `lines` scrolled up by `scroll`, a rule and `hint`.
-/// Lines shorter than the screen start under the header, like a pager.
-/// A full-screen view's top rule: `label`, then "2/3" near the right end when there is more than one.
-fn screen_header(label: Line, index: usize, count: usize, width: usize) -> Line {
-    let position = if count > 1 { vec![span(format!(" {}/{count} ", index + 1), DIM), span("──", MUTED)] } else { Line::new() };
-    let mut header = rule(label, MUTED, width.saturating_sub(line_width(&position)));
-    header.extend(position);
-    header
-}
-
-/// `keys` as `key label` pairs, the key bright and its label dim.
-fn key_hints(keys: &[(&str, &str)]) -> Line {
-    let mut line = Vec::new();
-    for (key, label) in keys {
-        line.extend([span(format!(" {key}"), BRIGHT), span(format!(" {label}  "), DIM)]);
+/// A full-screen view's top row: `label`, then "2/3" when there is more than one.
+fn screen_header(mut label: Line, index: usize, count: usize) -> Line {
+    if count > 1 {
+        label.push(span(format!(" · {}/{count}", index + 1), DIM));
     }
-    line
+    label
 }
 
-fn full_screen(header: Line, lines: &[Line], scroll: &mut usize, width: usize, height: usize, keys: &[(&str, &str)]) -> Vec<Line> {
+/// A full-screen read-only view: `header`, the last screenful of `lines` scrolled up by `scroll`, a blank row and `hint`, styled like a panel's.
+/// Lines shorter than the screen start under the header, like a pager.
+fn full_screen(header: Line, lines: &[Line], scroll: &mut usize, height: usize, hint: &str) -> Vec<Line> {
     let room = height.saturating_sub(3);
     *scroll = (*scroll).min(lines.len().saturating_sub(room));
     let end = lines.len() - *scroll;
     let start = end.saturating_sub(room);
     let mut rows = vec![header];
     rows.extend_from_slice(&lines[start..end]);
-    rows.resize(room + 1, Vec::new());
-    rows.push(rule(Line::new(), MUTED, width));
-    rows.push(key_hints(keys));
+    rows.resize(room + 2, Vec::new());
+    rows.push(vec![span(hint, MUTED)]);
     rows
 }
 
@@ -6472,7 +6450,7 @@ fn background_rows(shells: usize, agents: usize, viewed: Option<&str>, focus: Op
             if index > 0 {
                 row.push(span(" · ", DIM));
             }
-            row.push(span(count, if focus == Some(index) { Style::fg(16).on(80) } else { Style::fg(80) }));
+            row.push(span(count, if focus == Some(index) { Style::fg(16).on(45) } else { Style::fg(45) }));
         }
         row.push(span(if focus.is_some() { " · Enter to view" } else { " · ↓ to view" }, DIM));
         rows.push(row);
@@ -7056,8 +7034,8 @@ mod tests {
         assert_eq!(rows(0, 0, Some("scan"), None), ["viewing scan · Esc back"]);
         assert!(rows(0, 0, None, None).is_empty());
         let focused = background_rows(2, 13, None, Some(1), 40);
-        assert_eq!(focused[0][0].style, Style::fg(80));
-        assert_eq!(focused[0][2].style, Style::fg(16).on(80));
+        assert_eq!(focused[0][0].style, Style::fg(45));
+        assert_eq!(focused[0][2].style, Style::fg(16).on(45));
     }
 
     #[test]
@@ -7120,7 +7098,6 @@ mod tests {
         let line = &render_item(&item, 80, false, Path::new("/repo"))[0];
         assert!(text(line).starts_with("✧ 1m 23s ↑"), "{}", text(line));
         assert_eq!(line[0].style, DIM);
-        assert_eq!(text(&rule(Line::new(), MUTED, 3)), "───");
     }
 
     #[test]
@@ -7617,15 +7594,14 @@ mod tests {
     #[test]
     fn full_screen_starts_short_output_under_the_header() {
         let lines = vec![vec![span("a", PLAIN)], vec![span("b", PLAIN)]];
-        let rows: Vec<String> = full_screen(vec![span("head", PLAIN)], &lines, &mut 0, 4, 7, &[("esc", "back")]).iter().map(text).collect();
-        assert_eq!(rows, ["head", "a", "b", "", "", "────", " esc back  "]);
+        let rows: Vec<String> = full_screen(vec![span("head", PLAIN)], &lines, &mut 0, 7, "esc back").iter().map(text).collect();
+        assert_eq!(rows, ["head", "a", "b", "", "", "", "esc back"]);
     }
 
     #[test]
-    fn screen_header_is_a_rule_with_the_position_only_among_several() {
-        let header = screen_header(vec![span("ls", PLAIN)], 1, 3, 20);
-        assert_eq!((text(&header).as_str(), line_width(&header)), ("──── ls ───── 2/3 ──", 20));
-        assert_eq!(text(&screen_header(vec![span("ls", PLAIN)], 0, 1, 10)), "──── ls ──");
+    fn screen_header_shows_the_position_only_among_several() {
+        assert_eq!(text(&screen_header(vec![span("ls", PLAIN)], 1, 3)), "ls · 2/3");
+        assert_eq!(text(&screen_header(vec![span("ls", PLAIN)], 0, 1)), "ls");
     }
 
     #[test]

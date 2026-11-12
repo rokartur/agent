@@ -2,8 +2,8 @@ use super::render::{CURSOR, Line, PLAIN, Style, select, span, split_link};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use unicode_width::UnicodeWidthChar;
 
-const PROMPT: Style = Style::rgb(0x79c0ff).bold();
-const SHELL_PROMPT: Style = Style::rgb(0xf778ba).bold();
+const PROMPT: Style = Style::rgb(0x58a6ff).bold();
+const SHELL_PROMPT: Style = Style::rgb(0xff5fb4).bold();
 
 /// Multi-line prompt editor. `col` counts chars, not bytes.
 #[derive(Default)]
