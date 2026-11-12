@@ -58,11 +58,17 @@ pub fn undeclared_params(schemas: &Value, name: &str, input: &Value) -> Option<S
     let tool = schemas.as_array()?.iter().find(|tool| tool["name"] == name)?;
     let mut undeclared = BTreeSet::new();
     collect_undeclared(input, &tool["input_schema"], "", &mut undeclared);
+    // Grep's content rows always carry an anchor or a line number, so Claude Code's `-n` asks for what the call already returns.
+    if name == "Grep" {
+        undeclared.remove("-n");
+    }
     if undeclared.is_empty() {
         return None;
     }
     let listed: Vec<String> = undeclared.iter().map(|path| format!("`{path}`")).collect();
-    Some(format!("{name} does not take {}.", listed.join(", ")))
+    let waits = name == "TaskOutput" && (undeclared.contains("block") || undeclared.contains("timeout"));
+    let hint = if waits { " It never waits: a background task's output arrives as a message when the task exits." } else { "" };
+    Some(format!("{name} does not take {}.{hint}", listed.join(", ")))
 }
 
 fn collect_undeclared(value: &Value, schema: &Value, at: &str, undeclared: &mut BTreeSet<String>) {
@@ -657,7 +663,13 @@ mod tests {
     fn parameters_a_schema_lacks_are_named_at_any_depth() {
         let tools = schemas("", false, false);
         let undeclared = |name: &str, input: Value| undeclared_params(&tools, name, &input);
-        assert_eq!(undeclared("Grep", json!({"pattern": "x", "head_limit": 5, "-n": true})).unwrap(), "Grep does not take `-n`, `head_limit`.");
+        assert_eq!(undeclared("Grep", json!({"pattern": "x", "head_limit": 5, "-n": true})).unwrap(), "Grep does not take `head_limit`.");
+        assert_eq!(undeclared("Grep", json!({"pattern": "x", "-n": true})), None);
+        assert_eq!(
+            undeclared("TaskOutput", json!({"task_id": "bt-1", "block": true, "timeout": 300000})).unwrap(),
+            "TaskOutput does not take `block`, `timeout`. It never waits: a background task's output arrives as a message when the task exits."
+        );
+        assert_eq!(undeclared("TaskOutput", json!({"task_id": "bt-1", "tail": 5})).unwrap(), "TaskOutput does not take `tail`.");
         let edits = json!({"file_path": "a", "edits": [{"old_string": "a", "new_string": "b", "replace_all": true}, {"old_string": "c", "new_string": "d", "replace_all": true}]});
         assert_eq!(undeclared("Edit", edits).unwrap(), "Edit does not take `edits.replace_all`.");
         assert_eq!(undeclared("Agent", json!({"tasks": [{"description": "a", "prompt": "x", "subagent_type": "Explore"}]})).unwrap(), "Agent does not take `tasks.subagent_type`.");
