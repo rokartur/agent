@@ -179,7 +179,7 @@ fn handle(agent: &mut Agent, connection: &mut Connection, message: &Value) -> Re
             agent.mcp.settled(MCP_WAIT);
             agent.asks = !client["elicitation"]["form"].is_null();
             if method == "session/new" {
-                if !agent.messages.is_empty() {
+                if !agent.history.messages.is_empty() {
                     agent.new_session().map_err(|error| (INTERNAL_ERROR, error))?;
                 }
                 *session_id = agent.session.id.clone();
@@ -203,7 +203,7 @@ fn handle(agent: &mut Agent, connection: &mut Connection, message: &Value) -> Re
                 }
                 *session_id = asked.to_string();
                 if method == "session/load" {
-                    replay(&agent.messages, agent, session_id);
+                    replay(&agent.history.messages, agent, session_id);
                 }
             }
             // After the open: loading a session replaces its directories with the saved ones.
@@ -274,10 +274,10 @@ fn handle(agent: &mut Agent, connection: &mut Connection, message: &Value) -> Re
             }
             agent.images.extend(images);
             // Only the TUI's sessions name themselves, and an editor lists its sessions by title.
-            if agent.messages.is_empty() {
+            if agent.history.messages.is_empty() {
                 agent.start_naming(&text);
             }
-            let first_new_message = agent.messages.len();
+            let first_new_message = agent.history.messages.len();
             let mut turn = Turn {
                 cwd: agent.cwd.clone(),
                 todos: agent.todos.clone(),

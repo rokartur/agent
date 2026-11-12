@@ -89,11 +89,11 @@ pub(super) fn spawn_worker(mut agent: Agent, mut settings: Settings, model_lists
                     continue;
                 }
                 Command::RewindPoints => {
-                    let _ = events.send(Msg::RewindPoints(agent::rewind_points(&agent.messages)));
+                    let _ = events.send(Msg::RewindPoints(agent::rewind_points(&agent.history.messages)));
                     continue;
                 }
                 Command::Retract => {
-                    let unanswered = agent::rewind_points(&agent.messages).pop().filter(|point| point.at + 1 == agent.messages.len());
+                    let unanswered = agent::rewind_points(&agent.history.messages).pop().filter(|point| point.at + 1 == agent.history.messages.len());
                     if let Some(point) = unanswered {
                         match agent.rewind(point.at) {
                             Ok(_) => _ = events.send(Msg::Retracted(point)),
@@ -104,7 +104,7 @@ pub(super) fn spawn_worker(mut agent: Agent, mut settings: Settings, model_lists
                 }
                 Command::Rewind { at, entry } => match agent.rewind(at) {
                     Ok(files) => {
-                        let _ = events.send(Msg::Rewound { messages: agent.messages.clone(), files, entry });
+                        let _ = events.send(Msg::Rewound { messages: agent.history.messages.clone(), files, entry });
                         continue;
                     }
                     Err(error) => Err(error),

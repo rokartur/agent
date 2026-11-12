@@ -217,7 +217,7 @@ pub struct Agent {
     pub extra_dirs: Vec<PathBuf>,
     /// The computer the user's terminal is on, when it is not this one: `serve::USER_DEVICE`.
     pub user_device: Option<String>,
-    pub messages: Vec<Value>,
+    pub history: History,
     pub session: Session,
     pub sessions_dir: PathBuf,
     pub context_window: u64,
@@ -239,8 +239,6 @@ pub struct Agent {
     pub keep_recent_tokens: u64,
     pub last_context_tokens: u64,
     pub condense: condense::Config,
-    /// Summarized batches; the provider sees their stubs, `messages` keeps the originals.
-    pub condensed: Vec<Condensed>,
     /// Number of the next short ref (`t7`).
     pub next_ref: usize,
     pub pending_condense: Vec<JoinHandle<Result<(Condensed, api::Reply), String>>>,
@@ -315,10 +313,6 @@ pub struct Agent {
     /// None outside a git repo and in print mode; then a rewind leaves files alone.
     pub snapshots: Option<Snapshots>,
     pub lsp: lsp::Lsp,
-    /// Files changed by this session's own tool calls, oldest first.
-    pub checkpoints: Vec<Checkpoint>,
-    pub file_checkpoints: Vec<FileCheckpoint>,
-    pub compactions: Vec<Compaction>,
 }
 
 /// Work tree snapshots around one tool call made while message `at` was the latest.
@@ -367,18 +361,71 @@ pub struct Session {
     lock: Option<Arc<File>>,
 }
 
-/// What a saved session restores besides its id.
-#[derive(Default)]
+/// The conversation a session file replays to: what `History::apply` builds from its entries.
+#[derive(Default, Debug, PartialEq)]
 pub struct History {
     pub messages: Vec<Value>,
+    /// Summarized batches; the provider sees their stubs, `messages` keeps the originals.
     pub condensed: Vec<Condensed>,
+    /// Files changed by this session's own tool calls, oldest first.
+    pub checkpoints: Vec<Checkpoint>,
+    pub file_checkpoints: Vec<FileCheckpoint>,
+    pub compactions: Vec<Compaction>,
+}
+
+impl History {
+    /// Applies one session entry of these five types; other types are left to the caller.
+    fn apply(&mut self, mut entry: Value) -> Result<(), String> {
+        let kind = entry["type"].as_str().unwrap_or_default().to_string();
+        let missing = |field: &str| format!("{kind} without {field}");
+        match kind.as_str() {
+            "message" => self.messages.push(entry["message"].take()),
+            "rewind" => {
+                let index = saved_index(&entry, "index", "to", &self.compactions).ok_or_else(|| missing("index"))?;
+                self.messages.truncate(index);
+                self.checkpoints.retain(|checkpoint| checkpoint.at < index);
+                self.file_checkpoints.retain(|checkpoint| checkpoint.at < index);
+                self.compactions.retain(|compaction| compaction.cut <= index);
+            }
+            "tool_checkpoint" => {
+                let text = |field: &str| entry[field].as_str().map(String::from).ok_or_else(|| missing(field));
+                let at = saved_index(&entry, "index", "at", &self.compactions).ok_or_else(|| missing("index"))?;
+                self.checkpoints.push(Checkpoint { at, before: text("before")?, after: text("after")? });
+            }
+            "file_checkpoint" => {
+                let at = saved_index(&entry, "index", "at", &self.compactions).ok_or_else(|| missing("index"))?;
+                let path = entry["path"].as_str().map(PathBuf::from).ok_or_else(|| missing("path"))?;
+                let blob = |field: &str| entry[field].as_str().map(String::from);
+                self.file_checkpoints.push(FileCheckpoint { at, path, before: blob("before"), after: blob("after") });
+            }
+            "checkpoints_reset" => {
+                self.checkpoints.clear();
+                self.file_checkpoints.clear();
+            }
+            "compaction" => {
+                let cut = saved_index(&entry, "cut", "first_kept", &self.compactions).ok_or_else(|| missing("cut"))?;
+                let summary = entry["summary"].as_str().ok_or_else(|| missing("summary"))?;
+                // Two processes appending to one session file interleave their messages, so the cut can point past them.
+                if cut > self.messages.len() {
+                    return Err(format!("compaction keeps from message {cut} of {}", self.messages.len()));
+                }
+                self.compactions.push(Compaction { cut, summary: summary.to_string() });
+            }
+            "condense" => self.condensed.push(condense::from_entry(&entry).ok_or_else(|| missing("refs or summary"))?),
+            _ => {}
+        }
+        Ok(())
+    }
+}
+
+/// What a saved session restores besides its id.
+#[derive(Default)]
+pub struct Saved {
+    pub history: History,
     pub todos: Todos,
     pub goal: Option<Goal>,
     pub plan: Plan,
     pub spent: Spent,
-    pub checkpoints: Vec<Checkpoint>,
-    pub file_checkpoints: Vec<FileCheckpoint>,
-    pub compactions: Vec<Compaction>,
     /// Provider to the account id that served the session's last reply, so a resume keeps the same account.
     pub accounts: HashMap<String, String>,
     pub extra_dirs: Vec<PathBuf>,
@@ -462,7 +509,6 @@ impl Agent {
             keep_recent_tokens: settings.keep_recent_tokens,
             last_context_tokens: 0,
             condense: condense::Config::new(settings, ""),
-            condensed: Vec::new(),
             next_ref: 1,
             pending_condense: Vec::new(),
             pending_title: None,
@@ -505,13 +551,10 @@ impl Agent {
             mcp: crate::mcp::Mcp::new(&home, &cwd),
             snapshots: None,
             lsp: lsp::Lsp::new(settings.lsp.clone()),
-            checkpoints: Vec::new(),
-            file_checkpoints: Vec::new(),
-            compactions: Vec::new(),
             agent_dir,
             home,
             cwd,
-            messages: Vec::new(),
+            history: History::default(),
             session,
             sessions_dir,
         }
@@ -553,7 +596,7 @@ impl Agent {
             self.user_requests.drain(..extra);
         }
         self.describe_to_peers(true);
-        if self.interactive && self.messages.is_empty() {
+        if self.interactive && self.history.messages.is_empty() {
             self.start_naming(text);
         }
         let mut content: Vec<Value> = self.shell_context.drain(..).map(|text| json!({"type": "text", "text": text})).collect();
@@ -573,7 +616,7 @@ impl Agent {
         if let Err(error) = &result {
             if self.turns == turns_before {
                 // No reply means the API refused this prompt (e.g. a 400 on its image); resending it would fail again.
-                self.rewind(self.messages.len() - 1).map_err(|e| format!("{error}; {e}"))?;
+                self.rewind(self.history.messages.len() - 1).map_err(|e| format!("{error}; {e}"))?;
             } else {
                 self.answer_unpaired_calls(error).map_err(|e| format!("{error}; {e}"))?;
             }
@@ -596,7 +639,7 @@ impl Agent {
     /// A turn that failed between a reply's tool calls and their results leaves calls the API requires answers to,
     /// so every later prompt would get a 400. Answering them with the error keeps the files the calls changed.
     fn answer_unpaired_calls(&mut self, error: &str) -> Result<(), String> {
-        let Some(last) = self.messages.last().filter(|message| message["role"] == "assistant") else { return Ok(()) };
+        let Some(last) = self.history.messages.last().filter(|message| message["role"] == "assistant") else { return Ok(()) };
         let results: Vec<Value> = last["content"]
             .as_array()
             .into_iter()
@@ -877,7 +920,7 @@ impl Agent {
             }
         }
         let result = match name {
-            "ContextTreeQuery" => condense::query(&self.messages, &self.condensed, input),
+            "ContextTreeQuery" => condense::query(&self.history.messages, &self.history.condensed, input),
             "Todo" => self.todo(input),
             "EnterPlanMode" => self.enter_plan(emit),
             "ExitPlanMode" => self.complete_plan(input),
@@ -1604,7 +1647,7 @@ impl Agent {
 
     /// /rename-title-ai: names the session again from its first prompt.
     pub fn rename_title(&self) -> Result<String, String> {
-        let first = self.messages.iter().find(|m| m["role"] == "user" && m["content"][0]["type"] == "text");
+        let first = self.history.messages.iter().find(|m| m["role"] == "user" && m["content"][0]["type"] == "text");
         let Some(text) = first.and_then(|m| m["content"][0]["text"].as_str()) else { return Err("Nothing to name yet.".into()) };
         name_session(&self.client, &self.session, &self.cwd, &self.naming_request(text))
     }
@@ -1647,8 +1690,7 @@ impl Agent {
                 Ok((batch, reply)) => {
                     self.usage.add(reply.usage);
                     self.session.append(&usage::reply_entry(&reply, now_ms()))?;
-                    self.session.append(&condense::entry(&batch))?;
-                    self.condensed.push(batch);
+                    self.record(condense::entry(&batch))?;
                 }
                 Err(error) => emit(Event::Notice(format!("Condense failed, kept the original tool outputs: {error}"))),
             }
@@ -1748,21 +1790,25 @@ impl Agent {
     }
 
     fn push(&mut self, message: Value) -> Result<(), String> {
-        self.session.append(&json!({"type": "message", "message": message}))?;
-        self.messages.push(message);
-        Ok(())
+        self.record(json!({"type": "message", "message": message}))
+    }
+
+    /// Saves `entry` to the session file, then applies it to `history`, so memory matches what a resume rebuilds.
+    fn record(&mut self, entry: Value) -> Result<(), String> {
+        self.session.append(&entry)?;
+        self.history.apply(entry)
     }
 
     /// Files this session changed, with diffs; None when the work tree is not snapshotted.
     pub fn changes(&self) -> Result<Option<Vec<FileChange>>, String> {
         let Some(snapshots) = &self.snapshots else { return Ok(None) };
-        session_changes(snapshots, &self.checkpoints).map(Some)
+        session_changes(snapshots, &self.history.checkpoints).map(Some)
     }
 
     /// Drops the message at `index` and everything after it, and puts back the files those prompts changed.
     /// None: the work tree is not snapshotted, so files stay as they are.
     pub fn rewind(&mut self, index: usize) -> Result<Option<RestoredFiles>, String> {
-        let files = self.snapshots.as_ref().map(|snapshots| restore_files(snapshots, &self.checkpoints, &self.file_checkpoints, index)).transpose()?;
+        let files = self.snapshots.as_ref().map(|snapshots| restore_files(snapshots, &self.history.checkpoints, &self.history.file_checkpoints, index)).transpose()?;
         self.forget_from(index)?;
         Ok(files)
     }
@@ -1770,11 +1816,7 @@ impl Agent {
     /// Drops message `index` and every later one from the context, and leaves the files as they are.
     pub fn forget_from(&mut self, index: usize) -> Result<(), String> {
         // Saved first: a rewind only in memory would come back on resume.
-        self.session.append(&json!({"type": "rewind", "index": index}))?;
-        self.checkpoints.retain(|checkpoint| checkpoint.at < index);
-        self.file_checkpoints.retain(|checkpoint| checkpoint.at < index);
-        self.compactions.retain(|compaction| compaction.cut <= index);
-        self.messages.truncate(index);
+        self.record(json!({"type": "rewind", "index": index}))?;
         self.estimate_context_tokens();
         Ok(())
     }
@@ -1815,24 +1857,22 @@ impl Agent {
         };
         let result = self.run_tool(id, name, input, targets, emit);
         let snapshots = self.snapshots.as_ref().expect("checked at the top of run_tool_with_checkpoint");
-        let at = self.messages.len();
+        let at = self.history.messages.len();
+        let mut entries = Vec::new();
         for (path, before) in files_before {
             match snapshots.save_file(&path) {
                 Ok(after) if after == before => {}
-                Ok(after) => {
-                    self.session.append(&json!({"type": "file_checkpoint", "index": at, "path": path, "before": before, "after": after}))?;
-                    self.file_checkpoints.push(FileCheckpoint { at, path, before, after });
-                }
+                Ok(after) => entries.push(json!({"type": "file_checkpoint", "index": at, "path": path, "before": before, "after": after})),
                 Err(error) => emit(Event::Notice(format!("{SNAPSHOT_FAILED}: {error}"))),
             }
         }
         match snapshots.take() {
             Ok(after) if after == before => {}
-            Ok(after) => {
-                self.session.append(&json!({"type": "tool_checkpoint", "index": at, "before": before, "after": after}))?;
-                self.checkpoints.push(Checkpoint { at, before, after });
-            }
+            Ok(after) => entries.push(json!({"type": "tool_checkpoint", "index": at, "before": before, "after": after})),
             Err(error) => emit(Event::Notice(format!("{SNAPSHOT_FAILED}: {error}"))),
+        }
+        for entry in entries {
+            self.record(entry)?;
         }
         Ok(result)
     }
@@ -1845,9 +1885,8 @@ impl Agent {
             return Ok(None);
         };
         let summary = self.summarize(&view[..first_kept], focus)?;
-        let cut = message_index(&self.compactions, first_kept);
-        self.session.append(&json!({"type": "compaction", "summary": summary, "cut": cut}))?;
-        self.compactions.push(Compaction { cut, summary: summary.clone() });
+        let cut = message_index(&self.history.compactions, first_kept);
+        self.record(json!({"type": "compaction", "summary": summary, "cut": cut}))?;
         self.last_context_tokens = 0;
         // Turns after a thread the API could not store go without one; the shorter conversation gets another try.
         self.message_thread = api::MessageThread::default();
@@ -1932,19 +1971,19 @@ impl Agent {
     /// Starts an empty session (unsaved if the current one is unsaved).
     pub fn new_session(&mut self) -> Result<(), String> {
         self.session = Session::start(&self.sessions_dir, self.session.path.is_some(), &self.cwd, &self.model)?;
-        self.load(History::default());
+        self.load(Saved::default());
         self.announce_session();
         Ok(())
     }
 
     /// Switches to the saved session `id`.
     pub fn open_session(&mut self, id: &str) -> Result<Opened, String> {
-        let (session, mut history) = Session::resume(&self.sessions_dir, id)?;
+        let (session, mut saved) = Session::resume(&self.sessions_dir, id)?;
         self.session = session;
-        let messages = history.messages.clone();
-        let accounts = std::mem::take(&mut history.accounts);
-        let config = history.config.take();
-        self.load(history);
+        let messages = saved.history.messages.clone();
+        let accounts = std::mem::take(&mut saved.accounts);
+        let config = saved.config.take();
+        self.load(saved);
         self.announce_session();
         Ok(Opened { messages, accounts, config })
     }
@@ -2022,8 +2061,7 @@ impl Agent {
         self.anchors = Anchors::new(&session.id);
         self.anchors.editor = editor;
         self.nested_instructions.clear();
-        self.checkpoints.clear();
-        self.file_checkpoints.clear();
+        self.history.apply(json!({"type": "checkpoints_reset"}))?;
         if self.snapshots.is_some() {
             self.snapshots = Snapshots::open(&self.home, &cwd);
         }
@@ -2061,7 +2099,7 @@ impl Agent {
     /// /export: the session file as is, or for a `.md` path the conversation as plain text.
     pub fn export_session(&self, out: &Path) -> Result<(), String> {
         let text = if out.extension().is_some_and(|ext| ext == "md") {
-            serialize(&self.messages)
+            serialize(&self.history.messages)
         } else {
             let path = self.session.path.as_ref().ok_or("This session is not saved (--no-session); export to a .md path.")?;
             std::fs::read_to_string(path).map_err(|e| format!("Cannot read {}: {e}", path.display()))?
@@ -2134,7 +2172,7 @@ impl Agent {
 
     fn tool_schemas(&self) -> Value {
         // Condensed batches of a resumed session keep their originals reachable after condense is turned off.
-        let context_tree_query = self.condense.enabled || !self.condensed.is_empty();
+        let context_tree_query = self.condense.enabled || !self.history.condensed.is_empty();
         tools::schemas(
             &subagent::swarm_prompt(&self.agent_dir, &self.cwd, prompt::is_trusted(&self.trusted_projects, &self.cwd), &self.subagent_effort),
             context_tree_query,
@@ -2143,35 +2181,31 @@ impl Agent {
     }
 
     /// Replaces the conversation state with a saved (or empty) session's.
-    pub fn load(&mut self, history: History) {
+    pub fn load(&mut self, saved: Saved) {
         self.grants = Grants::default();
-        self.next_ref = condense::next_ref(&history.condensed);
-        self.messages = history.messages;
-        crate::image::fit_history(&mut self.messages);
-        self.condensed = history.condensed;
-        *self.todos.lock().unwrap() = history.todos;
-        *self.goal.lock().unwrap() = history.goal;
-        *self.plan.lock().unwrap() = history.plan;
+        self.history = saved.history;
+        self.next_ref = condense::next_ref(&self.history.condensed);
+        crate::image::fit_history(&mut self.history.messages);
+        *self.todos.lock().unwrap() = saved.todos;
+        *self.goal.lock().unwrap() = saved.goal;
+        *self.plan.lock().unwrap() = saved.plan;
         self.tools = self.tool_schemas();
-        self.spent = history.spent;
+        self.spent = saved.spent;
         self.pending_condense.clear();
         self.pending_title = None;
         self.nested_instructions.clear();
-        self.checkpoints = history.checkpoints;
-        self.file_checkpoints = history.file_checkpoints;
-        self.compactions = history.compactions;
-        self.extra_dirs = history.extra_dirs;
+        self.extra_dirs = saved.extra_dirs;
         self.message_thread = api::MessageThread::default();
         self.estimate_context_tokens();
     }
 
     /// The messages with everything before the latest compaction replaced by its summary.
     fn compacted(&self) -> Vec<Value> {
-        compacted(&self.messages, &self.compactions, self.session.path.as_deref())
+        compacted(&self.history.messages, &self.history.compactions, self.session.path.as_deref())
     }
 
     fn provider_view(&self) -> Vec<Value> {
-        answer_missing_results(condense::view(&self.compacted(), &self.condensed))
+        answer_missing_results(condense::view(&self.compacted(), &self.history.condensed))
     }
 
     /// Tells plugins the session started; needs the settled model for the context's provider.
@@ -2298,14 +2332,14 @@ impl Session {
 
     /// Opens session `id`, or the one saved session whose id starts with `id`.
     /// When another process has it open, continues in a copy so the two conversations do not interleave in one file.
-    pub fn resume(dir: &Path, id: &str) -> Result<(Session, History), String> {
+    pub fn resume(dir: &Path, id: &str) -> Result<(Session, Saved), String> {
         let id = resolve_id(dir, id)?;
         let path = dir.join(format!("{id}.jsonl"));
-        let history = Session::history(&path)?;
+        let saved = Session::history(&path)?;
         let file = lock_file(&path).map_err(|e| format!("Cannot open {}: {e}", path.display()))?;
         match file.try_lock() {
-            Ok(()) => Ok((Session { id, path: Some(path), forked_from: None, lock: Some(Arc::new(file)) }, history)),
-            Err(TryLockError::WouldBlock) => Ok((Session::fork(dir, &path, id)?, history)),
+            Ok(()) => Ok((Session { id, path: Some(path), forked_from: None, lock: Some(Arc::new(file)) }, saved)),
+            Err(TryLockError::WouldBlock) => Ok((Session::fork(dir, &path, id)?, saved)),
             Err(TryLockError::Error(e)) => Err(format!("Cannot lock {}: {e}", path.display())),
         }
     }
@@ -2349,65 +2383,33 @@ impl Session {
     }
 
     /// Replays a session file without opening the session, e.g. to show a subagent's transcript.
-    pub fn history(path: &Path) -> Result<History, String> {
+    pub fn history(path: &Path) -> Result<Saved, String> {
         let text = std::fs::read_to_string(path).map_err(|e| format!("Cannot read {}: {e}", path.display()))?;
-        let mut history = History::default();
+        let mut saved = Saved::default();
         for (number, line) in complete_lines(&text).lines().enumerate() {
-            let entry: Value = serde_json::from_str(line).map_err(|e| format!("{}:{}: {e}", path.display(), number + 1))?;
-            let missing = |field: &str| format!("{}:{}: {} without {field}", path.display(), number + 1, entry["type"].as_str().unwrap_or_default());
+            let at = format!("{}:{}", path.display(), number + 1);
+            let entry: Value = serde_json::from_str(line).map_err(|e| format!("{at}: {e}"))?;
+            let missing = |field: &str| format!("{at}: {} without {field}", entry["type"].as_str().unwrap_or_default());
             match entry["type"].as_str() {
-                Some("message") => history.messages.push(entry["message"].clone()),
-                Some("rewind") => {
-                    let index = saved_index(&entry, "index", "to", &history.compactions).ok_or_else(|| missing("index"))?;
-                    history.messages.truncate(index);
-                    history.checkpoints.retain(|checkpoint| checkpoint.at < index);
-                    history.file_checkpoints.retain(|checkpoint| checkpoint.at < index);
-                    history.compactions.retain(|compaction| compaction.cut <= index);
-                }
-                Some("tool_checkpoint") => {
-                    let text = |field: &str| entry[field].as_str().map(String::from).ok_or_else(|| missing(field));
-                    let at = saved_index(&entry, "index", "at", &history.compactions).ok_or_else(|| missing("index"))?;
-                    history.checkpoints.push(Checkpoint { at, before: text("before")?, after: text("after")? });
-                }
-                Some("file_checkpoint") => {
-                    let at = saved_index(&entry, "index", "at", &history.compactions).ok_or_else(|| missing("index"))?;
-                    let path = entry["path"].as_str().map(PathBuf::from).ok_or_else(|| missing("path"))?;
-                    let blob = |field: &str| entry[field].as_str().map(String::from);
-                    history.file_checkpoints.push(FileCheckpoint { at, path, before: blob("before"), after: blob("after") });
-                }
-                Some("checkpoints_reset") => {
-                    history.checkpoints.clear();
-                    history.file_checkpoints.clear();
-                }
-                Some("compaction") => {
-                    let cut = saved_index(&entry, "cut", "first_kept", &history.compactions).ok_or_else(|| missing("cut"))?;
-                    let summary = entry["summary"].as_str().ok_or_else(|| missing("summary"))?;
-                    // Two processes appending to one session file interleave their messages, so the cut can point past them.
-                    if cut > history.messages.len() {
-                        return Err(format!("{}:{}: compaction keeps from message {cut} of {}", path.display(), number + 1, history.messages.len()));
-                    }
-                    history.compactions.push(Compaction { cut, summary: summary.to_string() });
-                }
-                Some("condense") => history.condensed.push(condense::from_entry(&entry).ok_or_else(|| missing("refs or summary"))?),
-                Some("goal") => history.goal = Goal::from_entry(&entry),
-                Some("plan") => history.plan = Plan::from_entry(&entry),
-                Some("todo") => history.todos = Todos::from_entry(&entry),
-                Some("spent") => history.spent.add(Spent::from_entry(&entry)),
-                Some("extra_dirs") => history.extra_dirs = serde_json::from_value(entry["dirs"].clone()).map_err(|_| missing("dirs"))?,
+                Some("goal") => saved.goal = Goal::from_entry(&entry),
+                Some("plan") => saved.plan = Plan::from_entry(&entry),
+                Some("todo") => saved.todos = Todos::from_entry(&entry),
+                Some("spent") => saved.spent.add(Spent::from_entry(&entry)),
+                Some("extra_dirs") => saved.extra_dirs = serde_json::from_value(entry["dirs"].clone()).map_err(|_| missing("dirs"))?,
                 Some("config") => {
                     let text = |field: &str| entry[field].as_str().map(String::from).ok_or_else(|| missing(field));
                     let mode = entry["mode"].as_str().and_then(Mode::parse).ok_or_else(|| missing("mode"))?;
-                    history.config = Some(SessionConfig { mode, model: text("model")?, effort: text("effort")? });
+                    saved.config = Some(SessionConfig { mode, model: text("model")?, effort: text("effort")? });
                 }
                 Some("usage") => {
                     if let (Some(provider), Some(account)) = (entry["provider"].as_str(), entry["account"].as_str()) {
-                        history.accounts.insert(provider.to_string(), account.to_string());
+                        saved.accounts.insert(provider.to_string(), account.to_string());
                     }
                 }
-                _ => {}
+                _ => saved.history.apply(entry).map_err(|e| format!("{at}: {e}"))?,
             }
         }
-        Ok(history)
+        Ok(saved)
     }
 
     /// Saved sessions in `dir`, newest first. Unreadable files are skipped.
@@ -3081,7 +3083,7 @@ mod tests {
         }
         let batch = Condensed { refs: vec![("t1".into(), "a".into())], summary: "`t1` ran".into() };
         session.append(&condense::entry(&batch)).unwrap();
-        let (_, history) = Session::resume(&dir, &session.id).unwrap();
+        let (_, Saved { history, .. }) = Session::resume(&dir, &session.id).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
         assert_eq!(history.messages, messages);
         assert_eq!(condense::view(&history.messages, &history.condensed), condense::view(&messages, &[batch]));
@@ -3135,7 +3137,7 @@ mod tests {
         session.append(&checkpoint(3)).unwrap();
         session.append(&json!({"type": "message", "message": assistant("nice")})).unwrap();
         session.append(&json!({"type": "rewind", "to": 2})).unwrap();
-        let (_, history) = Session::resume(&dir, &session.id).unwrap();
+        let (_, Saved { history, .. }) = Session::resume(&dir, &session.id).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
         assert_eq!(history.messages, [user("hi"), assistant("hello")]);
         assert_eq!(history.checkpoints, [Checkpoint { at: 1, before: "t0".into(), after: "t1".into() }]);
@@ -3147,7 +3149,7 @@ mod tests {
         let session = Session::start(&dir, true, Path::new("/w"), "m").unwrap();
         let path = session.path.clone().unwrap();
         let write_raw = |bytes: &[u8]| std::fs::OpenOptions::new().append(true).open(&path).unwrap().write_all(bytes).unwrap();
-        let messages = || Session::history(&path).map(|history| history.messages);
+        let messages = || Session::history(&path).map(|saved| saved.history.messages);
         session.append(&json!({"type": "message", "message": user("hi")})).unwrap();
         session.append(&json!({"type": "message", "message": assistant("hello")})).unwrap();
         write_raw(br#"{"type":"message","mess"#);
@@ -3172,7 +3174,7 @@ mod tests {
         session.append(&json!({"type": "message", "message": user("more")})).unwrap();
         session.append(&json!({"type": "message", "message": assistant("ok")})).unwrap();
         session.append(&json!({"type": "compaction", "summary": "S", "first_kept": 3})).unwrap();
-        let (_, history) = Session::resume(&dir, &session.id).unwrap();
+        let (_, Saved { history, .. }) = Session::resume(&dir, &session.id).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
         let texts: Vec<String> = rewind_points(&history.messages).into_iter().map(|point| point.text).collect();
         assert_eq!(texts, ["hi", "more"]);
@@ -3187,6 +3189,58 @@ mod tests {
         let error = Session::resume(&dir, &session.id).err().unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
         assert!(error.ends_with(":3: compaction keeps from message 2 of 1"), "{error}");
+    }
+
+    #[test]
+    fn a_live_session_and_its_resume_hold_the_same_history() {
+        let home = std::env::temp_dir().join(format!("agent-live-resume-{}", std::process::id()));
+        std::fs::create_dir_all(&home).unwrap();
+        let settings = crate::settings::load(&home).unwrap();
+        let session = Session::start(&home.join("sessions"), true, &home, "m").unwrap();
+        let mut agent = Agent::new(Client::new(&home).unwrap(), &settings, home.clone(), home.clone(), session, home.join("sessions"), None);
+        for text in ["one", "two", "three", "four"] {
+            agent.push(user(text)).unwrap();
+        }
+        agent.record(json!({"type": "tool_checkpoint", "index": 1, "before": "t0", "after": "t1"})).unwrap();
+        agent.record(json!({"type": "file_checkpoint", "index": 3, "path": "/w/a", "before": "b0", "after": null})).unwrap();
+        agent.record(json!({"type": "compaction", "summary": "S", "cut": 2})).unwrap();
+        agent.record(condense::entry(&Condensed { refs: vec![("t1".into(), "a".into())], summary: "`t1` ran".into() })).unwrap();
+        agent.record(json!({"type": "rewind", "index": 3})).unwrap();
+        let resumed = Session::history(agent.session.path.as_ref().unwrap()).unwrap().history;
+        std::fs::remove_dir_all(&home).unwrap();
+        assert_eq!(agent.history.messages, [user("one"), user("two"), user("three")]);
+        assert_eq!((agent.history.checkpoints.len(), agent.history.file_checkpoints.len(), agent.history.compactions.len()), (1, 0, 1));
+        assert_eq!(agent.history, resumed);
+    }
+
+    #[test]
+    fn a_rewind_keeps_a_compaction_cut_at_the_index_and_drops_a_later_one() {
+        let mut history = History::default();
+        for text in ["one", "two", "three"] {
+            history.apply(json!({"type": "message", "message": user(text)})).unwrap();
+        }
+        history.apply(json!({"type": "compaction", "summary": "S1", "cut": 1})).unwrap();
+        history.apply(json!({"type": "compaction", "summary": "S2", "cut": 2})).unwrap();
+        history.apply(json!({"type": "compaction", "summary": "S3", "cut": 3})).unwrap();
+        history.apply(json!({"type": "rewind", "index": 2})).unwrap();
+        let cuts: Vec<usize> = history.compactions.iter().map(|compaction| compaction.cut).collect();
+        assert_eq!(cuts, [1, 2]);
+    }
+
+    #[test]
+    fn checkpoints_saved_before_0_2_land_on_message_indices() {
+        let mut history = History::default();
+        for text in ["one", "two", "three", "four"] {
+            history.apply(json!({"type": "message", "message": user(text)})).unwrap();
+        }
+        // Before 0.2 a compaction saved `first_kept` and checkpoints `at`/`to`, positions in the compacted view.
+        history.apply(json!({"type": "compaction", "summary": "S", "first_kept": 3})).unwrap();
+        history.apply(json!({"type": "tool_checkpoint", "at": 2, "before": "t0", "after": "t1"})).unwrap();
+        history.apply(json!({"type": "message", "message": user("five")})).unwrap();
+        history.apply(json!({"type": "rewind", "to": 2})).unwrap();
+        assert_eq!(history.compactions[0].cut, 3);
+        assert_eq!(history.messages, [user("one"), user("two"), user("three"), user("four")]);
+        assert!(history.checkpoints.is_empty(), "view position 2 is message 4, and the rewind drops its checkpoint");
     }
 
     #[test]
@@ -3576,7 +3630,7 @@ mod tests {
         let pages = open.path.as_ref().unwrap().with_extension("").join("pages");
         std::fs::create_dir_all(pages.join("not-a-page")).unwrap();
         std::fs::write(pages.join("1.html"), "<p>page</p>").unwrap();
-        let (copy, history) = Session::resume(&dir, &open.id).unwrap();
+        let (copy, Saved { history, .. }) = Session::resume(&dir, &open.id).unwrap();
         let copied = Session::history(copy.path.as_ref().unwrap()).unwrap();
         let copied_page = std::fs::read_to_string(copy.path.as_ref().unwrap().with_extension("").join("pages/1.html"));
         let id = open.id.clone();
@@ -3593,7 +3647,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
         assert_ne!(copy.id, id);
         assert_eq!(copy.forked_from.as_deref(), Some(id.as_str()));
-        assert_eq!((history.messages, copied.messages), (vec![user("hi")], vec![user("hi")]));
+        assert_eq!((history.messages, copied.history.messages), (vec![user("hi")], vec![user("hi")]));
         assert_eq!(copied_page.unwrap(), "<p>page</p>", "the copy keeps the session's pages");
         assert_eq!((again.id, again.forked_from), (id, None));
     }
@@ -3670,12 +3724,12 @@ mod tests {
         let settings = crate::settings::load(&home).unwrap();
         let session = Session::start(&home.join("sessions"), true, &cwd, "m").unwrap();
         let mut agent = Agent::new(Client::new(&home).unwrap(), &settings, home.clone(), cwd, session, home.join("sessions"), None);
-        agent.messages = vec![json!({"role": "user", "content": "a"}), json!({"role": "user", "content": "b"})];
+        agent.history.messages = vec![json!({"role": "user", "content": "a"}), json!({"role": "user", "content": "b"})];
         let path = agent.session.path.clone().unwrap();
         std::fs::remove_file(&path).unwrap();
         std::fs::create_dir(&path).unwrap();
         assert!(agent.forget_from(1).is_err());
-        assert_eq!(agent.messages.len(), 2);
+        assert_eq!(agent.history.messages.len(), 2);
     }
 
     #[test]
@@ -3810,7 +3864,7 @@ mod tests {
         session.append(&json!({"type": "message", "message": {"role": "user", "content": "hi"}})).unwrap();
 
         let id = Session::import(&root.join("b"), session.path.as_ref().unwrap()).unwrap();
-        let (_, history) = Session::resume(&root.join("b"), &id).unwrap();
+        let (_, Saved { history, .. }) = Session::resume(&root.join("b"), &id).unwrap();
         assert_eq!(history.messages, vec![json!({"role": "user", "content": "hi"})]);
         assert!(Session::import(&root.join("b"), session.path.as_ref().unwrap()).is_err());
 

@@ -25,7 +25,7 @@ use std::io::{BufRead, BufReader, IsTerminal, Read, Write};
 use std::path::PathBuf;
 
 use agent::permissions::{Decision, Mode};
-use agent::{Agent, Event, History, Session, modes, prompt, snapshots, usage};
+use agent::{Agent, Event, Saved, Session, modes, prompt, snapshots, usage};
 use api::Client;
 
 const USAGE: &str = concat!(
@@ -531,13 +531,13 @@ fn run(options: Options) -> Result<(), String> {
         settings.trusted_projects.push(prompt::project_root(&cwd).display().to_string());
     }
     let sessions_dir = home.join(".agents/sessions");
-    let (session, history) = match &options.resume {
+    let (session, saved) = match &options.resume {
         Some(Resume::Id(id)) => Session::resume(&sessions_dir, id)?,
         Some(Resume::Latest) => Session::resume(&sessions_dir, &Session::latest(&sessions_dir, &cwd)?)?,
-        Some(Resume::Pick) | None => (Session::start(&sessions_dir, options.save, &cwd, &settings.model)?, History::default()),
+        Some(Resume::Pick) | None => (Session::start(&sessions_dir, options.save, &cwd, &settings.model)?, Saved::default()),
     };
     let client = Client::new(&home)?;
-    settings.default_accounts.extend(client.account_names(&history.accounts));
+    settings.default_accounts.extend(client.account_names(&saved.accounts));
     if let Some((provider, name)) = options.account {
         settings.default_accounts.insert(provider, name);
     }
@@ -578,7 +578,7 @@ fn run(options: Options) -> Result<(), String> {
         let list = serde_json::from_str(&list).map_err(|e| format!("{}: {e}", mcp::CLIENT_SERVERS_ENV))?;
         agent.mcp.set_client_servers(&list, &settings.disabled_mcp, &settings.approved_mcp)?;
     }
-    agent.load(history);
+    agent.load(saved);
     for dir in &options.add_dirs {
         agent.add_dir(dir)?;
     }

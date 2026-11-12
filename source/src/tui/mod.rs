@@ -787,7 +787,7 @@ impl App {
             app.system("session", placed);
         }
         app.header_len = app.entries.len();
-        app.push_history(&agent.messages);
+        app.push_history(&agent.history.messages);
         if let Some(notice) = agent.session.fork_notice() {
             app.system("session", notice);
         }

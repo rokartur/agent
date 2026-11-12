@@ -631,8 +631,8 @@ impl RunView {
 
 /// A subagent's session rendered like the main transcript: a blank line between items, except inside a tool or log run.
 pub(super) fn subagent_lines(path: &Path, width: usize, cwd: &Path) -> Result<Vec<Line>, String> {
-    let history = Session::history(path)?;
-    let mut entries: Vec<Entry> = history_items(&history.messages).into_iter().map(|item| Entry { item, cache: None }).collect();
+    let saved = Session::history(path)?;
+    let mut entries: Vec<Entry> = history_items(&saved.history.messages).into_iter().map(|item| Entry { item, cache: None }).collect();
     let mut folded = folded_tools(&mut entries, width, cwd, None);
     let mut lines = Vec::new();
     let mut previous_run = None;
