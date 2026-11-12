@@ -175,23 +175,90 @@ fn update_command(args: &[String]) -> Result<(), String> {
     let home = home()?;
     let channel = settings::load(&home)?.update_channel;
     let progress = spinner::Spinner::start();
+    let download_started = std::cell::OnceCell::new();
     let installed = update::install_now(&channel, &|step| match step {
-        update::Progress::Checking => progress.set("Check for updates", String::new()),
-        update::Progress::Downloading { version, received, total } => progress.set(&format!("Download v{version}"), spinner::transfer(received, total)),
-        update::Progress::Verifying => progress.set("Verify the download", String::new()),
-        update::Progress::Installing => progress.set("Replace the binary", String::new()),
-    });
-    progress.finish();
-    match installed? {
-        Some(version) => {
-            println!("Updated to v{version}.");
-            if service::restart_if_installed(&home)? {
-                println!("Restarted the listener, so it runs v{version} too.");
-            }
+        update::Progress::Checking => progress.set("Check for updates", String::new(), String::new()),
+        update::Progress::Downloading { version, received, total } => {
+            let elapsed = download_started.get_or_init(std::time::Instant::now).elapsed();
+            progress.set(&format!("Download v{version}"), spinner::transfer(received, total, elapsed), spinner::mib(received));
         }
-        None => println!("agent v{} is up to date.", env!("CARGO_PKG_VERSION")),
+        update::Progress::Verifying => progress.set("Verify the download", String::new(), String::new()),
+        update::Progress::Installing => progress.set("Replace the binary", String::new(), String::new()),
+    });
+    let restarted = match &installed {
+        Ok(Some(_)) if service::installed(&home) => {
+            progress.set("Restart the listener", String::new(), String::new());
+            service::restart_if_installed(&home).map(drop)
+        }
+        _ => Ok(()),
+    };
+    progress.finish(installed.is_ok() && restarted.is_ok());
+    let styled = std::io::stdout().is_terminal();
+    let current = env!("CARGO_PKG_VERSION");
+    match installed? {
+        Some(version) => println!(
+            "\n{} {} → {}  {}",
+            paint(styled, spinner::BOLD, "agent"),
+            paint(styled, spinner::DIM, &format!("v{current}")),
+            paint(styled, &format!("{}{}", spinner::BOLD, spinner::GREEN), &format!("v{version}")),
+            paint(styled, spinner::DIM, &format!("{}/tag/v{version}", update::RELEASES)),
+        ),
+        None => println!("\n{} {} is up to date.", paint(styled, spinner::BOLD, "agent"), paint(styled, spinner::GREEN, &format!("v{current}"))),
     }
-    Ok(())
+    restarted
+}
+
+fn paint(styled: bool, style: &str, text: &str) -> String {
+    if styled { format!("{style}{text}{}", spinner::RESET) } else { text.to_string() }
+}
+
+/// One row per plugin, `✓ name  1.2.0 → 1.3.0  source`, with name and version in columns, then a count per outcome.
+fn plugin_update_lines(updates: &[plugins::Update], home: &str, styled: bool) -> Vec<String> {
+    use plugins::Outcome;
+    if updates.is_empty() {
+        return vec!["No plugins installed.".into()];
+    }
+    let mut rows = Vec::new();
+    let (mut updated, mut newest, mut failed) = (0, 0, 0);
+    for update in updates {
+        let (mark, version, note) = match &update.outcome {
+            Ok(Outcome::Copied { version, source }) => {
+                updated += 1;
+                let version = if *version == update.from { version.clone() } else { format!("{} → {version}", update.from) };
+                let source =
+                    source.as_deref().map_or("bundled".to_string(), |source| std::path::Path::new(source).strip_prefix(home).map_or(source.to_string(), |rest| format!("~/{}", rest.display())));
+                (paint(styled, spinner::GREEN, "✓"), version, paint(styled, spinner::DIM, &source))
+            }
+            Ok(Outcome::Newest) => {
+                newest += 1;
+                (paint(styled, spinner::DIM, "·"), update.from.clone(), paint(styled, spinner::DIM, "up to date"))
+            }
+            Ok(Outcome::NoSource) => (paint(styled, spinner::DIM, "·"), update.from.clone(), paint(styled, spinner::DIM, plugins::NO_SOURCE)),
+            Err(error) => {
+                failed += 1;
+                (paint(styled, spinner::RED, "✗"), update.from.clone(), paint(styled, spinner::RED, error))
+            }
+        };
+        rows.push((mark, &update.name, version, note));
+    }
+    let name_width = rows.iter().map(|(_, name, ..)| name.chars().count()).max().unwrap_or(0);
+    let version_width = rows.iter().map(|(_, _, version, _)| version.chars().count()).max().unwrap_or(0);
+    let mut lines = Vec::new();
+    for (mark, name, version, note) in rows {
+        let name = format!("{}{}", paint(styled, spinner::BOLD, name), " ".repeat(name_width - name.chars().count()));
+        lines.push(format!("{mark} {name}  {version:<version_width$}  {note}"));
+    }
+    if updates.len() == 1 {
+        return lines;
+    }
+    let mut counts = vec![paint(styled, spinner::GREEN, &format!("{updated} updated"))];
+    counts.push(paint(styled, spinner::DIM, &format!("{newest} up to date")));
+    if failed > 0 {
+        counts.push(paint(styled, spinner::RED, &format!("{failed} failed")));
+    }
+    lines.push(String::new());
+    lines.push(counts.join(", "));
+    lines
 }
 
 fn plugin_command(args: &[String]) -> Result<(), String> {
@@ -199,7 +266,7 @@ fn plugin_command(args: &[String]) -> Result<(), String> {
     match args {
         [action, source] if action == "install" => println!("Installed {}.", plugins::install(&home, source)?),
         [action, names @ ..] if action == "update" => {
-            for line in plugins::update(&home, names)? {
+            for line in plugin_update_lines(&plugins::update(&home, names)?, &home.to_string_lossy(), std::io::stdout().is_terminal()) {
                 println!("{line}");
             }
         }
@@ -883,6 +950,32 @@ mod tests {
     #[test]
     fn terminal_safe_drops_escape_sequences() {
         assert_eq!(super::terminal_safe("a\x1b]52;c;eA==\x07b\n\tc\u{9b}"), "a]52;c;eA==b\n\tc");
+    }
+
+    #[test]
+    fn plugin_update_lines_align_each_outcome_and_count_them() {
+        use super::plugin_update_lines;
+        use super::plugins::{Outcome, Update};
+        let update = |name: &str, from: &str, outcome| Update { name: name.into(), from: from.into(), outcome };
+        let updates = [
+            update("usagefleet", "1.2.0", Ok(Outcome::Copied { version: "1.3.0".into(), source: None })),
+            update("mine", "0.3.1", Ok(Outcome::Copied { version: "0.3.1".into(), source: Some("/home/a/code/mine".into()) })),
+            update("notes", "2.0.0", Ok(Outcome::Newest)),
+            update("gone", "1.0.0", Err("Cannot read /x: missing".into())),
+        ];
+        assert_eq!(
+            plugin_update_lines(&updates, "/home/a", false),
+            [
+                "✓ usagefleet  1.2.0 → 1.3.0  bundled",
+                "✓ mine        0.3.1          ~/code/mine",
+                "· notes       2.0.0          up to date",
+                "✗ gone        1.0.0          Cannot read /x: missing",
+                "",
+                "2 updated, 1 up to date, 1 failed",
+            ]
+        );
+        assert_eq!(plugin_update_lines(&updates[2..3], "/home/a", false), ["· notes  2.0.0  up to date"]);
+        assert_eq!(plugin_update_lines(&[], "/home/a", false), ["No plugins installed."]);
     }
 
     #[test]

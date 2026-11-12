@@ -41,10 +41,14 @@ pub fn command(args: &[String]) -> Result<(), String> {
 
 /// After an update swapped the binary, so the listener runs the new release and clients of that release are let in.
 pub fn restart_if_installed(home: &Path) -> Result<bool, String> {
-    if !file(home).exists() {
+    if !installed(home) {
         return Ok(false);
     }
     restart().map(|()| true)
+}
+
+pub fn installed(home: &Path) -> bool {
+    file(home).exists()
 }
 
 fn file(home: &Path) -> PathBuf {

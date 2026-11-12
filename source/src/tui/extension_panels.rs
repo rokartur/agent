@@ -175,9 +175,9 @@ impl App {
                 return;
             }
             KeyCode::Char('d') if view.installed => crate::plugins::remove(&self.home, &view.name),
-            KeyCode::Char('u') if view.installed => crate::plugins::update(&self.home, std::slice::from_ref(&view.name)).map(|notices| {
-                for notice in notices {
-                    self.system("plugins", notice);
+            KeyCode::Char('u') if view.installed => crate::plugins::update(&self.home, std::slice::from_ref(&view.name)).map(|updates| {
+                for update in updates {
+                    self.system("plugins", update.notice());
                 }
                 // `sync` starts only stopped plugins, so stop this one for the sync below to start the new copy.
                 let mut stopped = self.settings.disabled_plugins.clone();
