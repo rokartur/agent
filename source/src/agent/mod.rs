@@ -39,7 +39,7 @@ use crate::tools::plan::{self, Plan};
 use crate::tools::rtk::Rtk;
 use crate::tools::todo::Todos;
 use condense::Condensed;
-use permissions::{Decision, Grants, Mode, Request, Verdict};
+use permissions::{Decision, Grants, Mode, Request, Step, Verdict};
 use snapshots::Snapshots;
 use subagent::{Launch, Runs};
 
@@ -1727,25 +1727,28 @@ impl Agent {
         // Above request_for: a deny rule also covers Read, which never asks.
         let subjects = permissions::subjects(tool, input, files, &self.cwd);
         let verdict = permissions::verdict(&self.permission_rules, tool, &subjects, &self.cwd);
-        if let Some(Verdict::Deny(rule)) = &verdict {
-            return Some(format!("Denied by the permission rule \"{rule}\" in settings.json."));
-        }
-        if let Some(refusal) = self.before_tool_refusal(tool, input, &subjects) {
-            return Some(refusal);
-        }
-        let request = permissions::request_for(tool, input, files)?;
-        let mode = *self.permission_mode.lock().unwrap();
-        let ask = verdict == Some(Verdict::Ask);
-        if mode == Mode::FullAccess || (!ask && (verdict == Some(Verdict::Allow) || self.grants.allows(&request))) {
-            return None;
-        }
-        if mode == Mode::Auto && !ask {
-            // ImageGenerate counts as an edit but also uploads its prompt and images, so it stays reviewed.
-            if tool != "ImageGenerate" && request.kind == permissions::Kind::Edit && permissions::edits_inside_workspace(files, &self.cwd, &self.extra_dirs) {
-                return None;
-            }
-            return self.review(&request, input, emit);
-        }
+        // A deny rule refuses the call without running the user's hooks.
+        let hook_refusal = if matches!(verdict, Some(Verdict::Deny(_))) { None } else { self.before_tool_refusal(tool, input, &subjects) };
+        let decided = permissions::decide(permissions::Call {
+            tool,
+            input,
+            files,
+            verdict,
+            hook_refusal,
+            // Read after the hooks run; acp.rs relies on that order.
+            mode: *self.permission_mode.lock().unwrap(),
+            grants: &self.grants,
+            cwd: &self.cwd,
+            extra_dirs: &self.extra_dirs,
+            user_requests: &self.user_requests,
+            follow_up: self.follow_up.as_deref(),
+        });
+        let request = match decided {
+            Step::Allow => return None,
+            Step::Deny(reason) => return Some(reason),
+            Step::Review(request, prompt) => return self.review(&request, prompt, emit),
+            Step::AskUser(request) => request,
+        };
         let (reply, answer) = mpsc::channel();
         emit(Event::Permission { call: call.map(String::from), request: request.clone(), reply });
         match answer.recv().unwrap_or(Decision::Deny) {
@@ -1762,8 +1765,8 @@ impl Agent {
     }
 
     /// Auto mode: a small model allows or denies the call; a failed review or a call too long to show whole denies it.
-    fn review(&mut self, request: &Request, input: &Value, emit: &mut dyn FnMut(Event)) -> Option<String> {
-        let (allowed, reason) = match permissions::review_prompt(&self.user_requests, self.follow_up.as_deref(), &self.cwd, &self.extra_dirs, request, input) {
+    fn review(&mut self, request: &Request, prompt: Option<String>, emit: &mut dyn FnMut(Event)) -> Option<String> {
+        let (allowed, reason) = match prompt {
             Some(prompt) => self.ask_reviewer(&prompt),
             None => (false, format!("the call is over {} characters, too long to review", permissions::REVIEW_DETAIL_CHARS)),
         };
@@ -3386,7 +3389,8 @@ mod tests {
         let mut agent = Agent::new(Client::new(&home).unwrap(), &settings, home.clone(), cwd, session, home.join("sessions"), None);
         let input = json!({"command": "x".repeat(permissions::REVIEW_DETAIL_CHARS + 1)});
         let request = permissions::request_for("Bash", &input, &[]).unwrap();
-        let denied = agent.review(&request, &input, &mut |_| {});
+        let prompt = permissions::review_prompt(&[], None, &agent.cwd, &[], &request, &input);
+        let denied = agent.review(&request, prompt, &mut |_| {});
         let saved = std::fs::read_to_string(&path).unwrap();
         std::fs::remove_dir_all(&home).unwrap();
         assert!(denied.unwrap().starts_with("Denied by the auto-mode reviewer: the call is over"));
@@ -3527,6 +3531,28 @@ mod tests {
     }
 
     #[test]
+    fn a_deny_rule_refuses_before_the_hooks_run_and_an_allow_rule_does_not_skip_them() {
+        let home = crate::process::canonicalize(std::env::temp_dir()).unwrap().join(format!("agent-deny-before-hook-{}", std::process::id()));
+        let cwd = home.join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let settings = crate::settings::load(&home).unwrap();
+        let session = Session::start(&home.join("sessions"), true, &cwd, "m").unwrap();
+        let mut agent = Agent::new(Client::new(&home).unwrap(), &settings, home.clone(), cwd, session, home.join("sessions"), None);
+        let marker = home.join("hook-ran");
+        agent.before_tool = vec![crate::settings::ToolHook { matches: "Bash".into(), command: format!("touch {}; false", marker.display()) }];
+        agent.permission_rules = permissions::Rules { deny: vec!["Bash(ls*)".into()], allow: vec!["Bash(pwd)".into()], ask: Vec::new() };
+        let denied = agent.check_permission(None, "Bash", &json!({"command": "ls"}), &[], &mut |_| {});
+        let hook_ran_on_deny = marker.exists();
+        let allowed = agent.check_permission(None, "Bash", &json!({"command": "pwd"}), &[], &mut |_| {});
+        let hook_ran_on_allow = marker.exists();
+        std::fs::remove_dir_all(&home).unwrap();
+        assert_eq!(denied.as_deref(), Some("Denied by the permission rule \"Bash(ls*)\" in settings.json."));
+        assert!(!hook_ran_on_deny);
+        assert!(allowed.unwrap().starts_with("Blocked by the before_tool hook"));
+        assert!(hook_ran_on_allow);
+    }
+
+    #[test]
     fn check_permission_runs_workspace_edits_unreviewed_in_auto_and_everything_in_full_access() {
         // Canonical: /var is a link to /private/var on macOS, and a workspace edit is matched by its real path.
         let home = crate::process::canonicalize(std::env::temp_dir()).unwrap().join(format!("agent-permission-auto-{}", std::process::id()));
@@ -3600,8 +3626,9 @@ mod tests {
         for case in &cases {
             let files: Vec<PathBuf> = case["input"]["file_path"].as_str().map(PathBuf::from).into_iter().collect();
             let request = permissions::request_for(case["tool"].as_str().unwrap(), &case["input"], &files).unwrap();
-            agent.user_requests = case["earlier"].as_array().into_iter().flatten().chain([&case["request"]]).map(|text| text.as_str().unwrap().to_string()).collect();
-            let denial = agent.review(&request, &case["input"], &mut |_| {});
+            let user_requests: Vec<String> = case["earlier"].as_array().into_iter().flatten().chain([&case["request"]]).map(|text| text.as_str().unwrap().to_string()).collect();
+            let prompt = permissions::review_prompt(&user_requests, None, &cwd, &[], &request, &case["input"]);
+            let denial = agent.review(&request, prompt, &mut |_| {});
             let allowed = denial.is_none();
             if case["allow"] == true {
                 harmless += 1;

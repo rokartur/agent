@@ -84,7 +84,7 @@ impl Kind {
 }
 
 /// What the user or the reviewer is asked to approve.
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Debug)]
 pub struct Request {
     pub kind: Kind,
     pub question: &'static str,
@@ -169,6 +169,54 @@ pub fn request_for(tool: &str, input: &Value, files: &[PathBuf]) -> Option<Reque
         }
         _ => None,
     }
+}
+
+/// One tool call as the permission check sees it, after the rules and the before_tool hooks ran.
+pub struct Call<'a> {
+    pub tool: &'a str,
+    pub input: &'a Value,
+    pub files: &'a [PathBuf],
+    pub verdict: Option<Verdict>,
+    pub hook_refusal: Option<String>,
+    pub mode: Mode,
+    pub grants: &'a Grants,
+    pub cwd: &'a Path,
+    pub extra_dirs: &'a [PathBuf],
+    pub user_requests: &'a [String],
+    pub follow_up: Option<&'a str>,
+}
+
+/// What the permission check does next. The Review prompt is None when the call is too long to show whole.
+#[derive(PartialEq, Debug)]
+pub enum Step {
+    Allow,
+    Deny(String),
+    AskUser(Request),
+    Review(Request, Option<String>),
+}
+
+/// The decision order: a deny rule, a hook refusal, tools that never ask, full access, allow rules and grants, auto mode, the user.
+pub fn decide(call: Call) -> Step {
+    if let Some(Verdict::Deny(rule)) = &call.verdict {
+        return Step::Deny(format!("Denied by the permission rule \"{rule}\" in settings.json."));
+    }
+    if let Some(refusal) = call.hook_refusal {
+        return Step::Deny(refusal);
+    }
+    let Some(request) = request_for(call.tool, call.input, call.files) else { return Step::Allow };
+    let ask = call.verdict == Some(Verdict::Ask);
+    if call.mode == Mode::FullAccess || (!ask && (call.verdict == Some(Verdict::Allow) || call.grants.allows(&request))) {
+        return Step::Allow;
+    }
+    if call.mode != Mode::Auto || ask {
+        return Step::AskUser(request);
+    }
+    // ImageGenerate counts as an edit but also uploads its prompt and images, so it stays reviewed.
+    if call.tool != "ImageGenerate" && request.kind == Kind::Edit && edits_inside_workspace(call.files, call.cwd, call.extra_dirs) {
+        return Step::Allow;
+    }
+    let prompt = review_prompt(call.user_requests, call.follow_up, call.cwd, call.extra_dirs, &request, call.input);
+    Step::Review(request, prompt)
 }
 
 /// Auto mode runs these edits unreviewed, as Claude Code does: every file is inside the workspace and none is a protected path.
@@ -482,6 +530,49 @@ mod tests {
 
     fn strings(items: &[&str]) -> Vec<String> {
         items.iter().map(|item| item.to_string()).collect()
+    }
+
+    #[test]
+    fn decide_keeps_the_permission_order() {
+        let cwd = std::env::temp_dir();
+        let ls = json!({"command": "ls"});
+        let mut grants = Grants::default();
+        grants.add(&request_for("Bash", &ls, &[]).unwrap());
+        let refusal = || Some("Blocked by the before_tool hook".to_string());
+        let decided = |tool: &str, input: &Value, files: &[PathBuf], verdict: Option<Verdict>, hook_refusal: Option<String>, mode: Mode| {
+            let call = Call { tool, input, files, verdict, hook_refusal, mode, grants: &grants, cwd: &cwd, extra_dirs: &[], user_requests: &[], follow_up: None };
+            match decide(call) {
+                Step::Allow => "allow".to_string(),
+                Step::Deny(reason) => reason,
+                Step::AskUser(_) => "ask".into(),
+                Step::Review(_, Some(_)) => "review".into(),
+                Step::Review(_, None) => "too long to review".into(),
+            }
+        };
+        let read = json!({"file_path": "a"});
+        let image = json!({"prompt": "cat"});
+        let inside = [cwd.join("a.rs")];
+        let long = json!({"command": "x".repeat(REVIEW_DETAIL_CHARS + 1)});
+        let pwd = json!({"command": "pwd"});
+        let rows = [
+            (decided("Bash", &ls, &[], Some(Verdict::Deny("Bash".into())), refusal(), Mode::FullAccess), "Denied by the permission rule \"Bash\" in settings.json."),
+            (decided("Read", &read, &[], None, refusal(), Mode::Ask), "Blocked by the before_tool hook"),
+            (decided("Bash", &ls, &[], None, refusal(), Mode::FullAccess), "Blocked by the before_tool hook"),
+            (decided("Bash", &ls, &[], Some(Verdict::Allow), refusal(), Mode::Ask), "Blocked by the before_tool hook"),
+            (decided("Read", &read, &[], None, None, Mode::Ask), "allow"),
+            (decided("Bash", &ls, &[], Some(Verdict::Ask), None, Mode::Auto), "ask"),
+            (decided("Bash", &ls, &[], Some(Verdict::Ask), None, Mode::FullAccess), "allow"),
+            (decided("Bash", &ls, &[], None, None, Mode::Ask), "allow"),
+            (decided("Bash", &pwd, &[], None, None, Mode::Ask), "ask"),
+            (decided("Bash", &pwd, &[], Some(Verdict::Allow), None, Mode::Ask), "allow"),
+            (decided("Bash", &pwd, &[], None, None, Mode::Auto), "review"),
+            (decided("Edit", &read, &inside, None, None, Mode::Auto), "allow"),
+            (decided("ImageGenerate", &image, &inside, None, None, Mode::Auto), "review"),
+            (decided("Bash", &long, &[], None, None, Mode::Auto), "too long to review"),
+        ];
+        for (index, (got, want)) in rows.iter().enumerate() {
+            assert_eq!(got, want, "row {index}");
+        }
     }
 
     #[test]
