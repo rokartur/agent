@@ -80,7 +80,7 @@ impl App {
             bottom.push(recording_line(recording.started.elapsed()));
         } else if let Some(started) = self.transcribing {
             bottom.push(Vec::new());
-            bottom.push(shimmer_line(TRANSCRIBING, (started.elapsed().as_millis() / 80) as usize));
+            bottom.push(shimmer_line(TRANSCRIBING, (started.elapsed().as_millis() / 80) as usize, &self.settings.working_animation));
         }
         bottom.extend(todo_lines(&self.todos.lock().unwrap()));
         let shells = self.terminals.lock().unwrap().running();
@@ -112,7 +112,7 @@ impl App {
             }
             let tick = (started.elapsed().as_millis() / 80) as usize;
             // Without the margin shimmer_line leads with, so the status lines up with the transcript.
-            let mut status = shimmer_line(working_label(self.entries.last().map(|e| &e.item)), tick).split_off(1);
+            let mut status = shimmer_line(working_label(self.entries.last().map(|e| &e.item)), tick, &self.settings.working_animation).split_off(1);
             // shortcut: about 4 chars per token for the request still streaming; tool inputs are not counted until its usage arrives.
             let output = self.prompt_usage.output + self.streamed_chars as u64 / 4;
             self.shown_output = count_toward(self.shown_output, output);
@@ -322,6 +322,8 @@ impl App {
                 Item::Tool { result: None, started, .. } if !folded.contains_key(&index) => Some(*started),
                 _ => None,
             };
+            let last = index == self.entries.len() - 1;
+            let done_for = matches!(self.entries[index].item, Item::Done { .. }).then(|| self.turn_ended.filter(|_| last).map_or(DONE_FLASH, |ended| ended.elapsed()));
             let lines = match folded.get(&index) {
                 Some(lines) => lines,
                 None => self.entries[index].lines(width, expanded, &self.cwd),
@@ -341,6 +343,10 @@ impl App {
                 if let (Some(started), Some(frame)) = (running, spinner) {
                     lines[0][0] = span(frame, MUTED);
                     lines[0].extend(running_seconds(started));
+                }
+                // Drawn here so a changed working_animation setting reaches rows already cached.
+                if let Some(since_end) = done_for {
+                    lines[0][0] = done_mark(&self.settings.working_animation, since_end);
                 }
                 chunks.push(lines);
             }
@@ -958,25 +964,58 @@ pub(super) fn working_label(last: Option<&Item>) -> &'static str {
     }
 }
 
-pub(super) fn shimmer_line(label: &str, tick: usize) -> Line {
+/// `tick` counts 80 ms steps; `animation` is one of WORKING_ANIMATIONS.
+pub(super) fn shimmer_line(label: &str, tick: usize, animation: &str) -> Line {
     let head = (tick % (label.len() + 10)) as isize - 3;
     let level = |column: usize| match (column as isize - head).unsigned_abs() {
         distance @ 0..=2 => 255 - 4 * distance as u8,
         _ => 245,
     };
-    let mut line = vec![span(" ", PLAIN), star(head.unsigned_abs()), span(" ", PLAIN)];
+    let mark = match frames(animation) {
+        Some((frames, frame_ms, _)) => {
+            let (glyph, gray) = frames[tick * 80 / frame_ms % frames.len()];
+            span(glyph, Style::fg(gray))
+        }
+        // The star is lit only while the shimmer band passes over it.
+        None => match head.unsigned_abs() {
+            distance @ 0..=2 => span("✦", Style::fg(255 - 4 * distance as u8)),
+            _ => span("✧", DIM),
+        },
+    };
+    let mut line = vec![span(" ", PLAIN), mark, span(" ", PLAIN)];
     for (index, letter) in label.chars().enumerate() {
         line.push(span(letter.to_string(), Style::fg(level(index + 2))));
     }
     line
 }
 
-/// Lit ✦ while a shimmer band `distance` columns away passes over it, dim ✧ otherwise.
-pub(super) fn star(distance: usize) -> Span {
-    match distance {
-        0..=2 => span("✦", Style::fg(255 - 4 * distance as u8)),
-        _ => span("✧", DIM),
+/// The done row's glyph: bright as the turn ends, then fading to its resting gray within DONE_FLASH. The star only rests.
+pub(super) fn done_mark(animation: &str, since_end: Duration) -> Span {
+    let Some((_, _, [opening, resting])) = frames(animation) else {
+        return span("✧", DIM);
+    };
+    match since_end.as_millis() / 100 {
+        0 => span(opening, Style::fg(255)),
+        1 => span(resting, Style::fg(255)),
+        2 => span(resting, Style::fg(252)),
+        3 => span(resting, Style::fg(248)),
+        _ => span(resting, MUTED),
     }
+}
+
+type Frames = (&'static [(&'static str, u8)], usize, [&'static str; 2]);
+
+/// An animation's working frames as (glyph, 256-color gray), the ms each one shows, and the done row's opening and resting glyphs.
+fn frames(animation: &str) -> Option<Frames> {
+    Some(match animation {
+        "fill" => {
+            (&[("⡀", 241), ("⣀", 243), ("⣄", 245), ("⣤", 247), ("⣦", 249), ("⣶", 251), ("⣷", 253), ("⣿", 255), ("⣷", 253), ("⣶", 251), ("⣦", 249), ("⣤", 247), ("⣄", 245), ("⣀", 243)], 90, ["⣿", "⣿"])
+        }
+        "radar" => (&[("·", 242), ("◦", 245), ("○", 248), ("◎", 250), ("◉", 253), ("●", 255), ("◉", 253), ("◎", 250), ("○", 248), ("◦", 245)], 110, ["◉", "●"]),
+        "arc" => (&[("◜", 255), ("◝", 254), ("◞", 251), ("◟", 248), ("◜", 246), ("◝", 248), ("◞", 251), ("◟", 254)], 100, ["○", "●"]),
+        "diamond" => (&[("⋄", 242), ("◇", 245), ("◇", 247), ("◈", 250), ("◈", 252), ("◆", 255), ("◆", 255), ("◈", 252), ("◈", 250), ("◇", 246)], 110, ["◈", "◆"]),
+        _ => return None,
+    })
 }
 
 pub(super) fn recording_line(elapsed: Duration) -> Line {

@@ -465,15 +465,45 @@ fn footer_wraps_by_word_when_the_row_is_full() {
 }
 
 #[test]
-fn working_glyph_fills_only_while_the_band_passes_it() {
-    let lit = shimmer_line(WORKING, 3);
+fn star_fills_only_while_the_band_passes_it() {
+    let lit = shimmer_line(WORKING, 3, "star");
     assert_eq!(text(&lit), " ✦ Working");
     assert_eq!(lit[1].style, Style::fg(255));
 
-    let later = shimmer_line(WORKING, 10);
+    let later = shimmer_line(WORKING, 10, "star");
     assert_eq!(text(&later), " ✧ Working");
     assert_eq!(later[1].style, DIM);
     assert_eq!(later[3 + 5].style, Style::fg(255));
+}
+
+#[test]
+fn every_working_animation_but_the_star_cycles_one_cell_frames() {
+    for animation in WORKING_ANIMATIONS.iter().filter(|name| **name != "star") {
+        let marks: Vec<Span> = (0..40).map(|tick| shimmer_line(WORKING, tick, animation).remove(1)).collect();
+        assert!(marks.iter().all(|mark| line_width(&vec![mark.clone()]) == 1), "{animation}");
+        assert!(marks.iter().any(|mark| mark.text != marks[0].text), "{animation} never moves");
+    }
+    // 110 ms frames on an 80 ms tick: tick 7 is 560 ms in, the sixth frame.
+    assert_eq!(text(&shimmer_line(WORKING, 7, "radar")), " ● Working");
+}
+
+#[test]
+fn done_mark_flashes_bright_then_rests_gray() {
+    assert_eq!((done_mark("radar", Duration::ZERO).text.as_str(), done_mark("radar", Duration::ZERO).style), ("◉", Style::fg(255)));
+    assert_eq!((done_mark("radar", DONE_FLASH).text.as_str(), done_mark("radar", DONE_FLASH).style), ("●", MUTED));
+    assert_eq!((done_mark("star", Duration::ZERO).text.as_str(), done_mark("star", Duration::ZERO).style), ("✧", DIM));
+}
+
+#[test]
+fn done_rows_follow_the_working_animation_setting() {
+    let home = std::env::temp_dir().join(format!("agent-tui-done-mark-{}", std::process::id()));
+    let mut app = test_app(&home);
+    std::fs::remove_dir_all(&home).ok();
+    app.push(Item::Done { took: Duration::from_secs(83), usage: Usage::default(), total: Duration::from_secs(600) });
+    let first = |app: &mut App| text(&app.transcript_tail(80, 1).0[0]);
+    assert!(first(&mut app).starts_with("✧ 1m 23s"), "{}", first(&mut app));
+    app.settings.working_animation = "diamond".into();
+    assert!(first(&mut app).starts_with("◆ 1m 23s"), "{}", first(&mut app));
 }
 
 #[test]
@@ -548,7 +578,8 @@ fn all_settings() -> Vec<Setting> {
 fn settings_rows_keep_their_labels() {
     let home = std::env::temp_dir().join(format!("agent-settings-labels-{}", std::process::id()));
     type Field = fn(&Settings) -> String;
-    let fields: [(&str, Field); 15] = [
+    let fields: [(&str, Field); 16] = [
+        ("Working animation", |s| s.working_animation.to_string()),
         ("Thinking level", |s| s.thinking.to_string()),
         ("Auto-compact", |s| s.auto_compact.to_string()),
         ("Compaction reserve", |s| s.reserve_tokens.to_string()),

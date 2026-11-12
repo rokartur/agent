@@ -80,7 +80,8 @@ pub(super) fn render_item(item: &Item, width: usize, expanded: bool, cwd: &Path)
         Item::Todos(tasks) => update_todos_lines(tasks, width),
         Item::Done { took, usage, total } => {
             let stats = format!(" ↑{} ↓{} · total {}", tokens(usage.input), tokens(usage.output), duration(*total));
-            vec![vec![star(usize::MAX), span(format!(" {}", duration(*took)), MUTED), span(stats, DIM)]]
+            // transcript_tail redraws this glyph per the working_animation setting.
+            vec![vec![done_mark("star", DONE_FLASH), span(format!(" {}", duration(*took)), MUTED), span(stats, DIM)]]
         }
     }
 }

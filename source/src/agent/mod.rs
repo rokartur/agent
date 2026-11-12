@@ -3528,6 +3528,7 @@ mod tests {
         assert!(!aborted);
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_deny_rule_refuses_before_the_hooks_run_and_an_allow_rule_does_not_skip_them() {
         let home = crate::process::canonicalize(std::env::temp_dir()).unwrap().join(format!("agent-deny-before-hook-{}", std::process::id()));
