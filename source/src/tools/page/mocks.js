@@ -3,8 +3,9 @@ const slides = [...document.querySelectorAll(".slide")];
 const tabs = [...document.querySelectorAll(".tabs a")];
 const difference = document.getElementById("difference");
 const pick = document.getElementById("pick");
+const text = document.getElementById("text");
 let current = Math.max(0, slides.findIndex((slide) => `#${slide.id}` === location.hash));
-let picked = null;
+let sent = false;
 
 function pickLabel() {
   return `Pick ${slides[current].dataset.mock}`;
@@ -24,7 +25,7 @@ function show(index) {
   slides.forEach((slide, i) => { slide.hidden = i !== current; });
   tabs.forEach((tab, i) => tab.setAttribute("aria-current", String(i === current)));
   difference.textContent = slides[current].dataset.difference;
-  if (!picked) pick.textContent = pickLabel();
+  if (!sent) pick.textContent = pickLabel();
   fitMock();
   const to = slides[current].querySelector(".view");
   to.scrollTop = ratio * (to.scrollHeight - to.clientHeight);
@@ -45,16 +46,27 @@ document.addEventListener("keydown", (event) => {
     pick.click();
   }
 });
-pick.addEventListener("click", () => {
-  picked = slides[current].dataset.mock;
-  pick.disabled = true;
-  pick.textContent = `Picked ${picked}`;
-  // agent.submit already told the user why the pick was not sent.
-  agent.submit({ mock: picked }).catch(() => {
-    picked = null;
-    pick.disabled = false;
+function send(answer, label) {
+  sent = true;
+  pick.disabled = text.disabled = true;
+  pick.textContent = label;
+  // agent.submit already told the user why the answer was not sent.
+  agent.submit(answer).catch(() => {
+    sent = false;
+    pick.disabled = text.disabled = false;
     pick.textContent = pickLabel();
   });
+}
+
+pick.addEventListener("click", () => {
+  const mock = slides[current].dataset.mock;
+  const note = text.value.trim();
+  send(note ? { mock, text: note } : { mock }, `Picked ${mock}`);
+});
+text.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter" || !text.value.trim()) return;
+  event.preventDefault();
+  send({ text: text.value.trim() }, "Sent");
 });
 new ResizeObserver(fitMock).observe(document.querySelector(".mocks"));
 show(current);

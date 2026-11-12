@@ -47,6 +47,9 @@ summary { cursor: pointer; font-weight: 600; }
 .stat b { display: block; font: 500 28px/1.2 var(--display); font-variant-numeric: tabular-nums; }
 .stat em { font-style: normal; font-size: 13px; color: var(--muted); }
 .stat em.up { color: var(--success); } .stat em.down { color: var(--danger); }
+.reply { display: grid; gap: 8px; justify-items: end; margin: 32px 0 0; padding-top: 16px; border-top: 1px solid var(--border-subtle); }
+.reply textarea { width: 100%; resize: vertical; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--border); background: var(--surface); color: var(--foreground); font: inherit; }
+.reply button { height: 34px; padding: 0 16px; border: 0; border-radius: 10px; background: var(--foreground); color: var(--background); font: 600 14px var(--sans); cursor: pointer; }
 
 .chart { position: relative; margin: 16px 0 24px; display: grid; gap: 16px; min-width: 0; }
 .chart svg { display: block; overflow: visible; }

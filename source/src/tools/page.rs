@@ -19,6 +19,8 @@ const CSP: &str =
     "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:; font-src data:; connect-src 'self'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'";
 const MAX_REQUEST_BYTES: u64 = 1 << 20;
 const LETTERS: [&str; 5] = ["A", "B", "C", "D", "E"];
+/// Under every waited document, so the user can always answer in words, whatever the page's own form asks.
+const REPLY_FORM: &str = "<form class=\"reply\" onsubmit=\"event.preventDefault(); agent.submit({text: this.elements.text.value.trim()})\">\n<textarea name=\"text\" rows=\"3\" required placeholder=\"Answer in your own words\" aria-label=\"Answer in your own words\"></textarea>\n<button>Send</button>\n</form>\n";
 
 /// The pages one session process published and the listener that serves them, started by the first Page call.
 pub struct Pages {
@@ -215,7 +217,10 @@ fn response(status: &str, body: &[u8]) -> Vec<u8> {
 pub fn render(input: &Value) -> Result<String, String> {
     let title = escape(input["title"].as_str().ok_or("title required.")?);
     match (input["html"].as_str(), input["mocks"].as_array()) {
-        (Some(html), None) => Ok(shell(&title, DOCUMENT_HEAD, &format!("<main>\n<h1>{title}</h1>\n{html}\n</main>"))),
+        (Some(html), None) => {
+            let reply = if input["wait"] == true { REPLY_FORM } else { "" };
+            Ok(shell(&title, DOCUMENT_HEAD, &format!("<main>\n<h1>{title}</h1>\n{html}\n{reply}</main>")))
+        }
         (None, Some(mocks)) => choice(&title, mocks),
         _ => Err("Pass either html or mocks.".into()),
     }
@@ -248,18 +253,25 @@ fn choice(title: &str, mocks: &[Value]) -> Result<String, String> {
         ));
     }
     let body = format!(
-        "<main class=\"mocks\">\n{slides}</main>\n<div class=\"dock\" role=\"toolbar\" aria-label=\"Mocks\">\n  <span class=\"q\" title=\"{title}\">{title}</span>\n  <nav class=\"tabs\">\n{tabs}  </nav>\n  <span class=\"difference\" id=\"difference\"></span>\n  <button class=\"pick\" id=\"pick\">Pick A</button>\n</div>\n<script>\n{MOCKS_JS}</script>"
+        "<main class=\"mocks\">\n{slides}</main>\n<div class=\"dock\" role=\"toolbar\" aria-label=\"Mocks\">\n  <span class=\"q\" title=\"{title}\">{title}</span>\n  <nav class=\"tabs\">\n{tabs}  </nav>\n  <span class=\"difference\" id=\"difference\"></span>\n  <input class=\"text\" id=\"text\" placeholder=\"Note, or Enter to answer instead\" aria-label=\"A note with the pick, or Enter to send it as the answer\">\n  <button class=\"pick\" id=\"pick\">Pick A</button>\n</div>\n<script>\n{MOCKS_JS}</script>"
     );
     Ok(shell(title, MOCKS_HEAD, &body))
 }
 
-/// The tool result for what the page submitted: the picked mock by letter and name, or the page's JSON.
+/// The tool result for what the page submitted: the picked mock by letter and name, the user's words, or the page's JSON.
 pub fn answer(input: &Value, submitted: &str) -> String {
     let value: Value = serde_json::from_str(submitted).unwrap_or_else(|_| json!(submitted));
+    let text = value["text"].as_str().filter(|text| !text.is_empty());
     if let (Some(mocks), Some(letter)) = (input["mocks"].as_array(), value["mock"].as_str())
         && let Some(mock) = LETTERS.iter().position(|known| *known == letter).and_then(|index| mocks.get(index))
     {
-        return format!("The user picked mock {letter}: {}.", mock["name"].as_str().expect("render requires a name"));
+        let note = text.map(|text| format!(" They wrote: {text}")).unwrap_or_default();
+        return format!("The user picked mock {letter}: {}.{note}", mock["name"].as_str().expect("render requires a name"));
+    }
+    if let Some(text) = text
+        && value.as_object().is_some_and(|fields| fields.len() == 1)
+    {
+        return format!("The user wrote: {text}");
     }
     format!("The page submitted: {value}")
 }
@@ -341,12 +353,17 @@ mod tests {
 
         assert!(document.contains("<h1>A &lt;b&gt;</h1>\n<p>x</p>") && document.contains("const agent") && document.contains("agent.chart = "));
         assert!(choice.contains("aria-label=\"B: Roomy\" data-mock=\"B\"") && choice.contains("style=\"width: 390px\""), "{choice}");
-        assert!(!choice.contains("mock-c"));
+        assert!(!choice.contains("mock-c") && choice.contains("id=\"text\""));
+        assert!(!document.contains("class=\"reply\""), "a page nobody waits for cannot answer");
+        assert!(render(&json!({"title": "t", "html": "<p>x</p>", "wait": true})).unwrap().contains("<p>x</p>\n<form class=\"reply\""));
         assert_eq!(render(&json!({"title": "t"})), Err("Pass either html or mocks.".into()));
         assert_eq!(render(&json!({"title": "t", "mocks": []})), Err("mocks takes 1 to 5 mocks.".into()));
         assert_eq!(render(&json!({"title": "t", "mocks": [{"name": "n", "html": "", "width": "390px"}]})), Err("A mock's width is a whole number of px.".into()));
         assert_eq!(answer(&mocks, "{\"mock\":\"B\"}"), "The user picked mock B: Roomy.");
         assert_eq!(answer(&mocks, "{\"mock\":\"E\"}"), "The page submitted: {\"mock\":\"E\"}");
+        assert_eq!(answer(&mocks, "{\"mock\":\"A\",\"text\":\"bigger font\"}"), "The user picked mock A: Dense. They wrote: bigger font");
+        assert_eq!(answer(&mocks, "{\"text\":\"neither\"}"), "The user wrote: neither");
+        assert_eq!(answer(&mocks, "{\"text\":\"x\",\"n\":1}"), "The page submitted: {\"n\":1,\"text\":\"x\"}");
         assert_eq!(answer(&json!({"title": "t", "html": ""}), "not json"), "The page submitted: \"not json\"");
     }
 }
