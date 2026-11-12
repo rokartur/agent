@@ -263,6 +263,7 @@ pub struct Agent {
     pub grants: Grants,
     /// `settings.permissions`: a deny rule refuses a call in every mode.
     pub permission_rules: permissions::Rules,
+    pub before_tool: Vec<crate::settings::ToolHook>,
     /// Shared with the UI, which shows it and lets the user edit it in /todos.
     pub todos: Arc<Mutex<Todos>>,
     /// Shared with the UI for the footer and /goal pause, which must work mid-turn.
@@ -476,6 +477,7 @@ impl Agent {
             permission_mode: Arc::new(Mutex::new(settings.permission_mode)),
             grants: Grants::default(),
             permission_rules: settings.permissions.clone(),
+            before_tool: settings.before_tool.clone(),
             todos: Arc::default(),
             goal: Arc::default(),
             user_requests: Vec::new(),
@@ -809,6 +811,33 @@ impl Agent {
             }
         }
         failures
+    }
+
+    /// The refusal of the first before_tool hook that matches and fails. Fail closed: a hook that crashes or times out refuses.
+    fn before_tool_refusal(&mut self, tool: &str, input: &Value, subjects: &[String]) -> Option<String> {
+        static CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let cwd = crate::process::canonicalize(&self.cwd).unwrap_or_else(|_| self.cwd.clone());
+        for hook in self.before_tool.clone() {
+            if !permissions::rule_matches(&hook.matches, tool, subjects, &cwd, false) {
+                continue;
+            }
+            // In the agent's folder, not the temp dir: there another user could plant a link under a name this predictable.
+            let call = self.home.join(format!(".agents/before-tool-{}-{}.json", std::process::id(), CALLS.fetch_add(1, Ordering::Relaxed)));
+            let refused = |reason: &str| Some(format!("Blocked by the before_tool hook \"{}\":\n{}", hook.command, reason.chars().take(4000).collect::<String>()));
+            if hook.command.contains("{call}")
+                && let Err(e) = crate::api::accounts::write_private(&call, &json!({"tool": tool, "input": input, "cwd": self.cwd}).to_string())
+            {
+                return refused(&e);
+            }
+            let command = hook.command.replace("{call}", &edit_hooks::shell_quote(&call.display().to_string()));
+            // Straight to the Bash tool: through check_permission the hook would run itself.
+            let (output, is_error) = tools::run("Bash", &json!({"command": command, "timeout": 10_000}), &self.cwd, &mut self.anchors, &self.rtk, &self.abort);
+            let _ = std::fs::remove_file(&call);
+            if is_error {
+                return refused(&output);
+            }
+        }
+        None
     }
 
     /// Runs one tool call after the permission check; agent-level tools are handled here, file and shell tools in `tools`.
@@ -1654,9 +1683,13 @@ impl Agent {
         };
         let files = if tool == "Workflow" { &saved_file } else { edited_files };
         // Above request_for: a deny rule also covers Read, which never asks.
-        let verdict = permissions::verdict(&self.permission_rules, tool, &permissions::subjects(tool, input, files, &self.cwd), &self.cwd);
+        let subjects = permissions::subjects(tool, input, files, &self.cwd);
+        let verdict = permissions::verdict(&self.permission_rules, tool, &subjects, &self.cwd);
         if let Some(Verdict::Deny(rule)) = &verdict {
             return Some(format!("Denied by the permission rule \"{rule}\" in settings.json."));
+        }
+        if let Some(refusal) = self.before_tool_refusal(tool, input, &subjects) {
+            return Some(refusal);
         }
         let request = permissions::request_for(tool, input, files)?;
         let mode = *self.permission_mode.lock().unwrap();
@@ -1855,6 +1888,7 @@ impl Agent {
     fn apply(&mut self, settings: &Settings, model: &Model, cheap_model: &str) {
         self.trusted_projects = settings.trusted_projects.clone();
         self.permission_rules = settings.permissions.clone();
+        self.before_tool = settings.before_tool.clone();
         self.model = settings.model.clone();
         self.effort = settings.thinking.clone();
         self.speed = settings.speed.clone();
@@ -1981,6 +2015,7 @@ impl Agent {
         self.shell_context.push(format!("Session moved from {} to {}. Paths and git state from earlier messages refer to the old checkout.", self.cwd.display(), cwd.display()));
         self.trusted_projects = settings.trusted_projects.clone();
         self.permission_rules = settings.permissions.clone();
+        self.before_tool = settings.before_tool.clone();
         self.system = prompt::system_prompt(&self.agent_dir, &cwd, settings.trusts(&cwd), |skill| settings.skill_enabled(skill), settings.prefer_global());
         let editor = self.anchors.editor.take();
         self.anchors = Anchors::new(&session.id);
@@ -3377,6 +3412,40 @@ mod tests {
         std::fs::remove_dir_all(&home).unwrap();
         assert_eq!(results, [(denied("Bash(rm -rf*)"), false), (denied("Read(.env*)"), false), (None, true), (None, true), (None, false), (None, true)]);
         assert!(!aborted, "a rule's refusal goes back to the model, the turn goes on");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_before_tool_hook_that_fails_refuses_the_call_in_every_mode() {
+        let home = crate::process::canonicalize(std::env::temp_dir()).unwrap().join(format!("agent-before-tool-{}", std::process::id()));
+        let cwd = home.join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        std::fs::create_dir_all(home.join(".agents")).unwrap();
+        let settings = crate::settings::load(&home).unwrap();
+        let session = Session::start(&home.join("sessions"), true, &cwd, "m").unwrap();
+        let mut agent = Agent::new(Client::new(&home).unwrap(), &settings, home.clone(), cwd, session, home.join("sessions"), None);
+        *agent.permission_mode.lock().unwrap() = Mode::FullAccess;
+        let mut check = |hooks: &[(&str, &str)], tool: &str, input: Value| {
+            agent.before_tool = hooks.iter().map(|(matches, command)| crate::settings::ToolHook { matches: matches.to_string(), command: command.to_string() }).collect();
+            agent.check_permission(None, tool, &input, &[], &mut |_| {})
+        };
+        let ls = || json!({"command": "ls"});
+        let results = [
+            check(&[("Bash", "echo no pushes; false")], "Bash", ls()),
+            check(&[("Bash", "true")], "Bash", ls()),
+            check(&[("Read(.env*)", "false")], "Read", json!({"file_path": ".env"})),
+            check(&[("Edit", "false")], "Bash", ls()),
+            check(&[("Bash(ls*)", r#"grep -q '"tool":"Bash"' {call}"#)], "Bash", ls()),
+            check(&[("Bash", r#"grep -q '"tool":"Read"' {call}"#)], "Bash", ls()),
+        ];
+        let left: Vec<_> = std::fs::read_dir(home.join(".agents")).unwrap().map(|entry| entry.unwrap().file_name()).collect();
+        let aborted = agent.abort.load(Ordering::Relaxed);
+        std::fs::remove_dir_all(&home).unwrap();
+        let refusals: Vec<bool> = results.iter().map(Option::is_some).collect();
+        assert_eq!(refusals, [true, false, true, false, false, true]);
+        assert!(results[0].as_ref().unwrap().starts_with("Blocked by the before_tool hook \"echo no pushes; false\":\nno pushes"), "{:?}", results[0]);
+        assert!(left.is_empty(), "the call file is removed: {left:?}");
+        assert!(!aborted);
     }
 
     #[test]

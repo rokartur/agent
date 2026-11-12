@@ -47,4 +47,4 @@ Each edited file goes to the first glob it matches; a glob with a slash matches 
 
 ## Settings that are not in `/settings`
 
-`/settings` covers the common keys. The rest, `context_windows`, `custom_providers`, `accounts.*`, `condense.*`, `lsp`, `plugin_settings`, `headroom_env`, `on_start`, are edited in `settings.json`; the schema's `description` is the documentation. `save_change` writes the file 0600 and keeps keys it does not know.
+`/settings` covers the common keys. The rest, `context_windows`, `custom_providers`, `accounts.*`, `condense.*`, `lsp`, `plugin_settings`, `headroom_env`, `on_start`, `permissions`, `before_tool`, are edited in `settings.json`; the schema's `description` is the documentation. `save_change` writes the file 0600 and keeps keys it does not know.

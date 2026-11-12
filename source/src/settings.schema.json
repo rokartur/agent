@@ -79,6 +79,20 @@
     "default_environment": { "type": "string", "default": "local", "description": "Where `agent` starts a session without --on: `local`, another environment, or `auto` for the least loaded computer that has the directory." },
     "mid_turn": { "enum": ["steering", "queued"], "default": "steering", "description": "A message sent while the agent works: steering reaches the model at its next tool call, queued waits for the turn to end and runs as the next prompt." },
     "on_start": { "type": "array", "items": { "type": "string" }, "default": [], "description": "Shell commands the TUI runs in the background at start." },
+    "before_tool": {
+      "type": "array",
+      "default": [],
+      "description": "Commands that run before a matching tool call, in every permission mode. Exit 0 lets the call go on; any other exit, or 10 s without one, refuses it and the model reads the output.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["match", "command"],
+        "properties": {
+          "match": { "type": "string", "description": "A permission rule, `Tool` or `Tool(pattern)`, matched the way a deny rule is." },
+          "command": { "type": "string", "description": "Shell command, run in the session's directory. `{call}` is the path of a file holding `{\"tool\", \"input\", \"cwd\"}`." }
+        }
+      }
+    },
     "custom_providers": {
       "type": "array",
       "default": [],

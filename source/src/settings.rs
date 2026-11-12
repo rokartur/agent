@@ -128,6 +128,8 @@ pub struct Settings {
     pub mid_turn: String,
     /// Shell commands the TUI runs in the background at start, e.g. a global tool update.
     pub on_start: Vec<String>,
+    /// Commands that run before a matching tool call; one that fails refuses the call.
+    pub before_tool: Vec<ToolHook>,
     /// Language name to the server that checks a file after each edit; an empty command turns the language off.
     pub lsp: BTreeMap<String, LspServer>,
     /// OpenAI- or Anthropic-compatible endpoints; a preset name (`ollama`) fills in `base_url` and `api_key_env`.
@@ -378,10 +380,21 @@ pub fn path(home: &Path) -> PathBuf {
     home.join(".agents/settings.json")
 }
 
+/// `match` is a permission rule, `Tool` or `Tool(pattern)`; `{call}` in `command` is a file holding the call as JSON.
+#[derive(Clone, PartialEq, Debug)]
+pub struct ToolHook {
+    pub matches: String,
+    pub command: String,
+}
+
 /// Defaults for a missing file; an unreadable or broken one is an error, so the next save cannot write defaults over it.
 pub fn load(home: &Path) -> Result<Settings, String> {
     let settings = from_json(&read(home)?);
     crate::agent::permissions::check_rules(&settings.permissions).map_err(|e| format!("{}: {e}", path(home).display()))?;
+    // A hook that could never match or run would guard nothing, silently.
+    if let Some(hook) = settings.before_tool.iter().find(|hook| crate::agent::permissions::parse_rule(&hook.matches).is_none() || hook.command.trim().is_empty()) {
+        return Err(format!("{}: before_tool: {{\"match\": \"{}\", \"command\": \"{}\"}} needs a match that is Tool or Tool(pattern) and a command", path(home).display(), hook.matches, hook.command));
+    }
     Ok(settings)
 }
 
@@ -461,6 +474,13 @@ fn from_json(own: &Value) -> Settings {
         default_environment: own["default_environment"].as_str().filter(|name| !name.is_empty()).unwrap_or(crate::tailnet::LOCAL).to_string(),
         mid_turn: level(&own["mid_turn"], &MID_TURN, "steering"),
         on_start: string_list(&own["on_start"]),
+        // An entry without its strings is kept empty, so load refuses it.
+        before_tool: own["before_tool"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|hook| ToolHook { matches: hook["match"].as_str().unwrap_or_default().into(), command: hook["command"].as_str().unwrap_or_default().into() })
+            .collect(),
         lsp: lsp_servers(&own["lsp"]),
         custom_providers: custom_providers(&own["custom_providers"]),
     }
@@ -595,6 +615,7 @@ fn to_json(settings: &Settings) -> Value {
         "default_environment": settings.default_environment,
         "mid_turn": settings.mid_turn,
         "on_start": settings.on_start,
+        "before_tool": settings.before_tool.iter().map(|hook| json!({"match": hook.matches, "command": hook.command})).collect::<Vec<_>>(),
         "custom_providers": settings.custom_providers.iter().map(|p| json!({
             "name": p.name,
             "base_url": p.base_url,
@@ -635,6 +656,13 @@ mod tests {
         std::fs::remove_dir_all(&home).unwrap();
         assert!(broken.unwrap_err().ends_with("permissions.deny: \"Read(.env\" is not Tool or Tool(pattern)"));
         assert_eq!((loaded.allow, loaded.deny), (vec!["Bash(ls*)".to_string()], vec!["Read(.env*)".to_string()]));
+        for (hook, loads) in [(r#"{"match": "Bash(", "command": "true"}"#, false), (r#"{"match": "Bash"}"#, false), (r#"{"match": "Bash(git push*)", "command": "true"}"#, true)] {
+            assert_eq!(from_json(&serde_json::from_str(&format!(r#"{{"before_tool": [{hook}]}}"#)).unwrap()).before_tool.len(), 1);
+            std::fs::create_dir_all(path(&home).parent().unwrap()).unwrap();
+            std::fs::write(path(&home), format!(r#"{{"before_tool": [{hook}]}}"#)).unwrap();
+            assert_eq!(load(&home).is_ok(), loads, "{hook}");
+            std::fs::remove_dir_all(&home).unwrap();
+        }
     }
 
     #[test]
