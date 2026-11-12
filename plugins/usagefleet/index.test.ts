@@ -89,9 +89,20 @@ describe("usagefleet", () => {
 	});
 
 	test("refuses only when the server says blocked", () => {
-		expect(blockMessage({ blocked: true, group: "Artur", blockedWindow: "weekly", blockedPct: 100 })).toBe(
+		expect(blockMessage({ blocked: true, group: "Artur", blockedWindow: "weekly", blockedPct: 100 }, "claude-opus-5-5")).toBe(
 			'usagefleet: "Artur" has used 100% of its weekly budget, so new prompts are blocked.',
 		);
-		expect(blockMessage({ blocked: false, group: "Artur" })).toBeNull();
+		expect(blockMessage({ blocked: false, group: "Artur" }, "claude-opus-5-5")).toBeNull();
+	});
+
+	test("a per-model limit blocks only that model", () => {
+		const fable = { blocked: true, group: "artur", blockedWindow: "weekly", blockedModel: "Fable", blockedPct: 152 };
+		expect(blockMessage(fable, "claude-opus-5-5")).toBeNull();
+		expect(blockMessage(fable, "claude-fable-1")).toStartWith('usagefleet: "artur" has used 152% of its Fable weekly budget');
+	});
+
+	test("words the reset as dd/mm/yy in local time", () => {
+		const until = new Date(2026, 10, 16, 13, 0);
+		expect(blockMessage({ blocked: true, blockedUntil: until.toISOString() }, "claude-opus-5-5")).toEndWith(" Resets 16/11/26, 13:00.");
 	});
 });

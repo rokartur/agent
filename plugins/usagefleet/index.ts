@@ -178,20 +178,27 @@ async function usagefleetCommand(args: string, context: Context): Promise<string
 	await writeConfig(assignToken(await readConfigForWrite(), account, args));
 	return `Account ${name} now uses token ${maskToken(args)}.`;
 }
-/** Mirrors `usagefleet guard`: the reason to refuse a prompt, or null unless the server says `blocked: true`. */
-export function blockMessage(view: unknown): string | null {
+/** Mirrors `usagefleet guard`: the reason to refuse a prompt, or null unless the server says `blocked: true`
+ * for every model or for the family of `model` (a catalog id, matched like the server's `includes("fable")`). */
+export function blockMessage(view: unknown, model: string): string | null {
 	if (!isRecord(view) || view.blocked !== true) return null;
 	const { group, blockedWindow, blockedModel, blockedPct, blockedUntil } = view;
+	// shortcut: the server names only the block resetting last, so an account-wide block hidden behind a later
+	// per-model one lets other models through; upgrade when /api/v1/limits lists every block.
+	if (typeof blockedModel === "string" && blockedModel && !model.toLowerCase().includes(blockedModel.toLowerCase())) return null;
 	const window = blockedWindow === "weekly" ? "weekly" : "5h";
 	const limit = typeof blockedModel === "string" && blockedModel ? `${blockedModel} ${window}` : window;
 	const pct = typeof blockedPct === "number" ? Number(blockedPct.toFixed(1)) : 100;
 	const who = typeof group === "string" && group ? `"${group}"` : "this group";
 	const until = typeof blockedUntil === "string" ? new Date(blockedUntil) : null;
-	const resets =
-		until && !Number.isNaN(until.getTime())
-			? ` Resets ${until.toLocaleString([], { dateStyle: "short", timeStyle: "short" })}.`
-			: "";
+	const resets = until && !Number.isNaN(until.getTime()) ? ` Resets ${formatDate(until)}.` : "";
 	return `usagefleet: ${who} has used ${pct}% of its ${limit} budget, so new prompts are blocked.${resets}`;
+}
+
+/** "16/11/26, 13:00" in local time, whatever the system locale. */
+function formatDate(date: Date): string {
+	const pad = (n: number) => String(n).padStart(2, "0");
+	return `${pad(date.getDate())}/${pad(date.getMonth() + 1)}/${pad(date.getFullYear() % 100)}, ${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
 const readJson = (path: string): Promise<unknown> =>
@@ -239,7 +246,7 @@ async function blockedReason(context: Context): Promise<string | null> {
 	if (!account) return null;
 	const token = resolveToken(await readJson(CONFIG_PATH), account);
 	if (!token) return null;
-	return blockMessage(await fetchServerLimits(token).catch(() => null));
+	return blockMessage(await fetchServerLimits(token).catch(() => null), context.model);
 }
 
 const send = (message: object) => process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", ...message })}\n`);
