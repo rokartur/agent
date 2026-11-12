@@ -309,6 +309,17 @@ fn rewind_entry_finds_the_chosen_prompt_among_repeats_and_bash_output() {
 }
 
 #[test]
+fn an_aborted_skill_prompt_comes_back_as_typed_not_expanded() {
+    let home = std::env::temp_dir().join(format!("agent-tui-take-back-{}", std::process::id()));
+    let mut app = test_app(&home);
+    std::fs::remove_dir_all(&home).ok();
+    app.push(Item::User("/skill:ci-speed a to?".into()));
+    app.take_back(RewindPoint { at: 0, text: "<skill name=\"ci-speed\">body</skill>\n\na to?".into(), images: Vec::new() });
+    assert_eq!(app.editor.text(), "/skill:ci-speed a to?");
+    assert!(!app.entries.iter().any(|entry| matches!(entry.item, Item::User(_))));
+}
+
+#[test]
 fn only_notices_after_the_prompt_leave_it_unanswered() {
     let entry = |item: Item| Entry { item, cache: None };
     let prompt = entry(Item::User("go".into()));

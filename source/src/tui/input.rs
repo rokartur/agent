@@ -363,8 +363,12 @@ impl App {
     }
 
     /// Drops the last prompt from the transcript and puts it back in the editor.
-    pub(super) fn take_back(&mut self, point: RewindPoint) {
+    pub(super) fn take_back(&mut self, mut point: RewindPoint) {
         if let Some(prompt) = self.entries.iter().rposition(|entry| matches!(entry.item, Item::User(_))) {
+            // The transcript keeps what was typed (`/skill:x args`); the agent's copy is the expanded skill body.
+            if let Item::User(typed) = &self.entries[prompt].item {
+                point.text = typed.clone();
+            }
             self.entries.truncate(prompt);
         }
         self.restore_draft(point);
