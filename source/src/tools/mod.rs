@@ -332,13 +332,23 @@ fn rg_args(input: &Value) -> Result<Vec<String>, String> {
     if input["fixed_strings"].as_bool() == Some(true) {
         args.push("--fixed-strings".into());
     }
-    if input["hidden"].as_bool() == Some(true) {
-        args.push("--hidden".into());
-    }
     for (flag, rg_flag) in [("-C", "--context"), ("-A", "--after-context"), ("-B", "--before-context")] {
         if !input[flag].is_null() {
             args.extend([rg_flag.into(), clamped(&input[flag], 0, 0, MAX_CONTEXT_LINES)]);
         }
+    }
+    args.extend(file_filters(input));
+    args.extend(["--max-count".into(), clamped(&input["limit"], DEFAULT_MATCHES, 1, MAX_MATCHES)]);
+    args.extend(["--".into(), str_arg(input, "pattern")?.into()]);
+    args.extend(search_path(input));
+    Ok(args)
+}
+
+/// The flags that pick which files a Grep reads.
+fn file_filters(input: &Value) -> Vec<String> {
+    let mut args = Vec::new();
+    if input["hidden"].as_bool() == Some(true) {
+        args.push("--hidden".into());
     }
     if let Some(glob) = input["glob"].as_str().filter(|g| !g.is_empty()) {
         args.extend(["--glob".into(), glob.into()]);
@@ -346,10 +356,13 @@ fn rg_args(input: &Value) -> Result<Vec<String>, String> {
     if let Some(file_type) = input["type"].as_str().filter(|t| !t.is_empty()) {
         args.extend(["--type".into(), file_type.into()]);
     }
-    args.extend(["--max-count".into(), clamped(&input["limit"], DEFAULT_MATCHES, 1, MAX_MATCHES)]);
-    args.extend(["--".into(), str_arg(input, "pattern")?.into()]);
-    args.extend(search_path(input));
-    Ok(args)
+    args
+}
+
+/// The files a Grep with this input reads in the folder `root`, one path relative to it per line.
+pub fn grep_files(input: &Value, root: &Path) -> Result<String, String> {
+    let args: Vec<String> = ["--files".to_string()].into_iter().chain(file_filters(input)).collect();
+    search("rg", &args, root, &AtomicBool::new(false), RG_OK)
 }
 
 fn clamped(value: &Value, default: u64, min: u64, max: u64) -> String {
