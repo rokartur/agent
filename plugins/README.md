@@ -12,7 +12,7 @@ agent plugin list
 agent plugin remove usagefleet
 ```
 
-Plugins go to `~/.agents/plugins/<name>/`. In the TUI, `/plugins` installs, removes, enables and disables them. Disabled plugins are kept in `disabled_plugins` in `~/.agents/settings.json`.
+Plugins go to `~/.agents/plugins/<name>/`. In the TUI, `/plugins` installs, updates, removes, enables and disables them. Disabled plugins are kept in `disabled_plugins` in `~/.agents/settings.json`.
 
 At startup, the agent updates each installed plugin from this directory when the agent has a higher `version`, and shows a message. When you change a plugin here, increase its `version`, or users keep the old copy. A local copy with the same or a higher version is not changed.
 

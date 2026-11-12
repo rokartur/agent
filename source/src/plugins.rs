@@ -78,6 +78,8 @@ pub struct View {
     pub installed: bool,
     pub running: bool,
     pub error: Option<String>,
+    /// The newer version `agent plugin update` would install.
+    pub update: Option<String>,
 }
 
 impl Plugins {
@@ -273,7 +275,8 @@ impl Plugins {
             };
             let running = plugin.is_some_and(|plugin| plugin.process.is_some());
             let error = plugin.and_then(|plugin| plugin.error.clone()).or(manifest_error);
-            views.push(view(name, manifest, true, running, error));
+            let update = manifest.as_ref().and_then(|manifest| update_available(&self.dir.join(&name), &name, &manifest.version));
+            views.push(View { update, ..view(name, manifest, true, running, error) });
         }
         for (name, files) in BUNDLED {
             if views.iter().any(|view| view.name == *name) {
@@ -644,7 +647,16 @@ fn message(plugin: &Plugin, id: Option<u64>, method: &str, params: &Value) -> St
 fn view(name: String, manifest: Option<Manifest>, installed: bool, running: bool, error: Option<String>) -> View {
     let manifest =
         manifest.unwrap_or(Manifest { version: String::new(), description: String::new(), author: None, command: Vec::new(), commands: Vec::new(), tools: Vec::new(), settings: Vec::new() });
-    View { name, version: manifest.version, description: manifest.description, author: manifest.author, settings: manifest.settings, installed, running, error }
+    View { name, version: manifest.version, description: manifest.description, author: manifest.author, settings: manifest.settings, installed, running, error, update: None }
+}
+
+/// The source directory's version for a directory install, else the bundled one, when it is newer than `installed`.
+fn update_available(dir: &Path, name: &str, installed: &str) -> Option<String> {
+    let source = match std::fs::read_to_string(dir.join(SOURCE_FILE)) {
+        Ok(source) => read_manifest(Path::new(&source)).ok()?.version,
+        Err(_) => bundled_version(name)?,
+    };
+    crate::update::is_newer(&source, installed).then_some(source)
 }
 
 #[cfg(test)]
@@ -880,5 +892,23 @@ done"#;
             ])
         );
         assert_eq!(update(&home, &["nope".into()]), Err("nope is not installed.".into()));
+    }
+
+    #[test]
+    fn list_names_the_version_an_update_would_install() {
+        let home = home_with("update-list", &[]);
+        let source = home.join("src/mine");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(source.join("plugin.json"), r#"{"version": "1.0.0", "command": ["sh", "plugin.sh"]}"#).unwrap();
+        install(&home, source.to_str().unwrap()).unwrap();
+        install(&home, "usagefleet").unwrap();
+        let updates = || Plugins::new(&home).list().into_iter().map(|view| (view.name, view.update)).collect::<Vec<_>>();
+        assert_eq!(updates(), [("mine".into(), None), ("usagefleet".into(), None)]);
+
+        std::fs::write(source.join("plugin.json"), r#"{"version": "1.1.0", "command": ["sh", "plugin.sh"]}"#).unwrap();
+        let bundled = home.join(".agents/plugins/usagefleet/plugin.json");
+        let version = read_manifest(bundled.parent().unwrap()).unwrap().version;
+        std::fs::write(&bundled, r#"{"version": "0.0.1", "command": ["bun", "index.ts"]}"#).unwrap();
+        assert_eq!(updates(), [("mine".into(), Some("1.1.0".into())), ("usagefleet".into(), Some(version))]);
     }
 }
