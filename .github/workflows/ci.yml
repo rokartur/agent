@@ -14,8 +14,10 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+# Runner images ship the current stable Rust with clippy and rustfmt; rustup's channel sync took 7 s on Windows.
 env:
   CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_TERM_COLOR: always
 
 jobs:
   # Its own job, so clippy's 10 s run beside the tests instead of before them.
@@ -33,10 +35,6 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
-        with:
-          toolchain: stable
-          components: clippy, rustfmt
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: source
@@ -99,9 +97,6 @@ jobs:
           choco install -y --no-progress fd --version 10.5.2
           choco install -y --no-progress imagemagick.app --version 7.1.2.2500
           cygpath -w "/c/Program Files"/ImageMagick-* >> "$GITHUB_PATH"
-      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
-        with:
-          toolchain: stable
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: source
