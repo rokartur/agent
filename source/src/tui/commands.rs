@@ -166,7 +166,7 @@ impl App {
                 let _ = self.commands.send(Command::Export(crate::tools::hashline::resolve(&self.cwd, &out)));
             }
             "workspace" => _ = self.commands.send(Command::Workspace(args.to_string())),
-            "model" => self.open_models(0, args, ModelsBack::Close),
+            "model" => self.open_models(Setting::Model, args, ModelsBack::Close),
             "thinking" if args.is_empty() => self.system("thinking", format!("{}. Levels: {}", self.settings.thinking, THINKING_LEVELS.join(", "))),
             "thinking" if THINKING_LEVELS.contains(&args) => {
                 self.update_settings(|s| s.thinking = args.to_string());
@@ -202,7 +202,7 @@ impl App {
                 }
                 None => self.push(Item::Error(format!("Unknown mode {args}. Modes: {}", MODES.map(Mode::label).join(", ")))),
             },
-            "settings" => self.panel = Some(Panel::Settings { row: 0, query: Editor::new() }),
+            "settings" => self.panel = Some(Panel::Settings { row: Setting::Model, query: Editor::new() }),
             "todos" => self.panel = Some(Panel::Todos { index: 0 }),
             "plugins" => self.panel = Some(Panel::Plugins { index: 0, confirm: false }),
             "skills" => self.panel = Some(Panel::Skills { query: Editor::new(), index: 0 }),

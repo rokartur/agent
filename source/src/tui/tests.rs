@@ -399,25 +399,32 @@ fn changing_a_settings_row_changes_that_row_and_no_other() {
     let mut app = test_app(&home);
     // The first settings change configures the client, which is what the Message threads row reads.
     app.client.configure(&app.settings);
-    let values = |app: &App| app.setting_values().iter().map(text).collect::<Vec<_>>();
-    // These open their own panel; Ponytail (14) and Caveman (15) would download their rules.
-    let skipped = [&MODEL_ROWS[..], &[CONTEXT_WINDOW_ROW, HEADROOM_URL_ROW, HEADROOM_TOKEN_ROW, 14, 15]].concat();
+    let all = all_settings();
+    use Setting::*;
+    // These open their own panel; Ponytail and Caveman would download their rules.
+    let skipped = [Model, CondenseModel, FallbackModel, ReviewerModel, SubagentModel, SmallModel, ContextWindow, HeadroomUrl, HeadroomToken, Ponytail, Caveman];
+    let values = |app: &App| all.iter().map(|&row| text(&app.setting_value(row))).collect::<Vec<_>>();
     let mut changed = Vec::new();
-    for row in (0..SETTING_NAMES.len()).filter(|row| !skipped.contains(row)) {
+    for &row in all.iter().filter(|row| !skipped.contains(row)) {
         let before = values(&app);
         app.change_setting(row, true);
         let after = values(&app);
-        changed.push((SETTING_NAMES[row], (0..after.len()).filter(|&index| before[index] != after[index]).collect::<Vec<_>>()));
+        changed.push((row, (0..after.len()).filter(|&index| before[index] != after[index]).map(|index| all[index]).collect::<Vec<_>>()));
     }
     let _ = std::fs::remove_dir_all(&home);
-    let own: Vec<(&str, Vec<usize>)> = (0..SETTING_NAMES.len()).filter(|row| !skipped.contains(row)).map(|row| (SETTING_NAMES[row], vec![row])).collect();
+    let own: Vec<(Setting, Vec<Setting>)> = all.iter().filter(|row| !skipped.contains(row)).map(|&row| (row, vec![row])).collect();
     assert_eq!(changed, own);
+}
+
+/// Every settings row, in declaration order.
+fn all_settings() -> Vec<Setting> {
+    let mut rows: Vec<Setting> = SETTING_SECTIONS.iter().flat_map(|(_, rows)| rows.iter().copied()).collect();
+    rows.sort_by_key(|&row| row as usize);
+    rows
 }
 
 #[test]
 fn settings_rows_keep_their_labels() {
-    assert_eq!([CONTEXT_WINDOW_ROW, PROVIDER_ORDER_ROW, HEADROOM_URL_ROW, HEADROOM_TOKEN_ROW].map(|row| SETTING_NAMES[row]), ["Context window", "Provider order", "Headroom URL", "Headroom token"]);
-    assert_eq!(MODEL_ROWS.map(|row| SETTING_NAMES[row]), ["Model", "Condense model", "Fallback model", "Reviewer model", "Subagent model", "Small model"]);
     let home = std::env::temp_dir().join(format!("agent-settings-labels-{}", std::process::id()));
     type Field = fn(&Settings) -> String;
     let fields: [(&str, Field); 15] = [
@@ -441,7 +448,7 @@ fn settings_rows_keep_their_labels() {
     for (label, field) in fields {
         let mut app = test_app(&home);
         let before = field(&app.settings);
-        app.change_setting(SETTING_NAMES.iter().position(|name| *name == label).unwrap(), true);
+        app.change_setting(*all_settings().iter().find(|row| row.name() == label).unwrap(), true);
         if field(&app.settings) == before {
             unchanged.push(label);
         }
@@ -452,13 +459,12 @@ fn settings_rows_keep_their_labels() {
 
 #[test]
 fn settings_sections_hold_every_row_once_and_search_spans_them() {
-    let mut rows: Vec<usize> = SETTING_SECTIONS.iter().flat_map(|(_, rows)| rows.iter().copied()).collect();
-    rows.sort();
-    assert_eq!(rows, (0..SETTING_NAMES.len()).collect::<Vec<_>>());
-    assert_eq!(matching_settings(HEADROOM_URL_ROW, ""), SETTING_SECTIONS[3].1);
-    assert_eq!(matching_settings(0, "CONTEXT WIN"), [CONTEXT_WINDOW_ROW]);
-    assert_eq!(matching_settings(0, "headroom"), [17, HEADROOM_URL_ROW, HEADROOM_TOKEN_ROW]);
-    assert!(matching_settings(0, "no such setting").is_empty());
+    let rows: Vec<usize> = all_settings().into_iter().map(|row| row as usize).collect();
+    assert_eq!(rows, (0..=Setting::OutputStyle as usize).collect::<Vec<_>>());
+    assert_eq!(matching_settings(Setting::HeadroomUrl, ""), SETTING_SECTIONS[3].1);
+    assert_eq!(matching_settings(Setting::Model, "CONTEXT WIN"), [Setting::ContextWindow]);
+    assert_eq!(matching_settings(Setting::Model, "headroom"), [Setting::HeadroomProxy, Setting::HeadroomUrl, Setting::HeadroomToken]);
+    assert!(matching_settings(Setting::Model, "no such setting").is_empty());
 }
 
 #[test]
@@ -762,19 +768,19 @@ fn model_search_matches_provider_account_or_id_ignoring_case() {
     let catalog = [model("anthropic", "claude-haiku-5-5", &["work"]), model("openai-codex", "gpt-6-luna", &["pro", "plus"]), model("openai-codex", "gpt-6-sol", &["pro"])];
     let mut settings = settings::load(Path::new("/nonexistent")).unwrap();
     let ids = |settings: &Settings, row, query| matching_models(&catalog, settings, row, query).iter().map(|m| m.map_or("auto", |m| m.id.as_str()).to_string()).collect::<Vec<_>>();
-    assert_eq!(ids(&settings, 0, "HAIKU"), ["claude-haiku-5-5"]);
-    assert_eq!(ids(&settings, 0, "codex"), ["gpt-6-luna", "gpt-6-sol"]);
-    assert_eq!(ids(&settings, 0, "plus"), ["gpt-6-luna"]);
+    assert_eq!(ids(&settings, Setting::Model, "HAIKU"), ["claude-haiku-5-5"]);
+    assert_eq!(ids(&settings, Setting::Model, "codex"), ["gpt-6-luna", "gpt-6-sol"]);
+    assert_eq!(ids(&settings, Setting::Model, "plus"), ["gpt-6-luna"]);
     assert_eq!(model_owners(&catalog[1]), "openai-codex · pro, plus");
-    assert_eq!(ids(&settings, 0, "").len(), catalog.len());
-    assert_eq!(ids(&settings, 8, "").len(), catalog.len() + 1);
-    assert_eq!(ids(&settings, 12, "aut"), ["auto", "gpt-6-luna"]);
-    assert!(ids(&settings, 8, "xyz").is_empty());
+    assert_eq!(ids(&settings, Setting::Model, "").len(), catalog.len());
+    assert_eq!(ids(&settings, Setting::CondenseModel, "").len(), catalog.len() + 1);
+    assert_eq!(ids(&settings, Setting::FallbackModel, "aut"), ["auto", "gpt-6-luna"]);
+    assert!(ids(&settings, Setting::CondenseModel, "xyz").is_empty());
     settings.provider_sort = "manual".into();
     settings.provider_order = vec!["openai-codex".into()];
-    assert_eq!(ids(&settings, 8, ""), ["auto", "gpt-6-luna", "gpt-6-sol", "claude-haiku-5-5"]);
+    assert_eq!(ids(&settings, Setting::CondenseModel, ""), ["auto", "gpt-6-luna", "gpt-6-sol", "claude-haiku-5-5"]);
     settings.pinned_models = vec!["openai-codex/gpt-6-sol".into()];
-    assert_eq!(ids(&settings, 8, ""), ["auto", "gpt-6-sol", "gpt-6-luna", "claude-haiku-5-5"]);
+    assert_eq!(ids(&settings, Setting::CondenseModel, ""), ["auto", "gpt-6-sol", "gpt-6-luna", "claude-haiku-5-5"]);
 }
 
 #[test]

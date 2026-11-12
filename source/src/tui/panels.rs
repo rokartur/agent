@@ -14,14 +14,14 @@ pub(super) enum Panel {
         /// `x` was pressed once on the selected session; a second `x` stops it.
         confirm: bool,
     },
-    /// `row` indexes `SETTING_NAMES`; its section is the open tab. Typing filters all sections by name.
+    /// `row`'s section is the open tab. Typing filters all sections by name.
     Settings {
-        row: usize,
+        row: Setting,
         query: Editor,
     },
     /// Searchable model list for the settings `row` it edits; Enter and Esc return to `back`.
     Models {
-        row: usize,
+        row: Setting,
         query: Editor,
         index: usize,
         back: ModelsBack,
@@ -34,7 +34,7 @@ pub(super) enum Panel {
     },
     /// `headroom_url` or `headroom_token` (by settings `row`) being typed; Enter saves it, Esc goes back to the row.
     Headroom {
-        row: usize,
+        row: Setting,
         input: Editor,
     },
     /// Manual provider order, tab 0 model providers, tab 1 web search providers.
@@ -203,63 +203,111 @@ pub(super) enum ModelsBack {
     PlanFresh,
 }
 
-pub(super) const SETTING_NAMES: [&str; 40] = [
-    "Model",
-    "Thinking level",
-    "Permission mode",
-    "Auto-compact",
-    "Compaction reserve",
-    "Keep recent context",
-    "Expand tool output",
-    "Condense tool output",
-    "Condense model",
-    "Condense min batch",
-    "Switch account at",
-    "When all over limit",
-    "Fallback model",
-    "Context window",
-    "Ponytail",
-    "Caveman",
-    "rtk",
-    "Headroom proxy",
-    "Subagent effort",
-    "Notifications",
-    "Scroll lines",
-    "Copy on select",
-    "Update channel",
-    "Menu rows",
-    "Auto prune sessions",
-    "Provider order",
-    "Name conflicts prefer",
-    "Speed",
-    "Prompt cache TTL",
-    "Reviewer model",
-    "Subagent model",
-    "Cost in footer",
-    "Account in footer",
-    "Progress bar",
-    "Headroom URL",
-    "Headroom token",
-    "Messages while working",
-    "Message threads",
-    "Small model",
-    "Output style",
-];
-/// The settings panel's tabs with their rows of `SETTING_NAMES`, in the order it lists them.
-pub(super) const SETTING_SECTIONS: [(&str, &[usize]); 5] = [
-    ("Model", &[0, 1, 27, 13, 2, 18, 30, 29, 38]),
-    ("Context", &[3, 4, 5, 7, 8, 9, 28, 37]),
-    ("Accounts", &[10, 11, 12, 25]),
-    ("Modes", &[39, 14, 15, 16, 17, 34, 35, 26]),
-    ("Interface", &[6, 31, 32, 19, 33, 20, 23, 21, 22, 24, 36]),
-];
+/// One row of the settings panel. Declaration order is the search tie-break order.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(super) enum Setting {
+    Model,
+    Thinking,
+    PermissionMode,
+    AutoCompact,
+    CompactionReserve,
+    KeepRecent,
+    ExpandTools,
+    Condense,
+    CondenseModel,
+    CondenseMinBatch,
+    SwitchAt,
+    WhenAllOverLimit,
+    FallbackModel,
+    ContextWindow,
+    Ponytail,
+    Caveman,
+    Rtk,
+    HeadroomProxy,
+    SubagentEffort,
+    Notifications,
+    ScrollLines,
+    CopyOnSelect,
+    UpdateChannel,
+    MenuRows,
+    PruneSessions,
+    ProviderOrder,
+    ConflictPriority,
+    Speed,
+    CacheTtl,
+    ReviewerModel,
+    SubagentModel,
+    FooterCost,
+    FooterAccount,
+    ProgressBar,
+    HeadroomUrl,
+    HeadroomToken,
+    MidTurn,
+    MessageThreads,
+    SmallModel,
+    OutputStyle,
+}
+
+impl Setting {
+    pub(super) fn name(self) -> &'static str {
+        match self {
+            Setting::Model => "Model",
+            Setting::Thinking => "Thinking level",
+            Setting::PermissionMode => "Permission mode",
+            Setting::AutoCompact => "Auto-compact",
+            Setting::CompactionReserve => "Compaction reserve",
+            Setting::KeepRecent => "Keep recent context",
+            Setting::ExpandTools => "Expand tool output",
+            Setting::Condense => "Condense tool output",
+            Setting::CondenseModel => "Condense model",
+            Setting::CondenseMinBatch => "Condense min batch",
+            Setting::SwitchAt => "Switch account at",
+            Setting::WhenAllOverLimit => "When all over limit",
+            Setting::FallbackModel => "Fallback model",
+            Setting::ContextWindow => "Context window",
+            Setting::Ponytail => "Ponytail",
+            Setting::Caveman => "Caveman",
+            Setting::Rtk => "rtk",
+            Setting::HeadroomProxy => "Headroom proxy",
+            Setting::SubagentEffort => "Subagent effort",
+            Setting::Notifications => "Notifications",
+            Setting::ScrollLines => "Scroll lines",
+            Setting::CopyOnSelect => "Copy on select",
+            Setting::UpdateChannel => "Update channel",
+            Setting::MenuRows => "Menu rows",
+            Setting::PruneSessions => "Auto prune sessions",
+            Setting::ProviderOrder => "Provider order",
+            Setting::ConflictPriority => "Name conflicts prefer",
+            Setting::Speed => "Speed",
+            Setting::CacheTtl => "Prompt cache TTL",
+            Setting::ReviewerModel => "Reviewer model",
+            Setting::SubagentModel => "Subagent model",
+            Setting::FooterCost => "Cost in footer",
+            Setting::FooterAccount => "Account in footer",
+            Setting::ProgressBar => "Progress bar",
+            Setting::HeadroomUrl => "Headroom URL",
+            Setting::HeadroomToken => "Headroom token",
+            Setting::MidTurn => "Messages while working",
+            Setting::MessageThreads => "Message threads",
+            Setting::SmallModel => "Small model",
+            Setting::OutputStyle => "Output style",
+        }
+    }
+}
+
+/// The settings panel's tabs with their rows, in the order it lists them.
+pub(super) const SETTING_SECTIONS: [(&str, &[Setting]); 5] = {
+    use Setting::*;
+    [
+        ("Model", &[Model, Thinking, Speed, ContextWindow, PermissionMode, SubagentEffort, SubagentModel, ReviewerModel, SmallModel]),
+        ("Context", &[AutoCompact, CompactionReserve, KeepRecent, Condense, CondenseModel, CondenseMinBatch, CacheTtl, MessageThreads]),
+        ("Accounts", &[SwitchAt, WhenAllOverLimit, FallbackModel, ProviderOrder]),
+        ("Modes", &[OutputStyle, Ponytail, Caveman, Rtk, HeadroomProxy, HeadroomUrl, HeadroomToken, ConflictPriority]),
+        ("Interface", &[ExpandTools, FooterCost, FooterAccount, Notifications, ProgressBar, ScrollLines, MenuRows, CopyOnSelect, UpdateChannel, PruneSessions, MidTurn]),
+    ]
+};
 /// The settings tab after `SETTING_SECTIONS`, drawn by `Panel::Profiles`.
 pub(super) const PROFILES_TAB: usize = SETTING_SECTIONS.len();
-pub(super) const MODEL_ROWS: [usize; 6] = [0, 8, 12, 29, 30, 38];
-pub(super) const CONTEXT_WINDOW_ROW: usize = 13;
-pub(super) const PROVIDER_ORDER_ROW: usize = 25;
-pub(super) const HEADROOM_URL_ROW: usize = 34;
-pub(super) const HEADROOM_TOKEN_ROW: usize = 35;
 pub(super) const PROVIDER_LISTS: [&[&str]; 2] = [&models::PROVIDERS, &crate::tools::web::SEARCH_PROVIDERS];
 pub(super) const CONTEXT_WINDOWS: [Option<u64>; 5] = [None, Some(200_000), Some(272_000), Some(400_000), Some(1_000_000)];
 pub(super) const RESERVE_TOKENS: [u64; 5] = [16_384, 32_768, 65_536, 100_000, 150_000];
@@ -385,8 +433,8 @@ impl App {
                 (KeyCode::Up, _) => *index = index.saturating_sub(1),
                 (KeyCode::Down, _) => *index = (*index + 1).min(PLAN_FRESH_ROWS.len() - 1),
                 (KeyCode::Esc, _) => self.panel = Some(Panel::Plan { index: 0 }),
-                (KeyCode::Enter, 0) => self.open_models(0, "", ModelsBack::PlanFresh),
-                (KeyCode::Enter | KeyCode::Right | KeyCode::Left, 1) => self.change_setting(1, code != KeyCode::Left),
+                (KeyCode::Enter, 0) => self.open_models(Setting::Model, "", ModelsBack::PlanFresh),
+                (KeyCode::Enter | KeyCode::Right | KeyCode::Left, 1) => self.change_setting(Setting::Thinking, code != KeyCode::Left),
                 (KeyCode::Enter, _) => self.start_fresh_plan(),
                 _ => {}
             }
@@ -492,7 +540,7 @@ impl App {
                         let next = if code == KeyCode::Tab { (section + 1) % count } else { (section + count - 1) % count };
                         self.panel = Some(settings_tab(next));
                     }
-                    KeyCode::Enter if *row == PROVIDER_ORDER_ROW && index.is_some() => self.panel = Some(Panel::ProviderOrder { tab: 0, index: 0 }),
+                    KeyCode::Enter if *row == Setting::ProviderOrder && index.is_some() => self.panel = Some(Panel::ProviderOrder { tab: 0, index: 0 }),
                     KeyCode::Up if !rows.is_empty() => *row = rows[index.map_or(0, |i| i.saturating_sub(1))],
                     KeyCode::Down if !rows.is_empty() => *row = rows[index.map_or(0, |i| (i + 1).min(rows.len() - 1))],
                     KeyCode::Enter | KeyCode::Right | KeyCode::Left if index.is_some() => {
@@ -879,7 +927,7 @@ impl App {
         let row = *row;
         match key.code {
             KeyCode::Esc => {}
-            KeyCode::Enter if row == HEADROOM_URL_ROW => {
+            KeyCode::Enter if row == Setting::HeadroomUrl => {
                 let url = input.text().trim().trim_end_matches('/').to_string();
                 self.update_settings(|s| s.headroom_url = url);
             }
@@ -900,7 +948,7 @@ impl App {
         let catalog = self.client.catalog();
         let targets = context_window_targets(&catalog, &self.settings, *tab, &query.text());
         match key.code {
-            KeyCode::Esc => self.panel = Some(Panel::Settings { row: CONTEXT_WINDOW_ROW, query: Editor::new() }),
+            KeyCode::Esc => self.panel = Some(Panel::Settings { row: Setting::ContextWindow, query: Editor::new() }),
             KeyCode::Tab | KeyCode::BackTab => {
                 *tab = 1 - *tab;
                 *index = 0;
@@ -1092,7 +1140,7 @@ impl App {
         let providers = PROVIDER_LISTS[*tab];
         let last = providers.len() - 1;
         match key.code {
-            KeyCode::Esc => self.panel = Some(Panel::Settings { row: PROVIDER_ORDER_ROW, query: Editor::new() }),
+            KeyCode::Esc => self.panel = Some(Panel::Settings { row: Setting::ProviderOrder, query: Editor::new() }),
             KeyCode::Tab | KeyCode::BackTab => {
                 *tab = 1 - *tab;
                 *index = 0;
@@ -1115,125 +1163,127 @@ impl App {
     }
 
     /// The model picker for settings `row`, on the current model when it matches `query`.
-    pub(super) fn open_models(&mut self, row: usize, query: &str, back: ModelsBack) {
+    pub(super) fn open_models(&mut self, row: Setting, query: &str, back: ModelsBack) {
         let current = model_setting(&mut self.settings, row).clone();
         let index = matching_models(&self.client.catalog(), &self.settings, row, query).iter().position(|m| m.map_or("", |m| &m.id) == current).unwrap_or(0);
         self.panel = Some(Panel::Models { row, query: Editor::from_text(query), index, back });
     }
 
     /// Moves setting `row` to its next (or previous) value, then saves and applies it.
-    pub(super) fn change_setting(&mut self, row: usize, forward: bool) {
-        if MODEL_ROWS.contains(&row) {
-            self.open_models(row, "", ModelsBack::Settings);
-            return;
-        }
-        if row == CONTEXT_WINDOW_ROW {
-            self.open_context_windows();
-            return;
-        }
-        if row == HEADROOM_URL_ROW || row == HEADROOM_TOKEN_ROW {
-            let mut input = Editor::new();
-            input.set(if row == HEADROOM_URL_ROW { &self.settings.headroom_url } else { &self.settings.headroom_token });
-            self.panel = Some(Panel::Headroom { row, input });
-            return;
+    pub(super) fn change_setting(&mut self, row: Setting, forward: bool) {
+        use Setting::*;
+        match row {
+            Model | CondenseModel | FallbackModel | ReviewerModel | SubagentModel | SmallModel => return self.open_models(row, "", ModelsBack::Settings),
+            ContextWindow => return self.open_context_windows(),
+            HeadroomUrl | HeadroomToken => {
+                let mut input = Editor::new();
+                input.set(if row == HeadroomUrl { &self.settings.headroom_url } else { &self.settings.headroom_token });
+                self.panel = Some(Panel::Headroom { row, input });
+                return;
+            }
+            _ => {}
         }
         self.update_settings(|s| match row {
-            1 => s.thinking = step(&THINKING_LEVELS, &s.thinking.as_str(), forward).to_string(),
-            2 => s.permission_mode = step(&MODES, &s.permission_mode, forward),
-            3 => s.auto_compact = !s.auto_compact,
-            4 => s.reserve_tokens = step(&RESERVE_TOKENS, &s.reserve_tokens, forward),
-            5 => s.keep_recent_tokens = step(&KEEP_RECENT_TOKENS, &s.keep_recent_tokens, forward),
-            6 => s.expand_tools = !s.expand_tools,
-            7 => s.condense = !s.condense,
-            9 => s.condense_min_batch_chars = step(&CONDENSE_MIN_CHARS, &s.condense_min_batch_chars, forward),
-            10 => s.switch_at_percent = step(&SWITCH_AT_PERCENT, &s.switch_at_percent, forward),
-            11 => s.when_all_over_limit = step(&Policy::ALL, &s.when_all_over_limit, forward),
-            14 => s.ponytail = step(&PONYTAIL_LEVELS, &s.ponytail.as_str(), forward).to_string(),
-            15 => s.caveman = step(&CAVEMAN_LEVELS, &s.caveman.as_str(), forward).to_string(),
-            16 => s.rtk = !s.rtk,
-            17 => s.headroom = !s.headroom,
-            18 => s.subagent_effort = step(&THINKING_LEVELS, &s.subagent_effort.as_str(), forward).to_string(),
-            19 => s.notifications = !s.notifications,
-            20 => s.scroll_lines = step(&SCROLL_LINES, &s.scroll_lines, forward),
-            21 => s.copy_on_select = !s.copy_on_select,
-            22 => s.update_channel = step(&crate::update::CHANNELS, &s.update_channel.as_str(), forward).to_string(),
-            23 => s.menu_rows = step(&MENU_ROWS, &s.menu_rows, forward),
-            24 => s.prune_sessions = step(&PRUNE_SESSIONS, &s.prune_sessions.as_str(), forward).to_string(),
-            25 => s.provider_sort = step(&PROVIDER_SORTS, &s.provider_sort.as_str(), forward).to_string(),
-            26 => s.conflict_priority = step(&CONFLICT_PRIORITIES, &s.conflict_priority.as_str(), forward).to_string(),
-            27 => s.speed = step(&SPEEDS, &s.speed.as_str(), forward).to_string(),
-            28 => s.cache_ttl = step(&CACHE_TTLS, &s.cache_ttl.as_str(), forward).to_string(),
-            31 => s.footer_cost = !s.footer_cost,
-            32 => s.footer_account = !s.footer_account,
-            33 => s.progress_bar = !s.progress_bar,
-            36 => s.mid_turn = step(&MID_TURN, &s.mid_turn.as_str(), forward).to_string(),
-            37 => s.message_threads = !s.message_threads,
-            39 => s.output_style = step(&OUTPUT_STYLES, &s.output_style.as_str(), forward).to_string(),
-            _ => unreachable!("rows 0, 8, 12, 13, 29, 30 and 38 open their own panels"),
+            Thinking => s.thinking = step(&THINKING_LEVELS, &s.thinking.as_str(), forward).to_string(),
+            PermissionMode => s.permission_mode = step(&MODES, &s.permission_mode, forward),
+            AutoCompact => s.auto_compact = !s.auto_compact,
+            CompactionReserve => s.reserve_tokens = step(&RESERVE_TOKENS, &s.reserve_tokens, forward),
+            KeepRecent => s.keep_recent_tokens = step(&KEEP_RECENT_TOKENS, &s.keep_recent_tokens, forward),
+            ExpandTools => s.expand_tools = !s.expand_tools,
+            Condense => s.condense = !s.condense,
+            CondenseMinBatch => s.condense_min_batch_chars = step(&CONDENSE_MIN_CHARS, &s.condense_min_batch_chars, forward),
+            SwitchAt => s.switch_at_percent = step(&SWITCH_AT_PERCENT, &s.switch_at_percent, forward),
+            WhenAllOverLimit => s.when_all_over_limit = step(&Policy::ALL, &s.when_all_over_limit, forward),
+            Ponytail => s.ponytail = step(&PONYTAIL_LEVELS, &s.ponytail.as_str(), forward).to_string(),
+            Caveman => s.caveman = step(&CAVEMAN_LEVELS, &s.caveman.as_str(), forward).to_string(),
+            Rtk => s.rtk = !s.rtk,
+            HeadroomProxy => s.headroom = !s.headroom,
+            SubagentEffort => s.subagent_effort = step(&THINKING_LEVELS, &s.subagent_effort.as_str(), forward).to_string(),
+            Notifications => s.notifications = !s.notifications,
+            ScrollLines => s.scroll_lines = step(&SCROLL_LINES, &s.scroll_lines, forward),
+            CopyOnSelect => s.copy_on_select = !s.copy_on_select,
+            UpdateChannel => s.update_channel = step(&crate::update::CHANNELS, &s.update_channel.as_str(), forward).to_string(),
+            MenuRows => s.menu_rows = step(&MENU_ROWS, &s.menu_rows, forward),
+            PruneSessions => s.prune_sessions = step(&PRUNE_SESSIONS, &s.prune_sessions.as_str(), forward).to_string(),
+            ProviderOrder => s.provider_sort = step(&PROVIDER_SORTS, &s.provider_sort.as_str(), forward).to_string(),
+            ConflictPriority => s.conflict_priority = step(&CONFLICT_PRIORITIES, &s.conflict_priority.as_str(), forward).to_string(),
+            Speed => s.speed = step(&SPEEDS, &s.speed.as_str(), forward).to_string(),
+            CacheTtl => s.cache_ttl = step(&CACHE_TTLS, &s.cache_ttl.as_str(), forward).to_string(),
+            FooterCost => s.footer_cost = !s.footer_cost,
+            FooterAccount => s.footer_account = !s.footer_account,
+            ProgressBar => s.progress_bar = !s.progress_bar,
+            MidTurn => s.mid_turn = step(&MID_TURN, &s.mid_turn.as_str(), forward).to_string(),
+            MessageThreads => s.message_threads = !s.message_threads,
+            OutputStyle => s.output_style = step(&OUTPUT_STYLES, &s.output_style.as_str(), forward).to_string(),
+            Model | CondenseModel | FallbackModel | ReviewerModel | SubagentModel | SmallModel | ContextWindow | HeadroomUrl | HeadroomToken => {
+                unreachable!("{row:?} opens its own panel")
+            }
         });
     }
 
-    pub(super) fn setting_values(&self) -> [Line; 40] {
+    pub(super) fn setting_value(&self, row: Setting) -> Line {
         let s = &self.settings;
-        let condense_model = if s.condense_model.is_empty() { "auto" } else { &s.condense_model };
-        let fallback_model = if s.fallback_model.is_empty() { "auto" } else { &s.fallback_model };
-        let reviewer_model = if s.reviewer_model.is_empty() { "auto" } else { &s.reviewer_model };
-        let subagent_model = if s.subagent_model.is_empty() { "auto" } else { &s.subagent_model };
-        let small_model = if s.small_model.is_empty() { "auto" } else { &s.small_model };
-        let model = self.model();
-        let model = model.as_ref();
-        [
-            vec![span(model.map_or(LOADING_MODELS.into(), |m| format!("{} · {}", m.provider, m.id)), BRIGHT.bold())],
-            choices(THINKING_LEVELS.map(String::from), &s.thinking),
-            choices(MODES.map(|m| m.label().to_string()), s.permission_mode.label()),
-            on_off_choices(s.auto_compact),
-            choices(RESERVE_TOKENS.map(tokens), &tokens(s.reserve_tokens)),
-            choices(KEEP_RECENT_TOKENS.map(tokens), &tokens(s.keep_recent_tokens)),
-            on_off_choices(s.expand_tools),
-            on_off_choices(s.condense),
-            vec![span(condense_model, BRIGHT.bold())],
-            choices(CONDENSE_MIN_CHARS.map(|n| n.to_string()), &s.condense_min_batch_chars.to_string()),
-            choices(SWITCH_AT_PERCENT.map(switch_label), &switch_label(s.switch_at_percent)),
-            choices(Policy::ALL.map(|p| p.label().to_string()), s.when_all_over_limit.label()),
-            vec![span(fallback_model, BRIGHT.bold())],
-            match model {
-                Some(model) => vec![span(tokens(s.context_window(model)), BRIGHT.bold()), span(format!("  {}", window_source(s, model)), MUTED)],
+        let auto = |model: &str| vec![span(if model.is_empty() { "auto" } else { model }, BRIGHT.bold())];
+        match row {
+            Setting::Model => vec![span(self.model().map_or(LOADING_MODELS.into(), |m| format!("{} · {}", m.provider, m.id)), BRIGHT.bold())],
+            Setting::Thinking => choices(THINKING_LEVELS.map(String::from), &s.thinking),
+            Setting::PermissionMode => choices(MODES.map(|m| m.label().to_string()), s.permission_mode.label()),
+            Setting::AutoCompact => on_off_choices(s.auto_compact),
+            Setting::CompactionReserve => choices(RESERVE_TOKENS.map(tokens), &tokens(s.reserve_tokens)),
+            Setting::KeepRecent => choices(KEEP_RECENT_TOKENS.map(tokens), &tokens(s.keep_recent_tokens)),
+            Setting::ExpandTools => on_off_choices(s.expand_tools),
+            Setting::Condense => on_off_choices(s.condense),
+            Setting::CondenseModel => auto(&s.condense_model),
+            Setting::CondenseMinBatch => choices(CONDENSE_MIN_CHARS.map(|n| n.to_string()), &s.condense_min_batch_chars.to_string()),
+            Setting::SwitchAt => choices(SWITCH_AT_PERCENT.map(switch_label), &switch_label(s.switch_at_percent)),
+            Setting::WhenAllOverLimit => choices(Policy::ALL.map(|p| p.label().to_string()), s.when_all_over_limit.label()),
+            Setting::FallbackModel => auto(&s.fallback_model),
+            Setting::ContextWindow => match self.model() {
+                Some(model) => vec![span(tokens(s.context_window(&model)), BRIGHT.bold()), span(format!("  {}", window_source(s, &model)), MUTED)],
                 None => vec![span(LOADING_MODELS, MUTED)],
             },
-            choices(PONYTAIL_LEVELS.map(String::from), &s.ponytail),
-            choices(CAVEMAN_LEVELS.map(String::from), &s.caveman),
-            optional_tool(s.rtk, "rtk"),
-            if s.headroom_url.is_empty() { optional_tool(s.headroom, "headroom") } else { on_off_choices(s.headroom) },
-            choices(THINKING_LEVELS.map(String::from), &s.subagent_effort),
-            on_off_choices(s.notifications),
-            choices(SCROLL_LINES.map(|n| n.to_string()), &s.scroll_lines.to_string()),
-            on_off_choices(s.copy_on_select),
-            choices(crate::update::CHANNELS.map(String::from), &s.update_channel),
-            choices(MENU_ROWS.map(|n| n.to_string()), &s.menu_rows.to_string()),
-            choices(PRUNE_SESSIONS.map(String::from), &s.prune_sessions),
-            [choices(PROVIDER_SORTS.map(String::from), &s.provider_sort), vec![span("   enter reorder", MUTED)]].concat(),
-            choices(CONFLICT_PRIORITIES.map(String::from), &s.conflict_priority),
-            choices(SPEEDS.map(String::from), &s.speed),
-            choices(CACHE_TTLS.map(String::from), &s.cache_ttl),
-            vec![span(reviewer_model, BRIGHT.bold())],
-            vec![span(subagent_model, BRIGHT.bold())],
-            on_off_choices(s.footer_cost),
-            on_off_choices(s.footer_account),
-            on_off_choices(s.progress_bar),
-            match s.headroom_url.as_str() {
+            Setting::Ponytail => choices(PONYTAIL_LEVELS.map(String::from), &s.ponytail),
+            Setting::Caveman => choices(CAVEMAN_LEVELS.map(String::from), &s.caveman),
+            Setting::Rtk => optional_tool(s.rtk, "rtk"),
+            Setting::HeadroomProxy => {
+                if s.headroom_url.is_empty() {
+                    optional_tool(s.headroom, "headroom")
+                } else {
+                    on_off_choices(s.headroom)
+                }
+            }
+            Setting::SubagentEffort => choices(THINKING_LEVELS.map(String::from), &s.subagent_effort),
+            Setting::Notifications => on_off_choices(s.notifications),
+            Setting::ScrollLines => choices(SCROLL_LINES.map(|n| n.to_string()), &s.scroll_lines.to_string()),
+            Setting::CopyOnSelect => on_off_choices(s.copy_on_select),
+            Setting::UpdateChannel => choices(crate::update::CHANNELS.map(String::from), &s.update_channel),
+            Setting::MenuRows => choices(MENU_ROWS.map(|n| n.to_string()), &s.menu_rows.to_string()),
+            Setting::PruneSessions => choices(PRUNE_SESSIONS.map(String::from), &s.prune_sessions),
+            Setting::ProviderOrder => [choices(PROVIDER_SORTS.map(String::from), &s.provider_sort), vec![span("   enter reorder", MUTED)]].concat(),
+            Setting::ConflictPriority => choices(CONFLICT_PRIORITIES.map(String::from), &s.conflict_priority),
+            Setting::Speed => choices(SPEEDS.map(String::from), &s.speed),
+            Setting::CacheTtl => choices(CACHE_TTLS.map(String::from), &s.cache_ttl),
+            Setting::ReviewerModel => auto(&s.reviewer_model),
+            Setting::SubagentModel => auto(&s.subagent_model),
+            Setting::FooterCost => on_off_choices(s.footer_cost),
+            Setting::FooterAccount => on_off_choices(s.footer_account),
+            Setting::ProgressBar => on_off_choices(s.progress_bar),
+            Setting::HeadroomUrl => match s.headroom_url.as_str() {
                 "" => vec![span("local", BRIGHT.bold()), span("   enter edit", MUTED)],
                 url => vec![span(url, BRIGHT.bold()), span("   enter edit", MUTED)],
             },
-            vec![span(if s.headroom_token.is_empty() { "none" } else { "set" }, BRIGHT.bold()), span("   enter edit", MUTED)],
-            choices(MID_TURN.map(String::from), &s.mid_turn),
-            if s.message_threads && !self.client.message_threads() {
-                [on_off_choices(true), vec![span("  unused behind headroom or ANTHROPIC_BASE_URL", MUTED)]].concat()
-            } else {
-                on_off_choices(s.message_threads)
-            },
-            vec![span(small_model, BRIGHT.bold())],
-            choices(OUTPUT_STYLES.map(String::from), &s.output_style),
-        ]
+            Setting::HeadroomToken => vec![span(if s.headroom_token.is_empty() { "none" } else { "set" }, BRIGHT.bold()), span("   enter edit", MUTED)],
+            Setting::MidTurn => choices(MID_TURN.map(String::from), &s.mid_turn),
+            Setting::MessageThreads => {
+                if s.message_threads && !self.client.message_threads() {
+                    [on_off_choices(true), vec![span("  unused behind headroom or ANTHROPIC_BASE_URL", MUTED)]].concat()
+                } else {
+                    on_off_choices(s.message_threads)
+                }
+            }
+            Setting::SmallModel => auto(&s.small_model),
+            Setting::OutputStyle => choices(OUTPUT_STYLES.map(String::from), &s.output_style),
+        }
     }
 
     pub(super) fn render_panel(&self, panel: &Panel, width: usize) -> Vec<Line> {
@@ -1283,8 +1333,7 @@ impl App {
             }
             Panel::Settings { row, query } => {
                 let matches = matching_settings(*row, &query.text());
-                let values = self.setting_values();
-                let rows: Vec<panel::Row> = matches.iter().map(|&r| panel::Row { left: SETTING_NAMES[r].to_string(), right: values[r].clone() }).collect();
+                let rows: Vec<panel::Row> = matches.iter().map(|&r| panel::Row { left: r.name().to_string(), right: self.setting_value(r) }).collect();
                 let view = panel::Panel {
                     title: "Settings".into(),
                     tabs: &setting_tabs(),
@@ -1320,9 +1369,9 @@ impl App {
                 view.render(width, PANEL_ROWS)
             }
             Panel::Headroom { row, input } => {
-                let token = *row == HEADROOM_TOKEN_ROW;
+                let token = *row == Setting::HeadroomToken;
                 let view = panel::Panel {
-                    title: SETTING_NAMES[*row].into(),
+                    title: row.name().into(),
                     tabs: &[],
                     tab: 0,
                     search: Some(input.field(token.then_some('•'))),
@@ -1460,7 +1509,7 @@ impl App {
                     })
                     .collect();
                 let view = panel::Panel {
-                    title: SETTING_NAMES[*row].into(),
+                    title: row.name().into(),
                     tabs: &[],
                     tab: 0,
                     search: Some(query.field(None)),
@@ -1474,7 +1523,7 @@ impl App {
             Panel::Permission { request, index, .. } => permission_lines(request, *index, width),
             Panel::Plan { index } => plan_lines(*index),
             Panel::PlanFresh { index } => {
-                let [model, effort, ..] = self.setting_values();
+                let [model, effort] = [Setting::Model, Setting::Thinking].map(|row| self.setting_value(row));
                 let rights = [model, effort, Vec::new()];
                 let rows: Vec<panel::Row> = PLAN_FRESH_ROWS.iter().zip(rights).map(|(left, right)| panel::Row { left: left.to_string(), right }).collect();
                 let view = panel::Panel {
@@ -1878,11 +1927,11 @@ pub(super) fn context_window_label(window: Option<u64>) -> String {
 }
 
 /// The rows of `row`'s section, or with a query the rows of every section whose name matches it, see `panel::search`.
-pub(super) fn matching_settings(row: usize, query: &str) -> Vec<usize> {
+pub(super) fn matching_settings(row: Setting, query: &str) -> Vec<Setting> {
     if query.is_empty() {
         return SETTING_SECTIONS[setting_section(row)].1.to_vec();
     }
-    panel::search(SETTING_SECTIONS.iter().flat_map(|(_, rows)| rows.iter().copied()), query, |&r| SETTING_NAMES[r].to_string())
+    panel::search(SETTING_SECTIONS.iter().flat_map(|(_, rows)| rows.iter().copied()), query, |r| r.name().to_string())
 }
 
 pub(super) fn setting_tabs() -> Vec<&'static str> {
@@ -1897,7 +1946,7 @@ pub(super) fn settings_tab(tab: usize) -> Panel {
     }
 }
 
-pub(super) fn setting_section(row: usize) -> usize {
+pub(super) fn setting_section(row: Setting) -> usize {
     SETTING_SECTIONS.iter().position(|(_, rows)| rows.contains(&row)).expect("every setting row is in a section")
 }
 
@@ -1906,7 +1955,7 @@ pub(super) fn context_window_targets<'a>(catalog: &'a [Model], settings: &Settin
     if tab == 0 {
         return settings.sort_providers(&models::PROVIDERS).into_iter().map(|provider| (provider.to_string(), None)).collect();
     }
-    matching_models(catalog, settings, 0, query).into_iter().flatten().map(|model| (model_key(model), Some(model))).collect()
+    matching_models(catalog, settings, Setting::Model, query).into_iter().flatten().map(|model| (model_key(model), Some(model))).collect()
 }
 
 /// Where the window in effect for `model` comes from.
@@ -1922,8 +1971,8 @@ pub(super) fn window_source(settings: &Settings, model: &Model) -> &'static str 
 
 /// Picker rows for settings `row` whose provider or id matches `query` (see `panel::search`): pinned models first, each part grouped in provider order.
 /// `None` is "auto", offered for the optional condense and fallback models.
-pub(super) fn matching_models<'a>(catalog: &'a [Model], settings: &Settings, row: usize, query: &str) -> Vec<Option<&'a Model>> {
-    let auto = (row != 0 && panel::search_rank("auto", query).is_some()).then_some(None);
+pub(super) fn matching_models<'a>(catalog: &'a [Model], settings: &Settings, row: Setting, query: &str) -> Vec<Option<&'a Model>> {
+    let auto = (row != Setting::Model && panel::search_rank("auto", query).is_some()).then_some(None);
     let providers = settings.sort_providers(&models::PROVIDERS);
     let mut matches = panel::search(catalog, query, |m| format!("{} {}", model_owners(m), m.id));
     matches.sort_by_key(|m| (!settings.pinned_models.contains(&model_key(m)), providers.iter().position(|provider| *provider == m.provider).unwrap_or(usize::MAX)));
@@ -1938,15 +1987,16 @@ pub(super) fn model_owners(model: &Model) -> String {
     format!("{} · {}", model.provider, model.accounts.join(", "))
 }
 
-/// The model id settings `row` edits: 0 model, 8 condense, 12 fallback, 29 reviewer, 30 subagent, 38 small.
-pub(super) fn model_setting(settings: &mut Settings, row: usize) -> &mut String {
+/// The model id settings `row` edits.
+pub(super) fn model_setting(settings: &mut Settings, row: Setting) -> &mut String {
     match row {
-        0 => &mut settings.model,
-        8 => &mut settings.condense_model,
-        12 => &mut settings.fallback_model,
-        29 => &mut settings.reviewer_model,
-        38 => &mut settings.small_model,
-        _ => &mut settings.subagent_model,
+        Setting::Model => &mut settings.model,
+        Setting::CondenseModel => &mut settings.condense_model,
+        Setting::FallbackModel => &mut settings.fallback_model,
+        Setting::ReviewerModel => &mut settings.reviewer_model,
+        Setting::SubagentModel => &mut settings.subagent_model,
+        Setting::SmallModel => &mut settings.small_model,
+        _ => unreachable!("{row:?} is not a model setting"),
     }
 }
 
