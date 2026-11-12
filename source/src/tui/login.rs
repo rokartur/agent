@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::editor::Editor;
-use super::panel;
+use super::list;
 use super::render::{BRIGHT, Line, MUTED, span, wrap};
 use crate::api::AccountView;
 use crate::api::accounts::{Account, Secret};
@@ -276,11 +276,11 @@ impl Login {
     pub fn render(&self, width: usize, max_rows: usize) -> Vec<Line> {
         let (title, rows, hint): (std::borrow::Cow<str>, _, _) = match self {
             Login::Kind { .. } => {
-                let rows = KINDS.iter().map(|c| panel::Row { left: c.to_string(), right: Vec::new() }).collect();
+                let rows = KINDS.iter().map(|c| list::Row { left: c.to_string(), right: Vec::new() }).collect();
                 ("Login: add an account or an API key?".into(), rows, "↑↓ navigate     enter choose     esc close")
             }
             Login::Choose { api, query, .. } => {
-                let rows = methods(*api, query).iter().map(|method| panel::Row { left: method.label().to_string(), right: Vec::new() }).collect();
+                let rows = methods(*api, query).iter().map(|method| list::Row { left: method.label().to_string(), right: Vec::new() }).collect();
                 (KINDS[*api as usize].into(), rows, "type to search     ↑↓ navigate     enter choose     esc back")
             }
             Login::PasteCode { provider: "anthropic", input, .. } => {
@@ -296,7 +296,7 @@ impl Login {
                 "Login".into(),
                 match code {
                     Some(code) => vec![field("Enter this code on the sign-in page", code.clone())],
-                    None => vec![panel::Row { left: "Waiting for the sign-in to finish…".into(), right: Vec::new() }],
+                    None => vec![list::Row { left: "Waiting for the sign-in to finish…".into(), right: Vec::new() }],
                 },
                 if url.is_some() { "ctrl+y copy link     esc cancel" } else { "esc cancel" },
             ),
@@ -307,7 +307,7 @@ impl Login {
         };
         let selected = if let Login::Kind { index } | Login::Choose { index, .. } = self { *index } else { 0 };
         let search = if let Login::Choose { query, .. } = self { Some(query.field(None)) } else { None };
-        let view = panel::Panel { title: title.into(), tabs: &[], tab: 0, search, rows: &rows, selected, empty: "No matching login methods.", hint };
+        let view = list::List { title: title.into(), tabs: &[], tab: 0, search, rows: &rows, selected, empty: "No matching login methods.", hint };
         let mut lines = view.render(width, max_rows);
         if let Some(url) = self.url() {
             // The whole link, wrapped, so it can be read or copied even when the browser did not open.
@@ -332,14 +332,14 @@ impl Login {
     }
 }
 
-/// Methods of the chosen kind whose label matches the search query, see `panel::search`.
+/// Methods of the chosen kind whose label matches the search query, see `list::search`.
 fn methods(api: bool, query: &Editor) -> Vec<Method> {
     let kind = METHODS.into_iter().filter(|method| method.is_api_key() == api);
-    panel::search(kind, query.text().trim(), |method| method.label().to_string())
+    list::search(kind, query.text().trim(), |method| method.label().to_string())
 }
 
-fn field(label: &str, value: String) -> panel::Row {
-    panel::Row { left: label.into(), right: vec![span(value, BRIGHT.bold())] }
+fn field(label: &str, value: String) -> list::Row {
+    list::Row { left: label.into(), right: vec![span(value, BRIGHT.bold())] }
 }
 
 #[cfg(test)]

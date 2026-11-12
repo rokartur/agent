@@ -162,18 +162,18 @@ impl App {
 }
 
 pub(super) fn matching_skills<'a>(skills: &'a [Skill], query: &str) -> Vec<&'a Skill> {
-    panel::search(skills, query, |skill| format!("{} {}", skill.name, skill.source.as_deref().unwrap_or_default()))
+    list::search(skills, query, |skill| format!("{} {}", skill.name, skill.source.as_deref().unwrap_or_default()))
 }
 
-/// Accounts whose name or provider matches the query, see `panel::search`.
+/// Accounts whose name or provider matches the query, see `list::search`.
 pub(super) fn matching_accounts(accounts: Vec<AccountView>, query: &str) -> Vec<AccountView> {
-    panel::search(accounts, query, |a| format!("{} {}", a.name, a.provider))
+    list::search(accounts, query, |a| format!("{} {}", a.name, a.provider))
 }
 
 /// The prompts in scope that match `query`, each repeated prompt once at its best-ranked place.
 pub(super) fn matching_prompts<'a>(entries: &'a [history::Entry], query: &str, in_scope: impl Fn(&history::Entry) -> bool) -> Vec<&'a str> {
     let mut seen = HashSet::new();
-    let matches = panel::search(entries.iter().filter(|entry| in_scope(entry)), query, |entry| entry.prompt.clone());
+    let matches = list::search(entries.iter().filter(|entry| in_scope(entry)), query, |entry| entry.prompt.clone());
     matches.into_iter().map(|entry| entry.prompt.as_str()).filter(|prompt| seen.insert(*prompt)).collect()
 }
 
@@ -211,7 +211,7 @@ pub(super) fn matching_commands(commands: &[(String, String)], text: &str) -> Ve
             matches.push(command.clone());
             continue;
         }
-        match panel::search_rank(&command.0, &query) {
+        match list::search_rank(&command.0, &query) {
             Some(0) => inner.push(command.clone()),
             Some(_) => fuzzy.push(command.clone()),
             None => {}

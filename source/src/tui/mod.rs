@@ -5,16 +5,19 @@ mod cmux;
 mod commands;
 mod complete;
 mod editor;
+mod extension_panels;
 mod history;
 mod input;
+mod list;
 mod login;
 mod markdown;
 mod notify;
-mod panel;
 mod panels;
 mod render;
 mod selection;
 mod server;
+mod session_panels;
+mod settings_panels;
 mod transcript;
 mod view;
 mod voice;
@@ -70,6 +73,7 @@ use editor::Editor;
 use panels::*;
 use render::{BRIGHT, DIM, Line, MUTED, PLAIN, Span, Style, line_width, link_at, overlay_center, overlay_right, plain_text, select, span, take_cursor, text_in, truncate, width, wrap};
 use selection::{Point, Selection};
+use settings_panels::*;
 use transcript::*;
 use view::*;
 use worker::*;
@@ -1181,7 +1185,7 @@ impl App {
 
     /// The skills matching `query` as checkbox rows with aligned name, repo and description columns.
     /// The description gives way so the state on the right fits in `columns`.
-    fn skill_rows(&self, query: &str, columns: usize, state: impl Fn(&Skill) -> (&'static str, Span)) -> Vec<panel::Row> {
+    fn skill_rows(&self, query: &str, columns: usize, state: impl Fn(&Skill) -> (&'static str, Span)) -> Vec<list::Row> {
         let name_width = self.skills.iter().map(|skill| skill.name.chars().count()).max().unwrap_or(0);
         let source_width = self.skills.iter().filter_map(|skill| skill.source.as_ref()).map(|source| source.chars().count()).max().unwrap_or(0);
         let skills: Vec<(&Skill, &str, Span)> = matching_skills(&self.skills, query)
@@ -1199,7 +1203,7 @@ impl App {
             let source = skill.source.as_deref().unwrap_or_default();
             let left = format!("{mark} {:<name_width$}  {source:<source_width$}  {description}", skill.name);
             let left = render::truncate(&vec![span(left, PLAIN)], room).into_iter().map(|cut| cut.text).collect();
-            rows.push(panel::Row { left, right: vec![right] });
+            rows.push(list::Row { left, right: vec![right] });
         }
         rows
     }
@@ -1572,8 +1576,8 @@ impl App {
         let runs = self.workflows.lock().unwrap().clone();
         match &self.panel {
             Some(Panel::Workflows { index }) => {
-                let rows: Vec<panel::Row> = runs.iter().map(|run| panel::Row { left: format!("{} {}", run.id, run.name), right: vec![span(run.summary(), DIM)] }).collect();
-                let view = panel::Panel {
+                let rows: Vec<list::Row> = runs.iter().map(|run| list::Row { left: format!("{} {}", run.id, run.name), right: vec![span(run.summary(), DIM)] }).collect();
+                let view = list::List {
                     title: format!("Workflows {}", runs.len()),
                     tabs: &[],
                     tab: 0,
@@ -1601,7 +1605,7 @@ impl App {
                     }
                 };
                 let left_width = rows.iter().map(|(left, _)| width(left)).max().unwrap_or(0);
-                panel::frame(head, rows.len(), *index, hint, columns, PANEL_ROWS, |row| {
+                list::frame(head, rows.len(), *index, hint, columns, PANEL_ROWS, |row| {
                     let (left, right) = &rows[row];
                     let style = if row == *index { BRIGHT.bold() } else { PLAIN };
                     vec![span(format!("{left}{}    ", " ".repeat(left_width - width(left))), style), span(right, DIM)]
@@ -1610,9 +1614,9 @@ impl App {
             Some(Panel::WorkflowSave { id, personal }) => {
                 let Some(run) = runs.iter().find(|run| run.id == *id) else { return Vec::new() };
                 let places = [("Project", workflow::project_save_dir(&self.cwd)), ("Personal", self.home.join(".agents").join("workflows"))];
-                let rows: Vec<panel::Row> =
-                    places.iter().map(|(place, dir)| panel::Row { left: place.to_string(), right: vec![span(dir.join(format!("{}.js", run.name)).display().to_string(), DIM)] }).collect();
-                let view = panel::Panel {
+                let rows: Vec<list::Row> =
+                    places.iter().map(|(place, dir)| list::Row { left: place.to_string(), right: vec![span(dir.join(format!("{}.js", run.name)).display().to_string(), DIM)] }).collect();
+                let view = list::List {
                     title: format!("Save as /{}", run.name),
                     tabs: &[],
                     tab: 0,

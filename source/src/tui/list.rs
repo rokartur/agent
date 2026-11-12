@@ -25,7 +25,7 @@ pub fn search_rank(text: &str, query: &str) -> Option<u8> {
 }
 
 /// fx's bottom panel: a blank line, `Title  [Tab]  Tab`, `> search` when it filters, rows with the selected one bright, key hints.
-pub struct Panel<'a> {
+pub struct List<'a> {
     pub title: String,
     pub tabs: &'a [&'a str],
     pub tab: usize,
@@ -37,7 +37,7 @@ pub struct Panel<'a> {
     pub hint: &'a str,
 }
 
-impl Panel<'_> {
+impl List<'_> {
     pub fn render(&self, columns: usize, max_rows: usize) -> Vec<Line> {
         let mut header = vec![span(self.title.clone(), BRIGHT.bold())];
         for (index, tab) in self.tabs.iter().enumerate() {
@@ -94,7 +94,7 @@ mod tests {
     #[test]
     fn rows_align_and_the_selected_one_is_marked_and_bright() {
         let rows = [Row { left: "a".into(), right: vec![span("x", MUTED)] }, Row { left: "abc".into(), right: vec![span("y", MUTED)] }];
-        let panel = Panel { title: "Sessions 2".into(), tabs: &["One", "Two"], tab: 0, search: None, rows: &rows, selected: 1, empty: "", hint: "esc close" };
+        let panel = List { title: "Sessions 2".into(), tabs: &["One", "Two"], tab: 0, search: None, rows: &rows, selected: 1, empty: "", hint: "esc close" };
         let lines = panel.render(20, 5);
         assert_eq!(text(&lines[1]), "Sessions 2  [One]  Two");
         assert_eq!(text(&lines[2]), "  a      x");
@@ -107,7 +107,7 @@ mod tests {
     #[test]
     fn a_list_that_scrolls_shows_the_selected_position_under_it() {
         let rows: Vec<Row> = (0..5).map(|i| Row { left: i.to_string(), right: Vec::new() }).collect();
-        let panel = |selected| Panel { title: "Settings".into(), tabs: &[], tab: 0, search: None, rows: &rows, selected, empty: "", hint: "" };
+        let panel = |selected| List { title: "Settings".into(), tabs: &[], tab: 0, search: None, rows: &rows, selected, empty: "", hint: "" };
         let lines: Vec<String> = panel(3).render(40, 2).iter().map(text).collect();
         assert_eq!(lines[..6], ["", "Settings", "  2    ", "→ 3    ", "", "  4/5"]);
         assert_eq!(panel(3).render(40, 2)[5][0].style, DIM);
@@ -117,7 +117,7 @@ mod tests {
     #[test]
     fn a_selection_past_a_shrunk_list_marks_its_last_row() {
         let rows = [Row { left: "a".into(), right: Vec::new() }, Row { left: "b".into(), right: Vec::new() }];
-        let panel = Panel { title: "Todos 2".into(), tabs: &[], tab: 0, search: None, rows: &rows, selected: 2, empty: "", hint: "" };
+        let panel = List { title: "Todos 2".into(), tabs: &[], tab: 0, search: None, rows: &rows, selected: 2, empty: "", hint: "" };
         let lines = panel.render(40, 5);
         assert_eq!(text(&lines[3]), "→ b    ");
         assert_eq!(lines[3][1].style, BRIGHT.bold());
@@ -126,7 +126,7 @@ mod tests {
     #[test]
     fn search_sits_on_its_own_line_under_the_tabs() {
         let rows = [Row { left: "a".into(), right: Vec::new() }];
-        let panel = Panel { title: "History".into(), tabs: &["All", "Here"], tab: 0, search: Some("fo".into()), rows: &rows, selected: 0, empty: "", hint: "" };
+        let panel = List { title: "History".into(), tabs: &["All", "Here"], tab: 0, search: Some("fo".into()), rows: &rows, selected: 0, empty: "", hint: "" };
         let lines: Vec<String> = panel.render(40, 5).iter().map(text).collect();
         assert_eq!(lines[1..4], ["History  [All]  Here", "> fo", "→ a    "]);
     }

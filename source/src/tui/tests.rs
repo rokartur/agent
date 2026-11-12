@@ -1,3 +1,4 @@
+use super::session_panels::*;
 use super::*;
 use serde_json::json;
 
@@ -89,6 +90,68 @@ fn a_key_typed_before_the_trust_question_appeared_does_not_answer_it() {
     let trusted = app.settings.trusts(&app.cwd);
     std::fs::remove_dir_all(&home).ok();
     assert_eq!((trusted_at_once, trusted), (false, true));
+}
+
+#[test]
+fn a_permission_digit_inside_the_settle_time_is_ignored_and_esc_denies() {
+    let home = std::env::temp_dir().join(format!("agent-tui-permission-{}", std::process::id()));
+    let mut app = test_app(&home);
+    std::fs::remove_dir_all(&home).ok();
+    let (reply, decision) = mpsc::channel();
+    let request = crate::agent::permissions::Request { kind: crate::agent::permissions::Kind::Command, question: "", detail: "ls".into(), grant: "bash:ls".into() };
+    app.panel = Some(Panel::Permission { request, reply, index: 0, opened: Instant::now() });
+    app.key(KeyEvent::from(KeyCode::Char('1')));
+    app.key(KeyEvent::from(KeyCode::Down));
+    let Some(Panel::Permission { index, .. }) = &app.panel else { panic!("a digit inside the settle time answered the prompt") };
+    assert_eq!(*index, 1);
+    app.key(KeyEvent::from(KeyCode::Esc));
+    assert!(app.panel.is_none());
+    assert!(matches!(decision.try_recv(), Ok(Decision::Deny)));
+}
+
+#[test]
+fn ctrl_c_on_context_windows_goes_back_to_its_settings_row() {
+    let home = std::env::temp_dir().join(format!("agent-tui-ctrl-c-{}", std::process::id()));
+    let mut app = test_app(&home);
+    std::fs::remove_dir_all(&home).ok();
+    app.panel = Some(Panel::ContextWindows { tab: 0, query: Editor::new(), index: 0 });
+    app.key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+    assert!(matches!(app.panel, Some(Panel::Settings { row: Setting::ContextWindow, .. })));
+}
+
+#[test]
+fn esc_closes_an_empty_mcp_list_and_the_worktrees_list() {
+    let home = std::env::temp_dir().join(format!("agent-tui-esc-{}", std::process::id()));
+    let mut app = test_app(&home);
+    std::fs::remove_dir_all(&home).ok();
+    app.panel = Some(Panel::Mcp { index: 0, confirm: false });
+    app.key(KeyEvent::from(KeyCode::Esc));
+    assert!(app.panel.is_none());
+    let worktrees = vec![crate::worktree::Worktree { path: app.cwd.clone(), branch: "main".into() }];
+    app.panel = Some(Panel::Worktrees { confirm: false, index: 0, worktrees, current: app.cwd.clone() });
+    app.key(KeyEvent::from(KeyCode::Esc));
+    assert!(app.panel.is_none());
+}
+
+#[test]
+fn enter_on_an_uninstalled_plugin_keeps_the_pending_confirm() {
+    let home = std::env::temp_dir().join(format!("agent-tui-plugin-enter-{}", std::process::id()));
+    let mut app = test_app(&home);
+    std::fs::remove_dir_all(&home).ok();
+    app.panel = Some(Panel::Plugins { index: 0, confirm: true });
+    app.key(KeyEvent::from(KeyCode::Enter));
+    assert!(matches!(app.panel, Some(Panel::Plugins { confirm: true, .. })));
+}
+
+#[test]
+fn usage_tab_cycles_its_tabs_and_other_keys_do_nothing() {
+    let home = std::env::temp_dir().join(format!("agent-tui-usage-{}", std::process::id()));
+    let mut app = test_app(&home);
+    std::fs::remove_dir_all(&home).ok();
+    app.panel = Some(Panel::Usage { tab: USAGE_TABS.len() - 1, totals: Default::default() });
+    app.key(KeyEvent::from(KeyCode::Tab));
+    app.key(KeyEvent::from(KeyCode::Char('x')));
+    assert!(matches!(app.panel, Some(Panel::Usage { tab: 0, .. })));
 }
 
 #[test]
