@@ -291,6 +291,7 @@ pub fn subjects(tool: &str, input: &Value, files: &[PathBuf], cwd: &Path) -> Vec
             let paths: Vec<&Value> = ranges.chain([&input["file_path"]]).collect();
             strings(&paths).iter().map(|path| real(crate::tools::hashline::resolve(cwd, path))).collect()
         }
+        "Grep" => strings(&[&input["path"]]).iter().map(|path| real(crate::tools::hashline::resolve(cwd, path))).collect(),
         "WebFetch" => strings(&input["urls"].as_array().into_iter().flatten().chain([&input["url"]]).collect::<Vec<_>>()),
         "Video" => strings(&[&input["source"]]),
         _ => Vec::new(),
@@ -538,6 +539,7 @@ mod tests {
         assert_eq!(subjects("Bash", &json!({"command": "ls"}), &[], &dir), ["ls"]);
         assert_eq!(subjects("WebFetch", &json!({"urls": ["a"], "url": "b"}), &[], &dir), ["a", "b"]);
         assert!(subjects("Grep", &json!({"pattern": "x"}), &[], &dir).is_empty());
+        assert_eq!(subjects("Grep", &json!({"pattern": "x", "path": "/nowhere/.env"}), &[], &dir), ["/nowhere/.env"]);
     }
 
     #[test]

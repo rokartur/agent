@@ -9,7 +9,8 @@ const MAX_BYTES: usize = 50_000;
 /// By its first bytes, as image.rs does: an extension can lie.
 pub fn is_pdf(path: &Path) -> bool {
     let mut start = [0; 5];
-    std::fs::File::open(path).and_then(|mut file| file.read_exact(&mut start)).is_ok() && &start == b"%PDF-"
+    // is_file first: opening a FIFO would block.
+    path.is_file() && std::fs::File::open(path).and_then(|mut file| file.read_exact(&mut start)).is_ok() && &start == b"%PDF-"
 }
 
 /// The text of the pages asked for, through poppler's pdftotext. No anchors: a PDF is not edited by line.
