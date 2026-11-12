@@ -248,6 +248,7 @@ impl App {
         }
         let expanded = self.expanded;
         let spinner = self.working.map(|started| crate::spinner::FRAMES[(started.elapsed().as_millis() / ANIMATION_TICK.as_millis()) as usize % crate::spinner::FRAMES.len()]);
+        let folded = if expanded { HashMap::new() } else { folded_tools(&mut self.entries, width, &self.cwd, spinner) };
         let mut chunks: Vec<Vec<Line>> = Vec::new();
         let mut count = 0;
         let mut prompts = Vec::new();
@@ -257,10 +258,13 @@ impl App {
             let gap = below.is_some_and(|below: usize| blank_between(&self.entries[index].item, &self.entries[below].item));
             let is_prompt = matches!(self.entries[index].item, Item::User(_));
             let running = match &self.entries[index].item {
-                Item::Tool { result: None, started, .. } => Some(*started),
+                Item::Tool { result: None, started, .. } if !folded.contains_key(&index) => Some(*started),
                 _ => None,
             };
-            let lines = self.entries[index].lines(width, expanded, &self.cwd);
+            let lines = match folded.get(&index) {
+                Some(lines) => lines,
+                None => self.entries[index].lines(width, expanded, &self.cwd),
+            };
             if lines.is_empty() {
                 continue;
             }
@@ -625,14 +629,19 @@ impl RunView {
 /// A subagent's session rendered like the main transcript: a blank line between items, except inside a tool or log run.
 pub(super) fn subagent_lines(path: &Path, width: usize, cwd: &Path) -> Result<Vec<Line>, String> {
     let history = Session::history(path)?;
+    let mut entries: Vec<Entry> = history_items(&history.messages).into_iter().map(|item| Entry { item, cache: None }).collect();
+    let mut folded = folded_tools(&mut entries, width, cwd, None);
     let mut lines = Vec::new();
     let mut previous_run = None;
-    for item in history_items(&history.messages) {
-        let item_lines = render_item(&item, width, false, cwd);
+    for (index, entry) in entries.iter_mut().enumerate() {
+        let item_lines = match folded.remove(&index) {
+            Some(lines) => lines,
+            None => entry.lines(width, false, cwd).clone(),
+        };
         if item_lines.is_empty() {
             continue;
         }
-        let run = transcript_run(&item);
+        let run = transcript_run(&entry.item);
         if run.is_none() || run != previous_run {
             lines.push(Vec::new());
         }

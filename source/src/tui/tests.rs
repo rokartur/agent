@@ -552,6 +552,57 @@ fn a_running_tool_shows_its_progress_under_its_row_until_it_ends() {
 }
 
 #[test]
+fn a_run_of_tool_calls_is_one_row_that_counts_them_by_kind() {
+    let call = |name: &str, input: Value, output: Option<&str>| Item::Tool {
+        id: "t".into(),
+        name: name.into(),
+        input,
+        result: output.map(|output| (output.to_string(), false)),
+        progress: None,
+        started: None,
+    };
+    let mut calls = vec![
+        call("Read", json!({"file_path": "a.rs"}), Some("ok")),
+        call("Read", json!({"file_path": "a.rs", "offset": 40}), Some("ok")),
+        call("Read", json!({"paths": ["b.rs", {"file_path": "c.rs"}]}), Some("ok")),
+        call("Grep", json!({"pattern": "x"}), Some("ok")),
+        call("Edit", json!({"file_path": "a.rs"}), Some("ok")),
+        call("Bash", json!({"command": "cargo test"}), Some("ok")),
+    ];
+    let rows = |calls: &[Item]| tool_run_lines(&calls.iter().collect::<Vec<_>>(), 120, Path::new("/repo"), None).iter().map(text).collect::<Vec<_>>();
+    assert_eq!(rows(&calls), ["✓ Read 3 files, searched for 1 pattern, ran 1 command, edited 1 file (ctrl+o to expand)"]);
+    calls.push(call("Bash", json!({"command": "cargo clippy"}), None));
+    assert_eq!(rows(&calls), ["• Read 3 files, searched for 1 pattern, running 2 commands, edited 1 file… (ctrl+o to expand)", "└ Bash cargo clippy"]);
+}
+
+#[test]
+fn folding_spans_collapsed_thinking_and_leaves_failed_and_lone_calls_their_rows() {
+    let entry = |item: Item| Entry { item, cache: None };
+    let call =
+        |name: &str, failed: bool| entry(Item::Tool { id: "t".into(), name: name.into(), input: json!({"file_path": "a.rs"}), result: Some(("ok".into(), failed)), progress: None, started: None });
+    let thinking = entry(Item::Assistant { text: String::new(), thinking: "hm".into() });
+    let mut entries = [call("Read", false), thinking, call("Edit", false), call("Read", true), call("Write", false)];
+    let folded = folded_tools(&mut entries, 80, Path::new("/repo"), None);
+    assert_eq!(text(&folded[&0][0]), "✓ Read 1 file, edited 1 file (ctrl+o to expand)");
+    assert!(folded[&2].is_empty());
+    assert_eq!(folded.len(), 2);
+}
+
+#[test]
+fn the_transcript_folds_a_run_of_tool_calls_until_expanded() {
+    let home = std::env::temp_dir().join(format!("agent-tui-fold-{}", std::process::id()));
+    let mut app = test_app(&home);
+    std::fs::remove_dir_all(&home).ok();
+    for path in ["a.rs", "b.rs"] {
+        app.push(Item::Tool { id: path.into(), name: "Read".into(), input: json!({"file_path": path}), result: Some(("ok".into(), false)), progress: None, started: None });
+    }
+    let tail = |app: &mut App, rows: usize| app.transcript_tail(80, rows).0.iter().map(text).collect::<Vec<_>>();
+    assert_eq!(tail(&mut app, 1), ["✓ Read 2 files (ctrl+o to expand)"]);
+    app.expanded = true;
+    assert_eq!(tail(&mut app, 4), ["✓ Read a.rs", "└ ok", "✓ Read b.rs", "└ ok"]);
+}
+
+#[test]
 fn reading_a_skill_file_shows_the_skill_name() {
     let result = ("body".to_string(), false);
     let lines = render_tool("Read", &json!({"file_path": "/x/skills/verify-web-app/SKILL.md"}), Some(&result), 80, false, Path::new("/repo"));
@@ -821,15 +872,15 @@ fn subagent_lines_render_its_session_file() {
 }
 
 #[test]
-fn subagent_lines_keep_consecutive_tool_calls_together() {
+fn subagent_lines_fold_consecutive_tool_calls_and_keep_tool_rows_together() {
     let dir = std::env::temp_dir().join(format!("agent-subagent-tools-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let session = dir.join("abc123.jsonl");
     let tool = |id: &str, path: &str| json!({"type": "tool_use", "id": id, "name": "Read", "input": {"file_path": path}});
-    let result = |id: &str| json!({"type": "tool_result", "tool_use_id": id, "content": "ok"});
+    let result = |id: &str, failed: bool| json!({"type": "tool_result", "tool_use_id": id, "content": "ok", "is_error": failed});
     let messages = [
-        json!({"role": "assistant", "content": [tool("a", "one.rs"), tool("b", "two.rs")]}),
-        json!({"role": "user", "content": [result("a"), result("b")]}),
+        json!({"role": "assistant", "content": [tool("a", "one.rs"), tool("b", "two.rs"), tool("c", "three.rs")]}),
+        json!({"role": "user", "content": [result("a", false), result("b", false), result("c", true)]}),
         json!({"role": "assistant", "content": [{"type": "text", "text": "Done."}]}),
     ];
     let entries: Vec<String> = messages.iter().map(|message| json!({"type": "message", "message": message}).to_string()).collect();
@@ -837,11 +888,11 @@ fn subagent_lines_keep_consecutive_tool_calls_together() {
     let lines = subagent_lines(&session, 60, Path::new("/repo"));
     std::fs::remove_dir_all(&dir).unwrap();
     let lines: Vec<String> = lines.unwrap().iter().map(text).collect();
-    let one = lines.iter().position(|line| line.contains("one.rs")).unwrap();
-    let two = lines.iter().position(|line| line.contains("two.rs")).unwrap();
+    let folded = lines.iter().position(|line| line.contains("Read 2 files")).unwrap();
+    let failed = lines.iter().position(|line| line.contains("three.rs")).unwrap();
     let done = lines.iter().position(|line| line.contains("Done.")).unwrap();
-    assert!(lines[one..two].iter().all(|line| !line.trim().is_empty()), "{lines:#?}");
-    assert!(lines[two..done].iter().any(|line| line.trim().is_empty()), "{lines:#?}");
+    assert_eq!(failed, folded + 1, "{lines:#?}");
+    assert!(lines[failed..done].iter().any(|line| line.trim().is_empty()), "{lines:#?}");
 }
 
 #[test]
