@@ -1,12 +1,14 @@
+use crossterm::event::{KeyCode, KeyEvent};
 use serde_json::{Value, json};
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
 
-use super::ERROR;
 use super::editor::Editor;
 use super::markdown;
 use super::render::{BRIGHT, Line, MUTED, PLAIN, span, wrap};
-use crate::api;
+use super::{App, ERROR, Item, MODELS_STILL_LOADING, Msg, Panel};
+use crate::api::{self, Delta};
 
 /// pi-btw's side-question prompt.
 const SYSTEM: &str = "You answer quick side questions for a coding-agent user.
@@ -82,6 +84,104 @@ pub fn context(sections: &[String]) -> String {
     }
     let tail: String = text.chars().skip(total - MAX_CONTEXT_CHARS).collect();
     format!("[Earlier context omitted; showing the last {MAX_CONTEXT_CHARS} characters.]\n{tail}")
+}
+
+impl App {
+    /// `/btw question` starts a new side thread on the current transcript; a bare `/btw` reopens the last one.
+    pub(super) fn open_btw(&mut self, question: &str) {
+        if self.btw.as_ref().is_some_and(|btw| btw.streaming) {
+            self.panel = Some(Panel::Btw);
+            self.hint = Some(("btw is still answering".into(), Instant::now()));
+            return;
+        }
+        if question.is_empty() && self.btw.is_some() {
+            self.panel = Some(Panel::Btw);
+            return;
+        }
+        self.btw = Some(Btw::new(self.btw_context()));
+        self.panel = Some(Panel::Btw);
+        if !question.is_empty() {
+            self.ask_btw(question.to_string());
+        }
+    }
+
+    pub(super) fn btw_key(&mut self, key: KeyEvent) {
+        let btw = self.btw.as_mut().expect("the btw panel opens with a thread");
+        match key.code {
+            KeyCode::Esc => {
+                btw.abort.store(true, Ordering::Relaxed);
+                self.panel = None;
+            }
+            KeyCode::Tab => {
+                let Some((_, answer)) = btw.turns.last().filter(|(_, answer)| !answer.is_empty()) else { return };
+                let answer = answer.clone();
+                self.editor.insert(&answer);
+                self.panel = None;
+            }
+            KeyCode::Enter if !btw.streaming && !btw.input.text().trim().is_empty() => {
+                // Checked before the question leaves the input, so it is not lost.
+                if self.model().is_none() {
+                    self.system("btw", MODELS_STILL_LOADING);
+                    return;
+                }
+                let question = self.btw.as_mut().expect("key went to an open btw thread").input.take();
+                self.ask_btw(question.trim().to_string());
+            }
+            _ => _ = btw.input.edit_key(key),
+        }
+    }
+
+    /// Streams the answer on its own thread with the current model and thinking level, no tools.
+    fn ask_btw(&mut self, question: String) {
+        let Some(max_tokens) = self.model().map(|m| m.max_tokens) else {
+            self.system("btw", MODELS_STILL_LOADING);
+            return;
+        };
+        let (model, thinking) = (self.settings.model.clone(), self.settings.thinking.clone());
+        let btw = self.btw.as_mut().expect("asked from an open btw thread");
+        btw.turns.push((question, String::new()));
+        btw.streaming = true;
+        btw.error = None;
+        btw.abort.store(false, Ordering::Relaxed);
+        let request = btw.request(&model, max_tokens, &thinking);
+        let (client, abort, events) = (self.client.clone(), btw.abort.clone(), self.events.clone());
+        std::thread::spawn(move || {
+            let result = client.send(&request, &abort, &mut |delta| {
+                if let Delta::Text(text) = delta {
+                    let _ = events.send(Msg::BtwDelta(text.to_string()));
+                }
+            });
+            let _ = events.send(Msg::BtwDone(result.map(|_| ())));
+        });
+    }
+
+    /// pi-btw's context: user and assistant text plus the assistant's tool calls, without thinking or tool results.
+    fn btw_context(&self) -> String {
+        let mut sections: Vec<String> = Vec::new();
+        let mut assistant_open = false;
+        for entry in &self.entries[self.header_len..] {
+            match &entry.item {
+                Item::User(text) => {
+                    sections.push(format!("User: {}", text.trim()));
+                    assistant_open = false;
+                }
+                Item::Assistant { text, .. } if !text.trim().is_empty() => {
+                    sections.push(format!("Assistant: {}", text.trim()));
+                    assistant_open = true;
+                }
+                Item::Tool { name, input, .. } => {
+                    let call = format!("Tool call: {name}({input})");
+                    match sections.last_mut() {
+                        Some(last) if assistant_open => *last = format!("{last}\n{call}"),
+                        _ => sections.push(format!("Assistant: {call}")),
+                    }
+                    assistant_open = true;
+                }
+                _ => {}
+            }
+        }
+        context(&sections)
+    }
 }
 
 #[cfg(test)]

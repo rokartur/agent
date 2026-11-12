@@ -1,6 +1,11 @@
 use super::*;
 
 impl App {
+    pub(super) fn open_resume(&mut self) {
+        let sessions: Vec<SessionInfo> = Session::list(&self.sessions_dir).into_iter().filter(|s| s.id != self.session_id).collect();
+        self.panel = Some(Panel::Resume(ResumePanel { all: false, index: 0, sessions }));
+    }
+
     pub(super) fn resume_key(&mut self, code: KeyCode) {
         let cwd = self.cwd.display().to_string();
         let Some(Panel::Resume(resume)) = self.panel.as_mut() else { return };
@@ -35,6 +40,35 @@ impl App {
             hint: "↑↓ navigate     tab scope     enter resume     esc close",
         };
         view.render(width, PANEL_ROWS)
+    }
+
+    pub(super) fn open_running(&mut self) {
+        let sessions = crate::serve::live(&self.home).into_iter().filter(|peer| peer.session != self.session_id).collect();
+        self.panel = Some(Panel::Running { index: 0, sessions, confirm: false });
+    }
+
+    pub(super) fn running_key(&mut self, code: KeyCode) {
+        let Some(Panel::Running { index, sessions, confirm }) = self.panel.as_mut() else { return };
+        let stopping = std::mem::take(confirm);
+        match code {
+            KeyCode::Esc => self.panel = None,
+            KeyCode::Up => *index = index.saturating_sub(1),
+            KeyCode::Down => *index = (*index + 1).min(sessions.len().saturating_sub(1)),
+            KeyCode::Enter if !sessions.is_empty() => {
+                let pid = sessions[*index].pid;
+                self.panel = None;
+                self.release_typing_client(|client| client.attach(pid));
+            }
+            KeyCode::Char('x') if !sessions.is_empty() && stopping => {
+                let peer = sessions.remove(*index);
+                *index = (*index).min(sessions.len().saturating_sub(1));
+                if let Err(e) = crate::serve::stop(&self.home, peer.pid) {
+                    self.push(Item::Error(format!("Cannot stop session {}: {e}", peer.session)));
+                }
+            }
+            KeyCode::Char('x') if !sessions.is_empty() => *confirm = true,
+            _ => {}
+        }
     }
 
     pub(super) fn running_panel(&self, index: &usize, sessions: &[Peer], confirm: &bool, width: usize) -> Vec<Line> {
@@ -235,6 +269,13 @@ impl App {
             KeyCode::Up | KeyCode::Esc => self.panel = None,
             _ => {}
         }
+    }
+
+    /// Sorts only on open, so a task that finishes does not move under the cursor while the panel is up.
+    pub(super) fn open_tasks(&mut self, agents: bool) {
+        self.terminals.lock().unwrap().running_first();
+        self.subagents.lock().unwrap().running_first();
+        self.panel = Some(Panel::Tasks { agents, index: 0 });
     }
 
     pub(super) fn tasks_key(&mut self, code: KeyCode) {

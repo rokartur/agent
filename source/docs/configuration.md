@@ -8,7 +8,7 @@ Everything lives under `~/.agents` (the agent dir) and, per project, under `.age
 |---|---|
 | `settings.json` | `settings.rs`; schema and defaults in `src/settings.schema.json`, embedded in the binary. `jq '.properties \| keys' src/settings.schema.json` lists every key. |
 | `accounts.json` | `api/accounts.rs`, see [providers.md](providers.md) |
-| `sessions/<id>.jsonl` | `agent/mod.rs`, see [sessions.md](sessions.md) |
+| `sessions/<id>.jsonl` | `agent/session.rs`, see [sessions.md](sessions.md) |
 | `sessions/<id>/` | the session's folder: `pages/` (`tools/page.rs`) and `workflows/` (`agent/workflow.rs`) |
 | `snapshots/` | `agent/snapshots.rs`: a private git repo for rewind |
 | `skills/<name>/SKILL.md` | `agent/prompt.rs` |
