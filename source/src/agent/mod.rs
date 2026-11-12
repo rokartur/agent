@@ -1769,11 +1769,12 @@ impl Agent {
 
     /// Drops message `index` and every later one from the context, and leaves the files as they are.
     pub fn forget_from(&mut self, index: usize) -> Result<(), String> {
+        // Saved first: a rewind only in memory would come back on resume.
+        self.session.append(&json!({"type": "rewind", "index": index}))?;
         self.checkpoints.retain(|checkpoint| checkpoint.at < index);
         self.file_checkpoints.retain(|checkpoint| checkpoint.at < index);
         self.compactions.retain(|compaction| compaction.cut <= index);
         self.messages.truncate(index);
-        self.session.append(&json!({"type": "rewind", "index": index}))?;
         self.estimate_context_tokens();
         Ok(())
     }
@@ -3658,6 +3659,23 @@ mod tests {
         assert_eq!(read, [("first".to_string(), 1)]);
         assert_eq!(same_size_and_mtime, read, "an unchanged size and mtime keep the summary from the index");
         assert_eq!(appended, [("other".to_string(), 2)]);
+    }
+
+    #[test]
+    fn a_rewind_that_cannot_be_saved_leaves_the_history_as_it_was() {
+        let home = std::env::temp_dir().join(format!("agent-rewind-unsaved-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let cwd = home.join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let settings = crate::settings::load(&home).unwrap();
+        let session = Session::start(&home.join("sessions"), true, &cwd, "m").unwrap();
+        let mut agent = Agent::new(Client::new(&home).unwrap(), &settings, home.clone(), cwd, session, home.join("sessions"), None);
+        agent.messages = vec![json!({"role": "user", "content": "a"}), json!({"role": "user", "content": "b"})];
+        let path = agent.session.path.clone().unwrap();
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        assert!(agent.forget_from(1).is_err());
+        assert_eq!(agent.messages.len(), 2);
     }
 
     #[test]

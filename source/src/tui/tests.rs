@@ -58,6 +58,22 @@ fn export_and_import_expand_a_leading_tilde_to_home() {
 }
 
 #[test]
+fn the_mouse_over_a_full_screen_view_leaves_the_hidden_transcript_alone() {
+    let home = std::env::temp_dir().join(format!("agent-tui-hidden-mouse-{}", std::process::id()));
+    std::fs::create_dir_all(&home).unwrap();
+    let mut app = test_app(&home);
+    let wheel = MouseEvent { kind: MouseEventKind::ScrollUp, row: 0, column: 0, modifiers: KeyModifiers::NONE };
+    app.panel = Some(Panel::Diff { files: Vec::new(), index: 0, scroll: 0 });
+    app.mouse(wheel);
+    app.panel = Some(Panel::Terminal { index: 0, scroll: 0, loaded: None, lines: Vec::new() });
+    app.mouse(wheel);
+    assert_eq!(app.scroll, 0);
+    app.panel = None;
+    app.mouse(wheel);
+    assert_eq!(app.scroll, app.settings.scroll_lines);
+}
+
+#[test]
 fn a_key_typed_before_the_trust_question_appeared_does_not_answer_it() {
     let home = std::env::temp_dir().join(format!("agent-tui-trust-{}", std::process::id()));
     std::fs::create_dir_all(home.join("project/.agents")).unwrap();

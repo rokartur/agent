@@ -267,14 +267,25 @@ pub fn parse_rule(rule: &str) -> Option<(&str, Option<&str>)> {
     (!tool.is_empty() && !tool.contains(')') && pattern != Some("")).then_some((tool, pattern))
 }
 
+/// The tools `subjects` has an arm for: a pattern on any other tool has nothing to match.
+pub const SUBJECT_TOOLS: [&str; 10] = ["Bash", "Write", "ReplaceLines", "Edit", "InsertLines", "ImageGenerate", "Read", "Grep", "WebFetch", "Video"];
+
 /// A rule that does not parse is an error: a deny rule that matched nothing would fail open.
 pub fn check_rules(rules: &Rules) -> Result<(), String> {
     for (list, rules) in [("allow", &rules.allow), ("ask", &rules.ask), ("deny", &rules.deny)] {
         if let Some(rule) = rules.iter().find(|rule| parse_rule(rule).is_none()) {
             return Err(format!("permissions.{list}: \"{rule}\" is not Tool or Tool(pattern)"));
         }
+        if let Some(rule) = rules.iter().find(|rule| pattern_never_matches(rule)) {
+            return Err(format!("permissions.{list}: \"{rule}\" has a pattern, which only {} take; name the tool alone", SUBJECT_TOOLS.join(", ")));
+        }
     }
     Ok(())
+}
+
+/// A deny rule or a before_tool hook like this would guard nothing, silently.
+pub fn pattern_never_matches(rule: &str) -> bool {
+    parse_rule(rule).is_some_and(|(tool, pattern)| pattern.is_some() && !SUBJECT_TOOLS.iter().any(|name| wildcard(tool, name)))
 }
 
 /// What a rule's pattern is matched against: the command, the files with links and `..` resolved, or the URLs.
@@ -525,6 +536,19 @@ mod tests {
         assert_eq!(verdict(&allow, "mcp__gitlab__list_issues", &[], cwd), None);
         assert_eq!(verdict(&allow, "WebFetch", &strings(&["https://docs.rs/a/b"]), cwd), Some(Verdict::Allow));
         assert_eq!(verdict(&allow, "WebFetch", &strings(&["https://docs.rs/a", "https://evil.example/x"]), cwd), None);
+    }
+
+    #[test]
+    fn a_pattern_on_a_tool_without_subjects_is_an_error_not_a_rule_that_never_matches() {
+        for bad in ["Agent(x)", "mcp__github__*(repo)", "WebS*(rust)"] {
+            let error = check_rules(&rules(&[], &[], &[bad])).unwrap_err();
+            assert!(error.starts_with(&format!("permissions.deny: \"{bad}\" has a pattern")), "{error}");
+        }
+        assert_eq!(check_rules(&rules(&["Agent", "mcp__github__*"], &["*(src/**)"], &["Ed*(.env*)", "WebFetch(https://x/*)"])), Ok(()));
+        let input = json!({"command": "x", "file_path": "x", "path": "x", "url": "x", "source": "x"});
+        for tool in SUBJECT_TOOLS {
+            assert!(!subjects(tool, &input, &[PathBuf::from("x")], Path::new("/w")).is_empty(), "{tool}");
+        }
     }
 
     #[test]
