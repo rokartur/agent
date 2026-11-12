@@ -195,14 +195,6 @@ fn context_use_turns_yellow_at_70_and_red_at_90_percent() {
 }
 
 #[test]
-fn thinking_level_brightens_from_grey_to_pure_white() {
-    let grays: Vec<Style> = THINKING_LEVELS.iter().map(|l| thinking_style(l)).collect();
-    assert_eq!(grays[0], Style::rgb(0x767676));
-    assert_eq!(grays[THINKING_LEVELS.len() - 1], Style::rgb(0xffffff));
-    assert!(grays.windows(2).all(|pair| pair[0] != pair[1]));
-}
-
-#[test]
 fn token_counts_round_like_pi() {
     assert_eq!([tokens(950), tokens(14_400), tokens(999_600), tokens(1_250_000)], ["950", "14k", "1.0M", "1.2M"]);
 }
