@@ -126,6 +126,8 @@ pub struct Settings {
     pub default_environment: String,
     /// One of `MID_TURN`: a message sent while the agent works reaches it at the next tool call, or waits for the turn to end.
     pub mid_turn: String,
+    /// One of `WORKING_ANIMATIONS`: the glyph beside the working label and on a turn's done row.
+    pub working_animation: String,
     /// Shell commands the TUI runs in the background at start, e.g. a global tool update.
     pub on_start: Vec<String>,
     /// Commands that run before a matching tool call; one that fails refuses the call.
@@ -177,6 +179,7 @@ pub const PRUNE_SESSIONS: [&str; 6] = ["never", "24h", "3d", "7d", "14d", "30d"]
 pub const PROVIDER_SORTS: [&str; 3] = ["default", "alphabetical", "manual"];
 pub const CONFLICT_PRIORITIES: [&str; 2] = ["project", "global"];
 pub const MID_TURN: [&str; 2] = ["steering", "queued"];
+pub const WORKING_ANIMATIONS: [&str; 5] = ["star", "fill", "radar", "arc", "diamond"];
 /// Below this a condensed batch costs more in cache rewrites than its summary saves on later cache reads.
 pub const CONDENSE_MIN_BATCH_CHARS: u64 = 10_000;
 /// "agent" on a phone keypad.
@@ -555,6 +558,7 @@ fn from_json(own: &Value) -> Settings {
         environments: string_list(&own["environments"]),
         default_environment: own["default_environment"].as_str().filter(|name| !name.is_empty()).unwrap_or(crate::tailnet::LOCAL).to_string(),
         mid_turn: level(&own["mid_turn"], &MID_TURN, "steering"),
+        working_animation: level(&own["working_animation"], &WORKING_ANIMATIONS, "star"),
         on_start: string_list(&own["on_start"]),
         // An entry without its strings is kept empty, so load refuses it.
         before_tool: own["before_tool"]
@@ -696,6 +700,7 @@ fn to_json(settings: &Settings) -> Value {
         "environments": settings.environments,
         "default_environment": settings.default_environment,
         "mid_turn": settings.mid_turn,
+        "working_animation": settings.working_animation,
         "on_start": settings.on_start,
         "before_tool": settings.before_tool.iter().map(|hook| json!({"match": hook.matches, "command": hook.command})).collect::<Vec<_>>(),
         "custom_providers": settings.custom_providers.iter().map(|p| json!({
@@ -976,6 +981,7 @@ mod tests {
         settings.update_channel = "pre-release".into();
         settings.prune_sessions = "7d".into();
         settings.mid_turn = "queued".into();
+        settings.working_animation = "radar".into();
         settings.on_start = vec!["echo started".into()];
         settings.lsp.get_mut("rust").unwrap().command = "ra-multiplex".into();
         save(&home, &to_json(&settings)).unwrap();
@@ -1022,6 +1028,7 @@ mod tests {
         assert_eq!(properties["update_channel"]["enum"], json!(crate::update::CHANNELS));
         assert_eq!(properties["prune_sessions"]["enum"], json!(PRUNE_SESSIONS));
         assert_eq!(properties["mid_turn"]["enum"], json!(MID_TURN));
+        assert_eq!(properties["working_animation"]["enum"], json!(WORKING_ANIMATIONS));
         assert_eq!(properties["provider_sort"]["enum"], json!(PROVIDER_SORTS));
         assert_eq!(properties["conflict_priority"]["enum"], json!(CONFLICT_PRIORITIES));
     }

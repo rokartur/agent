@@ -40,6 +40,7 @@ pub(super) enum Setting {
     HeadroomUrl,
     HeadroomToken,
     MidTurn,
+    WorkingAnimation,
     MessageThreads,
     SmallModel,
     OutputStyle,
@@ -85,6 +86,7 @@ impl Setting {
             Setting::HeadroomUrl => "Headroom URL",
             Setting::HeadroomToken => "Headroom token",
             Setting::MidTurn => "Messages while working",
+            Setting::WorkingAnimation => "Working animation",
             Setting::MessageThreads => "Message threads",
             Setting::SmallModel => "Small model",
             Setting::OutputStyle => "Output style",
@@ -100,7 +102,7 @@ pub(super) const SETTING_SECTIONS: [(&str, &[Setting]); 5] = {
         ("Context", &[AutoCompact, CompactionReserve, KeepRecent, Condense, CondenseModel, CondenseMinBatch, CacheTtl, MessageThreads]),
         ("Accounts", &[SwitchAt, WhenAllOverLimit, FallbackModel, ProviderOrder]),
         ("Modes", &[OutputStyle, Ponytail, Caveman, Rtk, HeadroomProxy, HeadroomUrl, HeadroomToken, ConflictPriority]),
-        ("Interface", &[ExpandTools, FooterCost, FooterAccount, Notifications, ProgressBar, ScrollLines, MenuRows, CopyOnSelect, UpdateChannel, PruneSessions, MidTurn]),
+        ("Interface", &[ExpandTools, FooterCost, FooterAccount, Notifications, ProgressBar, ScrollLines, MenuRows, CopyOnSelect, UpdateChannel, PruneSessions, MidTurn, WorkingAnimation]),
     ]
 };
 /// The settings tab after `SETTING_SECTIONS`, drawn by `Panel::Profiles`.
@@ -203,6 +205,7 @@ impl App {
             FooterAccount => s.footer_account = !s.footer_account,
             ProgressBar => s.progress_bar = !s.progress_bar,
             MidTurn => s.mid_turn = step(&MID_TURN, &s.mid_turn.as_str(), forward).to_string(),
+            WorkingAnimation => s.working_animation = step(&WORKING_ANIMATIONS, &s.working_animation.as_str(), forward).to_string(),
             MessageThreads => s.message_threads = !s.message_threads,
             OutputStyle => s.output_style = step(&OUTPUT_STYLES, &s.output_style.as_str(), forward).to_string(),
             Model | CondenseModel | FallbackModel | ReviewerModel | SubagentModel | SmallModel | ContextWindow | HeadroomUrl | HeadroomToken => {
@@ -264,6 +267,7 @@ impl App {
             },
             Setting::HeadroomToken => vec![span(if s.headroom_token.is_empty() { "none" } else { "set" }, BRIGHT.bold()), span("   enter edit", MUTED)],
             Setting::MidTurn => choices(MID_TURN.map(String::from), &s.mid_turn),
+            Setting::WorkingAnimation => choices(WORKING_ANIMATIONS.map(String::from), &s.working_animation),
             Setting::MessageThreads => {
                 if s.message_threads && !self.client.message_threads() {
                     [on_off_choices(true), vec![span("  unused behind headroom or ANTHROPIC_BASE_URL", MUTED)]].concat()

@@ -60,7 +60,7 @@ use crate::api::models::{self, Model};
 use crate::api::oauth::Tokens;
 use crate::api::{AccountStatus, AccountView, Client, Delta, Usage};
 use crate::settings::THINKING_LEVELS;
-use crate::settings::{self, CACHE_TTLS, CONFLICT_PRIORITIES, MID_TURN, PROVIDER_SORTS, PRUNE_SESSIONS, SPEEDS, Settings, model_key};
+use crate::settings::{self, CACHE_TTLS, CONFLICT_PRIORITIES, MID_TURN, PROVIDER_SORTS, PRUNE_SESSIONS, SPEEDS, Settings, WORKING_ANIMATIONS, model_key};
 use crate::tools::bg::{Status as TerminalStatus, Terminal, Terminals};
 use crate::tools::goal::{Goal, Status as GoalStatus};
 use crate::tools::plan::Plan;
@@ -92,6 +92,7 @@ const MODELS_STILL_LOADING: &str = "The model lists are still loading.";
 const TOOL_OUTPUT_LINES: usize = 20;
 /// One line per tick while a selection drag rests on the transcript edge.
 const ANIMATION_TICK: Duration = Duration::from_millis(80);
+const DONE_FLASH: Duration = Duration::from_millis(400);
 const HINT_LIFETIME: Duration = Duration::from_millis(1500);
 /// Other sessions and terminals add worktrees, switch branches and edit files, so the footer polls git.
 const GIT_REFRESH: Duration = Duration::from_secs(3);
@@ -372,6 +373,8 @@ struct App {
     retract: bool,
     recording: Option<voice::Recording>,
     transcribing: Option<Instant>,
+    /// When the last turn ended, for the flash on its done row.
+    turn_ended: Option<Instant>,
     /// The attached terminals, each drawn the frame sized to the smallest of them.
     clients: Vec<server::Client>,
     /// The client the last input came from, which /detach lets go.
@@ -604,6 +607,7 @@ fn event_loop(app: &mut App, inbox: &Receiver<Msg>) -> Result<(), String> {
         } else if app.working.is_some()
             || app.hint.is_some()
             || app.transcribing.is_some()
+            || app.turn_ended.is_some_and(|ended| ended.elapsed() < DONE_FLASH)
             || (matches!(app.panel, Some(Panel::Tasks { .. } | Panel::Terminal { .. })) && (app.subagents.lock().unwrap().running() > 0 || app.terminals.lock().unwrap().running() > 0))
         {
             ANIMATION_TICK
@@ -687,6 +691,7 @@ impl App {
             retract: false,
             recording: None,
             transcribing: None,
+            turn_ended: None,
             clients: Vec::new(),
             typing_client: None,
             pending_page: None,
@@ -1872,6 +1877,7 @@ impl App {
                 self.spent.add(spent);
                 let _ = self.commands.send(Command::SaveSpent(spent));
                 self.push(Item::Done { took, usage, total: self.spent.time });
+                self.turn_ended = Some(Instant::now());
             }
         }
         if matches!(*self.plan.lock().unwrap(), Plan::Ready(_)) && self.panel.is_none() {
