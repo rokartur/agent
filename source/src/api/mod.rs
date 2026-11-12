@@ -623,7 +623,8 @@ impl Client {
         Ok(reply)
     }
 
-    fn try_send(&self, account: &Account, request: &Value, abort: &AtomicBool, on_delta: &mut dyn FnMut(Delta)) -> Result<Reply, ApiError> {
+    /// The request `account` sends for `request`, and the parser its reply stream needs.
+    fn outgoing(&self, account: &Account, request: &Value) -> Result<Outgoing, ApiError> {
         let (headroom, headroom_token) = {
             let state = self.state.lock().unwrap();
             (state.headroom.clone(), state.headroom_token.clone())
@@ -641,7 +642,7 @@ impl Client {
             &without_google_thoughts
         };
         let mut fallback = None;
-        let (call, body) = match (account.provider.as_str(), &account.secret) {
+        let (call, body, parser) = match (account.provider.as_str(), &account.secret) {
             (_, Secret::ApiKey(key)) if let Some(custom) = &custom => {
                 let id = request["model"].as_str().unwrap_or_default();
                 let id = id.split_once('/').map_or(id, |(_, id)| id);
@@ -653,11 +654,11 @@ impl Client {
                     for field in ["thinking", "output_config", "speed"] {
                         body.as_object_mut().expect("a request is an object").remove(field);
                     }
-                    (call, body)
+                    (call, body, Parser::Messages)
                 } else {
                     let call = self.http.post(format!("{}/chat/completions", custom.base_url)).header("accept", "text/event-stream");
                     let call = if key.is_empty() { call } else { call.header("authorization", format!("Bearer {key}")) };
-                    (call, openai_chat::request(request, id))
+                    (call, openai_chat::request(request, id), Parser::OpenAiChat)
                 }
             }
             ("anthropic", secret) => {
@@ -671,7 +672,7 @@ impl Client {
                 // Every request of a thread names its beta; the API compares the set with the create's.
                 let thread_beta = if body.get("thread").is_some() { format!(",{MESSAGE_THREADS_BETA}") } else { String::new() };
                 match secret {
-                    Secret::ApiKey(key) => (call.header("x-api-key", key).header("anthropic-beta", format!("{THINKING_BETA}{thread_beta}")), body),
+                    Secret::ApiKey(key) => (call.header("x-api-key", key).header("anthropic-beta", format!("{THINKING_BETA}{thread_beta}")), body, Parser::Messages),
                     Secret::OAuth(tokens) => {
                         // A continue carries no system: the thread keeps the create's, identity block included.
                         if body["thread"]["type"] != "continue" {
@@ -685,7 +686,7 @@ impl Client {
                             .header("user-agent", CLAUDE_CODE_USER_AGENT)
                             .header("x-app", "cli")
                             .header("anthropic-dangerous-direct-browser-access", "true");
-                        (call, body)
+                        (call, body, Parser::Messages)
                     }
                 }
             }
@@ -711,7 +712,7 @@ impl Client {
                 {
                     thinking.remove("block_binding");
                 }
-                (call, body)
+                (call, body, Parser::Messages)
             }
             (copilot::PROVIDER, Secret::OAuth(tokens)) => {
                 let id = request["model"].as_str().unwrap_or_default();
@@ -724,7 +725,7 @@ impl Client {
                 for (name, value) in copilot::HEADERS.into_iter().chain(copilot::request_headers(&body)) {
                     call = call.header(name, value);
                 }
-                (call, body)
+                (call, body, Parser::OpenAiChat)
             }
             (google::ANTIGRAVITY, Secret::OAuth(tokens)) => {
                 let app = &google::ANTIGRAVITY_APP;
@@ -736,7 +737,8 @@ impl Client {
                         .header("user-agent", google::user_agent())
                 };
                 fallback = app.fallback.map(call_to);
-                (call_to(app.base), google::request(app, request, tokens.account_id.as_deref().unwrap_or_default(), &self.cache_key))
+                let body = google::request(app, request, tokens.account_id.as_deref().unwrap_or_default(), &self.cache_key);
+                (call_to(app.base), body, Parser::Google { owner: google::signature_owner(google::ANTIGRAVITY, google::wire_model(request)) })
             }
             ("openai-codex", Secret::OAuth(tokens)) => {
                 let call = with_proxy_token(self.http.post(format!("{chatgpt_base}/codex/responses")), proxy_token.as_deref())
@@ -746,12 +748,17 @@ impl Client {
                     .header("originator", "pi")
                     .header("accept", "text/event-stream")
                     .header("session-id", &self.cache_key);
-                (call, codex::request(request, &self.cache_key))
+                (call, codex::request(request, &self.cache_key), Parser::Codex)
             }
             (provider, Secret::ApiKey(_)) => return Err(ApiError::fatal(format!("{provider} accounts need /login, not an API key."))),
             (provider, Secret::OAuth(_)) => return Err(ApiError::fatal(format!("{provider} accounts need an API key, not /login."))),
         };
         let hint = headroom.map(|url| format!(" Is `headroom proxy` running on {url}?")).unwrap_or_default();
+        Ok(Outgoing { call, fallback, body, parser, hint })
+    }
+
+    fn try_send(&self, account: &Account, request: &Value, abort: &AtomicBool, on_delta: &mut dyn FnMut(Delta)) -> Result<Reply, ApiError> {
+        let Outgoing { call, fallback, body, parser, hint } = self.outgoing(account, request)?;
         let body = body.to_string();
         let send = |call: ureq::RequestBuilder<ureq::typestate::WithBody>| call.header("content-type", "application/json").send(body.as_str());
         let mut sent = send(call);
@@ -771,12 +778,11 @@ impl Client {
             let code = error["error"]["details"]["error_code"].as_str().or(error["error"]["type"].as_str()).unwrap_or_default().to_string();
             return Err(ApiError { message: format!("API error {status}: {}", text.trim()), retryable, quota, code });
         }
-        match account.provider.as_str() {
-            _ if custom.as_ref().is_some_and(|custom| custom.api == CustomApi::OpenAi) => openai_chat::parse_stream(&mut reader, abort, on_delta),
-            copilot::PROVIDER => openai_chat::parse_stream(&mut reader, abort, on_delta),
-            "openai-codex" => codex::parse_stream(&mut reader, abort, on_delta),
-            google::ANTIGRAVITY => google::parse_stream(&mut reader, &google::signature_owner(google::ANTIGRAVITY, google::wire_model(request)), abort, on_delta),
-            _ => parse_stream(&mut reader, abort, on_delta),
+        match parser {
+            Parser::Messages => parse_stream(&mut reader, abort, on_delta),
+            Parser::OpenAiChat => openai_chat::parse_stream(&mut reader, abort, on_delta),
+            Parser::Codex => codex::parse_stream(&mut reader, abort, on_delta),
+            Parser::Google { owner } => google::parse_stream(&mut reader, &owner, abort, on_delta),
         }
     }
 
@@ -1204,6 +1210,25 @@ pub fn plain_request(model: &str, system: &str, prompt: &str, max_tokens: u64) -
 
 /// No byte for this long means the stream died without a TCP reset; ureq's `timeout_recv_body` caps the whole body instead.
 const STREAM_IDLE: Duration = Duration::from_secs(120);
+
+/// How a provider's reply stream is read.
+#[derive(Debug, PartialEq)]
+enum Parser {
+    Messages,
+    OpenAiChat,
+    Codex,
+    Google { owner: String },
+}
+
+/// One request ready to send: its call, a second endpoint tried on failure, its body and its reply parser.
+struct Outgoing {
+    call: ureq::RequestBuilder<ureq::typestate::WithBody>,
+    fallback: Option<ureq::RequestBuilder<ureq::typestate::WithBody>>,
+    body: Value,
+    parser: Parser,
+    /// Appended to a connection error.
+    hint: String,
+}
 
 /// `body` read on its own thread, so a stalled stream fails after `idle` and Esc ends it at once.
 /// A read on a stalled body that a caller gives up on stays blocked on that thread until the socket closes.
@@ -1762,6 +1787,31 @@ mod tests {
         assert_eq!(ping["model"], "a/one:free");
         // A free model hits its rate limit often, so OpenRouter moves the ping to the next one.
         assert_eq!(ping["fallbacks"], json!([{"model": "b/two:free"}]));
+    }
+
+    #[test]
+    fn each_provider_gets_its_endpoint_and_parser() {
+        let home = std::env::temp_dir().join(format!("agent-outgoing-{}", std::process::id()));
+        let client = Client::new(&home).unwrap();
+        let custom = |name: &str, api| CustomProvider { name: name.into(), base_url: "http://x".into(), api_key_env: String::new(), api, models: Vec::new() };
+        client.state.lock().unwrap().custom_providers = vec![custom("own-anthropic", CustomApi::Anthropic), custom("own-openai", CustomApi::OpenAi)];
+        let request = json!({"model": "m", "max_tokens": 10, "messages": [{"role": "user", "content": "hi"}]});
+        let tokens = oauth::Tokens { access: "a".into(), refresh: "r".into(), expires: u64::MAX, account_id: Some("p".into()) };
+        let google = Parser::Google { owner: google::signature_owner(google::ANTIGRAVITY, google::wire_model(&request)) };
+        let rows = [
+            ("own-anthropic", Secret::ApiKey("k".into()), Parser::Messages, "max_tokens"),
+            ("own-openai", Secret::ApiKey("k".into()), Parser::OpenAiChat, "stream_options"),
+            ("anthropic", Secret::OAuth(tokens.clone()), Parser::Messages, "system"),
+            ("openrouter", Secret::ApiKey("k".into()), Parser::Messages, "max_tokens"),
+            (copilot::PROVIDER, Secret::OAuth(tokens.clone()), Parser::OpenAiChat, "stream_options"),
+            (google::ANTIGRAVITY, Secret::OAuth(tokens.clone()), google, "project"),
+            ("openai-codex", Secret::OAuth(tokens), Parser::Codex, "input"),
+        ];
+        for (provider, secret, parser, marker) in rows {
+            let outgoing = client.outgoing(&Account { provider: provider.into(), name: "n".into(), secret }, &request).map_err(|e| e.message).unwrap();
+            assert_eq!((provider, &outgoing.parser, outgoing.body.get(marker).is_some()), (provider, &parser, true), "{}", outgoing.body);
+        }
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]
