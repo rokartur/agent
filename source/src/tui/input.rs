@@ -3,6 +3,10 @@ use super::*;
 impl App {
     /// pj's mouse selection over the transcript: release copies, a drag past its top or bottom scrolls.
     pub(super) fn mouse(&mut self, mouse: MouseEvent) {
+        // frame draws no transcript under these, so the layout it left is not on screen.
+        if matches!(self.panel, Some(Panel::Diff { .. } | Panel::Terminal { .. })) {
+            return;
+        }
         let (visible, _) = self.transcript_view;
         let row = mouse.row as usize;
         self.edge_drag = None;
