@@ -338,6 +338,9 @@ impl Anchors {
     }
 
     pub fn owner_of(&self, anchor: &str) -> Result<PathBuf, String> {
+        if anchor.parse::<usize>().is_ok() {
+            return Err(format!("[E_BAD_SHAPE] \"{anchor}\" is a line number, not an anchor. Read the file from offset {anchor} and send the 4 letters before │."));
+        }
         self.owner.get(anchor).map(|owner| owner.to_path_buf()).ok_or_else(|| format!("[E_STALE_ANCHOR] \"{anchor}\" is not owned in this session. Call read() on the target file first."))
     }
 
@@ -788,6 +791,12 @@ mod tests {
         assert_eq!(lines[4], format!(" {}│four", a[3]));
         let stale = anchors.replace(&json!({"remove_from": a[1], "remove_to": a[1], "text": "x"})).unwrap_err();
         assert!(stale.starts_with("[E_STALE_ANCHOR]"));
+    }
+
+    #[test]
+    fn a_line_number_sent_as_an_anchor_is_named_as_one() {
+        let error = Anchors::new("s").insert(&json!({"anchor": "185", "direction": "after", "text": "x"})).unwrap_err();
+        assert_eq!(error, "[E_BAD_SHAPE] \"185\" is a line number, not an anchor. Read the file from offset 185 and send the 4 letters before │.");
     }
 
     #[test]
