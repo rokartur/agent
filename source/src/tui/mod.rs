@@ -88,9 +88,9 @@ const OK: Style = Style::rgb(0x3fdc6a);
 const ERROR: Style = Style::rgb(0xff5c57);
 const TOOL_NAME: Style = Style::rgb(0xffffff);
 const TOOL_ARGS: Style = Style::rgb(0x858585);
-const TOOL_INPUT: Style = Style::rgb(0xbbbbbb);
+const NOTICE_TEXT: Style = Style::rgb(0xbbbbbb);
 const PROMPT_BG: u8 = 237;
-const PROMPT_LEAD: Style = SYSTEM.bold();
+const PROMPT_LEAD: Style = TOOL_NAME.bold();
 
 enum Msg {
     Attached(server::Client),
@@ -5679,7 +5679,7 @@ fn render_item(item: &Item, width: usize, expanded: bool, cwd: &Path) -> Vec<Lin
         Item::Lines(lines) => lines.clone(),
         Item::System { source, text, tone } => {
             let (icon, style) = match tone {
-                Tone::Info => ("·", DIM),
+                Tone::Info => ("ℹ", SYSTEM),
                 Tone::Warn => ("!", WARN),
                 Tone::Error => ("✗", ERROR),
             };
@@ -5728,10 +5728,10 @@ fn image_row(tag: &str) -> Line {
 fn system_lines(icon: &str, source: &str, text: &str, style: Style, width: usize) -> Vec<Line> {
     let hang = vec![span("  ", PLAIN)];
     let mut lines = Vec::new();
-    let first_line = if style == ERROR { ERROR } else { TOOL_ARGS };
+    let first_line = if style == ERROR { ERROR } else { NOTICE_TEXT };
     for (index, line) in text.lines().enumerate() {
         let spans = if index == 0 {
-            vec![span(icon, style), span(" ", PLAIN), span(source, style), span(" ", PLAIN), span(line, first_line)]
+            vec![span(icon, style), span(" ", PLAIN), span(format!("{source}:"), style), span(" ", PLAIN), span(line, first_line)]
         } else if let Some((label, description)) = line.split_once('\t') {
             // A `label\tdescription` row wraps its description under the description column.
             let column = vec![span(" ".repeat(3 + render::width(label)), PLAIN)];
@@ -5786,7 +5786,7 @@ fn render_tool(name: &str, input: &Value, result: Option<&(String, bool)>, width
     let header = match skill_name(name, input) {
         Some(skill) => {
             let hint = if expanded { "" } else { " (ctrl+o to expand)" };
-            vec![span(icon, icon_style), span(" Skill ", TOOL_NAME), span(skill, TOOL_INPUT), span(hint, DIM)]
+            vec![span(icon, icon_style), span(" Skill ", TOOL_NAME), span(skill, TOOL_ARGS), span(hint, DIM)]
         }
         None => {
             let (tool, server) = match mcp_tool(name) {
@@ -5796,7 +5796,7 @@ fn render_tool(name: &str, input: &Value, result: Option<&(String, bool)>, width
             let mut header = vec![span(icon, icon_style), span(format!(" {tool}"), TOOL_NAME)];
             let args = tool_args(name, input, cwd);
             if !args.is_empty() {
-                header.push(span(format!(" {args}"), TOOL_INPUT));
+                header.push(span(format!(" {args}"), TOOL_ARGS));
             }
             if let Some(server) = server {
                 header.push(span(format!(" MCP: {server}"), DIM));
@@ -6161,7 +6161,7 @@ fn context_lines(split: agent::context::PerPart, window: u64, session: Usage, la
 
 fn hotkeys_lines() -> Vec<Line> {
     let key_width = HOTKEYS.iter().flat_map(|(_, keys)| keys.iter()).map(|(key, _)| key.len()).max().unwrap_or(0);
-    let mut lines = vec![vec![span("·", DIM), span(" ", PLAIN), span("hotkeys", DIM)]];
+    let mut lines = vec![vec![span("ℹ", SYSTEM), span(" ", PLAIN), span("hotkeys", SYSTEM)]];
     for (group, keys) in HOTKEYS {
         lines.push(vec![span(format!("  {group}"), TOOL_NAME.bold())]);
         for (key, action) in keys {
@@ -7013,7 +7013,7 @@ mod tests {
             view.lines(80, Path::new("/")).iter().map(text).collect::<Vec<_>>().join("\n")
         };
         assert!(shown(crate::agent::subagent::scan_run()).starts_with("✗"));
-        assert_eq!(shown(crate::agent::subagent::scan_run_on("arturs-mac-studio")), "· task scan");
+        assert_eq!(shown(crate::agent::subagent::scan_run_on("arturs-mac-studio")), "· task: scan");
     }
 
     #[test]
@@ -7244,7 +7244,7 @@ mod tests {
     #[test]
     fn hotkeys_list_groups_with_keys_in_one_column() {
         let rows: Vec<String> = hotkeys_lines().iter().map(text).collect();
-        assert_eq!(rows[0], "· hotkeys");
+        assert_eq!(rows[0], "ℹ hotkeys");
         assert_eq!(rows[1], "  Send");
         assert!(rows[2].starts_with("    Enter  "), "{rows:?}");
         let column = |row: &String| row.trim_start().len() - row.trim_start().split("  ").skip(1).collect::<Vec<_>>().join("  ").trim_start().len();
@@ -7278,7 +7278,7 @@ mod tests {
         let row = |name: &str, input: Value, output: &str, failed: bool| render_tool(name, &input, Some(&(output.to_string(), failed)), 80, false, Path::new("/repo")).remove(0);
         let read = row("Read", json!({"file_path": "/repo/src/a.rs"}), "1\n2\n3\n", false);
         assert_eq!(text(&read), "✓ Read src/a.rs · 3 lines");
-        assert_eq!(read[2].style, TOOL_INPUT);
+        assert_eq!(read[2].style, TOOL_ARGS);
         let failed = row("Bash", json!({"command": "cargo test"}), "running\ntest x ... FAILED\n\n", true);
         assert_eq!(text(&failed), "✗ Bash cargo test · test x ... FAILED");
         assert_eq!(failed[0].style, ERROR);
@@ -7369,25 +7369,25 @@ mod tests {
 
     #[test]
     fn log_row_wraps_under_its_source() {
-        let lines = system_lines("✗", "error", "aaa bbb ccc\nddd", ERROR, 13);
+        let lines = system_lines("✗", "error", "aaa bbb ccc\nddd", ERROR, 14);
         let rows: Vec<String> = lines.iter().map(text).collect();
-        assert_eq!(rows, ["✗ error aaa", "  bbb ccc", "  ddd"]);
+        assert_eq!(rows, ["✗ error: aaa", "  bbb ccc", "  ddd"]);
     }
 
     #[test]
     fn a_tabbed_log_row_wraps_its_description_under_the_description_column() {
         let lines = system_lines("·", "help", "2 commands\n/plan\taaa bbb ccc\n/btw\t", DIM, 16);
         let rows: Vec<String> = lines.iter().map(text).collect();
-        assert_eq!(rows, ["· help 2 ", "  commands", "  /plan aaa bbb ", "        ccc", "  /btw "]);
+        assert_eq!(rows, ["· help: 2 ", "  commands", "  /plan aaa bbb ", "        ccc", "  /btw "]);
     }
 
     #[test]
     fn a_system_line_takes_its_mark_and_color_from_its_tone() {
         let row = |tone| render_item(&Item::System { source: "trust".into(), text: "x".into(), tone }, 40, false, Path::new("/repo")).remove(0);
         let look = |line: &Line| (text(line), line[0].style, line.last().unwrap().style);
-        assert_eq!(look(&row(Tone::Info)), ("· trust x".to_string(), DIM, TOOL_ARGS));
-        assert_eq!(look(&row(Tone::Warn)), ("! trust x".to_string(), WARN, TOOL_ARGS));
-        assert_eq!(look(&row(Tone::Error)), ("✗ trust x".to_string(), ERROR, ERROR));
+        assert_eq!(look(&row(Tone::Info)), ("ℹ trust: x".to_string(), SYSTEM, NOTICE_TEXT));
+        assert_eq!(look(&row(Tone::Warn)), ("! trust: x".to_string(), WARN, NOTICE_TEXT));
+        assert_eq!(look(&row(Tone::Error)), ("✗ trust: x".to_string(), ERROR, ERROR));
     }
 
     #[test]
