@@ -242,6 +242,126 @@ fn is_protected(file: &Path) -> bool {
     dirs.iter().any(|dir| DIRS.contains(&dir.as_str())) || FILES.contains(&name.as_str()) || name.starts_with(".env")
 }
 
+/// `permissions` in settings: each rule is `Tool` or `Tool(pattern)`. A deny rule holds in every mode.
+#[derive(Clone, Default, PartialEq, Debug)]
+pub struct Rules {
+    pub allow: Vec<String>,
+    pub ask: Vec<String>,
+    pub deny: Vec<String>,
+}
+
+#[derive(PartialEq, Debug)]
+pub enum Verdict {
+    /// The rule that matched.
+    Deny(String),
+    Ask,
+    Allow,
+}
+
+/// The tool pattern and the subject pattern of a rule; None when it is not `Tool` or `Tool(pattern)`.
+pub fn parse_rule(rule: &str) -> Option<(&str, Option<&str>)> {
+    let (tool, pattern) = match rule.split_once('(') {
+        Some((tool, rest)) => (tool, Some(rest.strip_suffix(')')?)),
+        None => (rule, None),
+    };
+    (!tool.is_empty() && !tool.contains(')') && pattern != Some("")).then_some((tool, pattern))
+}
+
+/// A rule that does not parse is an error: a deny rule that matched nothing would fail open.
+pub fn check_rules(rules: &Rules) -> Result<(), String> {
+    for (list, rules) in [("allow", &rules.allow), ("ask", &rules.ask), ("deny", &rules.deny)] {
+        if let Some(rule) = rules.iter().find(|rule| parse_rule(rule).is_none()) {
+            return Err(format!("permissions.{list}: \"{rule}\" is not Tool or Tool(pattern)"));
+        }
+    }
+    Ok(())
+}
+
+/// What a rule's pattern is matched against: the command, the files with links and `..` resolved, or the URLs.
+/// Empty for any other tool, which only a rule without a pattern covers.
+pub fn subjects(tool: &str, input: &Value, files: &[PathBuf], cwd: &Path) -> Vec<String> {
+    // real_path ends an existing file in a slash, which would hide its name from a rule like `Read(.env*)`.
+    let real = |file: PathBuf| real_path(&file).unwrap_or(file).display().to_string().replace(std::path::MAIN_SEPARATOR, "/").trim_end_matches('/').to_string();
+    let strings = |values: &[&Value]| values.iter().filter_map(|value| value.as_str()).map(String::from).collect::<Vec<_>>();
+    match tool {
+        "Bash" => strings(&[&input["command"]]),
+        "Write" | "ReplaceLines" | "Edit" | "InsertLines" | "ImageGenerate" => files.iter().cloned().map(real).collect(),
+        "Read" => {
+            let ranges = input["paths"].as_array().into_iter().flatten().map(|entry| if entry.is_object() { &entry["file_path"] } else { entry });
+            let paths: Vec<&Value> = ranges.chain([&input["file_path"]]).collect();
+            strings(&paths).iter().map(|path| real(crate::tools::hashline::resolve(cwd, path))).collect()
+        }
+        "Grep" => strings(&[&input["path"]]).iter().map(|path| real(crate::tools::hashline::resolve(cwd, path))).collect(),
+        "WebFetch" => strings(&input["urls"].as_array().into_iter().flatten().chain([&input["url"]]).collect::<Vec<_>>()),
+        "Video" => strings(&[&input["source"]]),
+        _ => Vec::new(),
+    }
+}
+
+/// Deny beats ask beats allow. Deny and ask match when any subject matches, allow only when every subject does.
+pub fn verdict(rules: &Rules, tool: &str, subjects: &[String], cwd: &Path) -> Option<Verdict> {
+    let cwd = crate::process::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+    let hit = |list: &[String], allow: bool| list.iter().find(|rule| rule_matches(rule, tool, subjects, &cwd, allow)).cloned();
+    if let Some(rule) = hit(&rules.deny, false) {
+        return Some(Verdict::Deny(rule));
+    }
+    if hit(&rules.ask, false).is_some() {
+        return Some(Verdict::Ask);
+    }
+    hit(&rules.allow, true).map(|_| Verdict::Allow)
+}
+
+/// Whether a rule in `Tool(pattern)` form covers this call, matched the way a deny rule is: a before_tool hook's `match`.
+pub fn rule_matches(rule: &str, tool: &str, subjects: &[String], cwd: &Path, allow: bool) -> bool {
+    let Some((tool_pattern, pattern)) = parse_rule(rule) else { return false };
+    if !wildcard(tool_pattern, tool) {
+        return false;
+    }
+    let Some(pattern) = pattern else { return true };
+    let matches = |subject: &String| match tool {
+        "Bash" => command_matches(pattern, subject, allow),
+        "WebFetch" | "Video" => wildcard(pattern, subject),
+        _ => file_matches(pattern, subject, cwd),
+    };
+    !subjects.is_empty() && if allow { subjects.iter().all(matches) } else { subjects.iter().any(matches) }
+}
+
+/// An allow rule never covers a command that chains, substitutes or redirects: `cargo test*` must not approve `cargo test; rm -rf ~`.
+/// Deny and ask also test each part of a chain, so `rm -rf*` catches `cd x && rm -rf y`.
+fn command_matches(pattern: &str, command: &str, allow: bool) -> bool {
+    if allow {
+        return !command.contains([';', '&', '|', '\n', '`', '>', '<']) && !command.contains("$(") && wildcard(pattern, command.trim());
+    }
+    wildcard(pattern, command.trim()) || command.split([';', '&', '|', '\n']).any(|part| wildcard(pattern, part.trim()))
+}
+
+/// The edit-hooks convention: a pattern without a slash matches the file name, any other the path, taken from `cwd` unless it starts with `/` or `~/`.
+// shortcut: a Windows drive pattern (`C:/x/**`) is read as relative to cwd; handle the prefix when someone needs it.
+fn file_matches(pattern: &str, file: &str, cwd: &Path) -> bool {
+    // macOS and Windows file names are case-insensitive, so `.ENV` is the `.env` a rule names.
+    if cfg!(any(target_os = "macos", windows)) && (pattern.chars().any(char::is_uppercase) || file.chars().any(char::is_uppercase)) {
+        let cwd = PathBuf::from(cwd.display().to_string().to_lowercase());
+        return file_matches(&pattern.to_lowercase(), &file.to_lowercase(), &cwd);
+    }
+    if !pattern.contains('/') {
+        return super::edit_hooks::matches(pattern, file.rsplit('/').next().unwrap_or(file));
+    }
+    let pattern = crate::tools::hashline::resolve(cwd, pattern).display().to_string().replace(std::path::MAIN_SEPARATOR, "/");
+    super::edit_hooks::matches(&pattern, file)
+}
+
+/// `*` matches any run of characters, slashes included; everything else is literal.
+fn wildcard(pattern: &str, text: &str) -> bool {
+    let Some((first, rest)) = pattern.split_once('*') else { return pattern == text };
+    let Some(mut text) = text.strip_prefix(first) else { return false };
+    let (middle, last) = rest.rsplit_once('*').map_or(("", rest), |(middle, last)| (middle, last));
+    for piece in middle.split('*') {
+        let Some(at) = text.find(piece) else { return false };
+        text = &text[at + piece.len()..];
+    }
+    text.ends_with(last)
+}
+
 /// Session grants from "don't ask again".
 #[derive(Default)]
 pub struct Grants(HashSet<String>);
@@ -337,6 +457,91 @@ pub fn parse_review(answer: &str) -> (bool, String) {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn rules(allow: &[&str], ask: &[&str], deny: &[&str]) -> Rules {
+        let list = |rules: &[&str]| rules.iter().map(|rule| rule.to_string()).collect();
+        Rules { allow: list(allow), ask: list(ask), deny: list(deny) }
+    }
+
+    fn strings(items: &[&str]) -> Vec<String> {
+        items.iter().map(|item| item.to_string()).collect()
+    }
+
+    #[test]
+    fn a_rule_is_a_tool_or_a_tool_with_a_pattern() {
+        assert_eq!(parse_rule("Bash"), Some(("Bash", None)));
+        assert_eq!(parse_rule("Bash(cargo test*)"), Some(("Bash", Some("cargo test*"))));
+        assert_eq!(parse_rule("mcp__github__*"), Some(("mcp__github__*", None)));
+        for bad in ["", "Bash(", "(x)", "Bash()", "Bash)"] {
+            assert_eq!(parse_rule(bad), None, "{bad}");
+        }
+        assert_eq!(check_rules(&rules(&["Bash"], &[], &["Read(.env"])), Err("permissions.deny: \"Read(.env\" is not Tool or Tool(pattern)".into()));
+    }
+
+    #[test]
+    fn deny_beats_ask_beats_allow() {
+        let all = rules(&["Bash(git*)"], &["Bash(git push*)"], &["Bash(git push --force*)"]);
+        let bash = |command: &str| verdict(&all, "Bash", &strings(&[command]), Path::new("/p"));
+        assert_eq!(bash("git status"), Some(Verdict::Allow));
+        assert_eq!(bash("git push"), Some(Verdict::Ask));
+        assert_eq!(bash("git push --force"), Some(Verdict::Deny("Bash(git push --force*)".into())));
+        assert_eq!(bash("ls"), None);
+    }
+
+    #[test]
+    fn an_allow_rule_never_covers_a_chained_command_and_a_deny_rule_tests_each_part() {
+        let allow = rules(&["Bash(cargo test*)"], &[], &[]);
+        let bash = |rules: &Rules, command: &str| verdict(rules, "Bash", &strings(&[command]), Path::new("/p"));
+        assert_eq!(bash(&allow, "cargo test -q"), Some(Verdict::Allow));
+        for command in ["cargo test; rm -rf ~", "cargo test && rm -rf ~", "cargo test > /etc/x", "cargo test $(rm x)", "cargo test `rm x`", "cargo test\nrm x", "cargo test | sh"] {
+            assert_eq!(bash(&allow, command), None, "{command}");
+        }
+        let deny = rules(&[], &[], &["Bash(rm -rf*)"]);
+        assert_eq!(bash(&deny, "cd x && rm -rf y"), Some(Verdict::Deny("Bash(rm -rf*)".into())));
+        assert_eq!(bash(&deny, "ls"), None);
+    }
+
+    #[test]
+    fn file_rules_match_the_name_or_the_path_and_allow_needs_every_file() {
+        let cwd = Path::new("/p");
+        let deny = rules(&[], &[], &["Read(.env*)", "Edit(src/secrets/**)"]);
+        assert_eq!(verdict(&deny, "Read", &strings(&["/p/app/.env.local"]), cwd), Some(Verdict::Deny("Read(.env*)".into())));
+        assert_eq!(verdict(&deny, "Read", &strings(&["/p/env.rs"]), cwd), None);
+        assert_eq!(verdict(&deny, "Edit", &strings(&["/p/a.rs", "/p/src/secrets/k/key"]), cwd), Some(Verdict::Deny("Edit(src/secrets/**)".into())));
+        assert_eq!(verdict(&deny, "Edit", &strings(&["/q/src/secrets/key"]), cwd), None);
+        let allow = rules(&["Edit(src/**)", "Write(/tmp/out/*)"], &[], &[]);
+        assert_eq!(verdict(&allow, "Edit", &strings(&["/p/src/a/b.rs"]), cwd), Some(Verdict::Allow));
+        assert_eq!(verdict(&allow, "Edit", &strings(&["/p/src/a.rs", "/p/b.rs"]), cwd), None);
+        assert_eq!(verdict(&allow, "Edit", &[], cwd), None, "a pattern never matches a call with no subject");
+        assert_eq!(verdict(&allow, "Write", &strings(&["/tmp/out/a"]), cwd), Some(Verdict::Allow));
+        assert_eq!(verdict(&allow, "Write", &strings(&["/tmp/out/a/b"]), cwd), None);
+    }
+
+    #[test]
+    fn tool_names_and_urls_take_wildcards() {
+        let cwd = Path::new("/p");
+        let allow = rules(&["mcp__github__*", "WebFetch(https://docs.rs/*)"], &[], &[]);
+        assert_eq!(verdict(&allow, "mcp__github__list_issues", &[], cwd), Some(Verdict::Allow));
+        assert_eq!(verdict(&allow, "mcp__gitlab__list_issues", &[], cwd), None);
+        assert_eq!(verdict(&allow, "WebFetch", &strings(&["https://docs.rs/a/b"]), cwd), Some(Verdict::Allow));
+        assert_eq!(verdict(&allow, "WebFetch", &strings(&["https://docs.rs/a", "https://evil.example/x"]), cwd), None);
+    }
+
+    #[test]
+    fn subjects_resolve_dot_dot_so_a_deny_rule_cannot_be_walked_around() {
+        let dir = std::env::temp_dir().join(format!("agent-rule-subjects-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("secrets.txt"), "").unwrap();
+        let read = subjects("Read", &json!({"paths": ["sub/../secrets.txt", {"file_path": "secrets.txt"}], "file_path": "./secrets.txt"}), &[], &dir);
+        let real = crate::process::canonicalize(dir.join("secrets.txt")).unwrap().display().to_string().replace(std::path::MAIN_SEPARATOR, "/");
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(read, [real.clone(), real.clone(), real]);
+        assert_eq!(subjects("Bash", &json!({"command": "ls"}), &[], &dir), ["ls"]);
+        assert_eq!(subjects("WebFetch", &json!({"urls": ["a"], "url": "b"}), &[], &dir), ["a", "b"]);
+        assert!(subjects("Grep", &json!({"pattern": "x"}), &[], &dir).is_empty());
+        // Windows puts a drive in front.
+        assert!(subjects("Grep", &json!({"pattern": "x", "path": "/nowhere/.env"}), &[], &dir)[0].ends_with("/nowhere/.env"));
+    }
 
     #[test]
     fn read_only_tools_need_no_permission() {

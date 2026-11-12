@@ -121,7 +121,7 @@ pub fn shell_quote(text: &str) -> String {
 }
 
 /// Glob over `/`-separated paths: `*` and `?` stay within a segment, `**` crosses them, `{a,b}` picks one.
-fn matches(pattern: &str, path: &str) -> bool {
+pub(crate) fn matches(pattern: &str, path: &str) -> bool {
     if let Some((open, close, choices)) = brace_group(pattern) {
         let (head, tail) = (&pattern[..open], &pattern[close + 1..]);
         return choices.iter().any(|choice| matches(&format!("{head}{choice}{tail}"), path));

@@ -171,7 +171,7 @@ fn handle(agent: &mut Agent, connection: &mut Connection, message: &Value) -> Re
             if crate::process::canonicalize(cwd).ok().as_deref() != Some(agent.cwd.as_path()) {
                 return Err((INVALID_PARAMS, format!("agent acp serves the directory it started in, {}, not {cwd}.", agent.cwd.display())));
             }
-            let mut settings = crate::settings::load(&agent.home).map_err(|error| (INTERNAL_ERROR, error))?;
+            let mut settings = crate::settings::load_in(&agent.home, &agent.cwd, false).map_err(|error| (INTERNAL_ERROR, error))?;
             if !agent.client.catalog().iter().any(usable) {
                 return Err((AUTH_REQUIRED, "No account can run a model. Log in with /login in agent.".into()));
             }
@@ -249,7 +249,7 @@ fn handle(agent: &mut Agent, connection: &mut Connection, message: &Value) -> Re
                 agent.save_session_config().map_err(|error| (INTERNAL_ERROR, error))?;
                 return Ok(json!({"configOptions": config_options(agent)}));
             }
-            let mut settings = crate::settings::load(&agent.home).map_err(|error| (INTERNAL_ERROR, error))?;
+            let mut settings = crate::settings::load_in(&agent.home, &agent.cwd, false).map_err(|error| (INTERNAL_ERROR, error))?;
             // settle_model applies every setting, so the session keeps what it changed and only this option moves.
             settings.model = agent.model.clone();
             settings.thinking = agent.effort.clone();

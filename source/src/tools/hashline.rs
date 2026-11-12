@@ -642,6 +642,9 @@ fn check_size(path: &Path) -> Result<(), String> {
 }
 
 fn binary_file(path: &Path) -> String {
+    if crate::tools::pdf::is_pdf(path) {
+        return format!("{} is a PDF. Read it alone with file_path, and pages for a range.", path.display());
+    }
     format!("{} is a binary file. Use bash with file, xxd or strings to inspect it.", path.display())
 }
 

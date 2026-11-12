@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::agent::permissions::Mode;
+use crate::agent::permissions::{Mode, Rules};
 use crate::agent::prompt::Skill;
 use crate::api::accounts::Policy;
 use crate::api::models::{self, Model};
@@ -24,6 +24,8 @@ pub struct Settings {
     /// Anthropic turns send only the new messages and the API keeps the rest (the message threads beta).
     pub message_threads: bool,
     pub permission_mode: Mode,
+    /// Allow, ask and deny rules per tool; edited in the file, not in /settings.
+    pub permissions: Rules,
     /// The auto-mode reviewer; empty means `small_model`.
     pub reviewer_model: String,
     /// ImageGenerate's model: a Codex one (`gpt-image-2`, `openai-codex/` optional) or `google-antigravity/<id>`; empty takes
@@ -126,6 +128,8 @@ pub struct Settings {
     pub mid_turn: String,
     /// Shell commands the TUI runs in the background at start, e.g. a global tool update.
     pub on_start: Vec<String>,
+    /// Commands that run before a matching tool call; one that fails refuses the call.
+    pub before_tool: Vec<ToolHook>,
     /// Language name to the server that checks a file after each edit; an empty command turns the language off.
     pub lsp: BTreeMap<String, LspServer>,
     /// OpenAI- or Anthropic-compatible endpoints; a preset name (`ollama`) fills in `base_url` and `api_key_env`.
@@ -376,14 +380,106 @@ pub fn path(home: &Path) -> PathBuf {
     home.join(".agents/settings.json")
 }
 
+/// `match` is a permission rule, `Tool` or `Tool(pattern)`; `{call}` in `command` is a file holding the call as JSON.
+#[derive(Clone, PartialEq, Debug)]
+pub struct ToolHook {
+    pub matches: String,
+    pub command: String,
+}
+
 /// Defaults for a missing file; an unreadable or broken one is an error, so the next save cannot write defaults over it.
 pub fn load(home: &Path) -> Result<Settings, String> {
-    Ok(from_json(&read(home)?))
+    checked(&read(home)?, home)
+}
+
+/// Keys a project file may set. Everything else is global-only: keys that run commands (on_start, lsp, before_tool),
+/// move data (custom_providers, headroom_*, accounts, environments) or loosen approval (permission_mode, reviewer_model, trusted_projects, approved_mcp).
+const PROJECT_KEYS: &[&str] = &[
+    "model",
+    "default_model",
+    "thinking",
+    "default_thinking",
+    "small_model",
+    "output_style",
+    "caveman",
+    "ponytail",
+    "auto_compact",
+    "reserve_tokens",
+    "keep_recent_tokens",
+    "condense",
+    "context_windows",
+    "expand_tools",
+    "subagents",
+    "rtk",
+];
+
+/// The global settings with the trusted project's `.agents/settings.json` and `settings.local.json` over them.
+/// `trust` is the --trust flag; otherwise only the global file's `trusted_projects` decides.
+pub fn load_in(home: &Path, cwd: &Path, trust: bool) -> Result<Settings, String> {
+    checked(&layered(home, cwd, trust)?.0, home)
+}
+
+/// One line per key a project file sets that only the global file may set.
+pub fn ignored_project_keys(home: &Path, cwd: &Path, trust: bool) -> Vec<String> {
+    layered(home, cwd, trust).map(|(_, ignored)| ignored).unwrap_or_default()
+}
+
+fn layered(home: &Path, cwd: &Path, trust: bool) -> Result<(Value, Vec<String>), String> {
+    let mut merged = read(home)?;
+    let mut ignored = Vec::new();
+    let trusted = trust || crate::agent::prompt::is_trusted(&string_list(&merged["trusted_projects"]), cwd);
+    let global_dir = home.join(".agents");
+    // Farthest first, so the file nearest cwd wins.
+    for dir in crate::agent::prompt::project_agents_dirs(cwd, trusted).iter().rev().filter(|dir| **dir != global_dir) {
+        for name in ["settings.json", "settings.local.json"] {
+            let file = dir.join(name);
+            let Value::Object(layer) = read_file(&file)? else { continue };
+            if !merged.is_object() {
+                merged = json!({});
+            }
+            for (key, value) in layer {
+                if PROJECT_KEYS.contains(&key.as_str()) {
+                    merged[key] = value;
+                    continue;
+                }
+                if key != "permissions" {
+                    ignored.push(format!("{}: ignored \"{key}\", a project cannot set it", file.display()));
+                    continue;
+                }
+                // A repository may tighten approval, never loosen it.
+                if !merged["permissions"].is_object() {
+                    merged["permissions"] = json!({});
+                }
+                for list in ["ask", "deny"] {
+                    let mut rules = string_list(&merged["permissions"][list]);
+                    rules.extend(string_list(&value[list]));
+                    merged["permissions"][list] = json!(rules);
+                }
+                if !value["allow"].is_null() {
+                    ignored.push(format!("{}: ignored \"permissions.allow\", a project cannot set it", file.display()));
+                }
+            }
+        }
+    }
+    Ok((merged, ignored))
+}
+
+fn checked(own: &Value, home: &Path) -> Result<Settings, String> {
+    let settings = from_json(own);
+    crate::agent::permissions::check_rules(&settings.permissions).map_err(|e| format!("{}: {e}", path(home).display()))?;
+    // A hook that could never match or run would guard nothing, silently.
+    if let Some(hook) = settings.before_tool.iter().find(|hook| crate::agent::permissions::parse_rule(&hook.matches).is_none() || hook.command.trim().is_empty()) {
+        return Err(format!("{}: before_tool: {{\"match\": \"{}\", \"command\": \"{}\"}} needs a match that is Tool or Tool(pattern) and a command", path(home).display(), hook.matches, hook.command));
+    }
+    Ok(settings)
 }
 
 fn read(home: &Path) -> Result<Value, String> {
-    let path = path(home);
-    match std::fs::read_to_string(&path) {
+    read_file(&path(home))
+}
+
+fn read_file(path: &Path) -> Result<Value, String> {
+    match std::fs::read_to_string(path) {
         Ok(text) => serde_json::from_str(&text).map_err(|e| format!("{} is broken: {e}. Fix or remove it by hand.", path.display())),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Value::Null),
         Err(e) => Err(format!("Cannot read {}: {e}", path.display())),
@@ -401,6 +497,7 @@ fn from_json(own: &Value) -> Settings {
         cache_ttl: level(&own["cache_ttl"], &CACHE_TTLS, "5m"),
         message_threads: own["message_threads"].as_bool().unwrap_or(true),
         permission_mode: own["permission_mode"].as_str().and_then(Mode::parse).unwrap_or(Mode::Ask),
+        permissions: Rules { allow: string_list(&own["permissions"]["allow"]), ask: string_list(&own["permissions"]["ask"]), deny: string_list(&own["permissions"]["deny"]) },
         reviewer_model: own["reviewer_model"].as_str().unwrap_or_default().to_string(),
         image_model: own["image_model"].as_str().unwrap_or_default().to_string(),
         small_model: own["small_model"].as_str().unwrap_or_default().to_string(),
@@ -456,6 +553,13 @@ fn from_json(own: &Value) -> Settings {
         default_environment: own["default_environment"].as_str().filter(|name| !name.is_empty()).unwrap_or(crate::tailnet::LOCAL).to_string(),
         mid_turn: level(&own["mid_turn"], &MID_TURN, "steering"),
         on_start: string_list(&own["on_start"]),
+        // An entry without its strings is kept empty, so load refuses it.
+        before_tool: own["before_tool"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|hook| ToolHook { matches: hook["match"].as_str().unwrap_or_default().into(), command: hook["command"].as_str().unwrap_or_default().into() })
+            .collect(),
         lsp: lsp_servers(&own["lsp"]),
         custom_providers: custom_providers(&own["custom_providers"]),
     }
@@ -545,6 +649,7 @@ fn to_json(settings: &Settings) -> Value {
         "cache_ttl": settings.cache_ttl,
         "message_threads": settings.message_threads,
         "permission_mode": settings.permission_mode.label(),
+        "permissions": {"allow": settings.permissions.allow, "ask": settings.permissions.ask, "deny": settings.permissions.deny},
         "reviewer_model": settings.reviewer_model,
         "image_model": settings.image_model,
         "small_model": settings.small_model,
@@ -589,6 +694,7 @@ fn to_json(settings: &Settings) -> Value {
         "default_environment": settings.default_environment,
         "mid_turn": settings.mid_turn,
         "on_start": settings.on_start,
+        "before_tool": settings.before_tool.iter().map(|hook| json!({"match": hook.matches, "command": hook.command})).collect::<Vec<_>>(),
         "custom_providers": settings.custom_providers.iter().map(|p| json!({
             "name": p.name,
             "base_url": p.base_url,
@@ -616,6 +722,68 @@ mod tests {
             assert_eq!(load(&home).unwrap().condense_min_batch_chars, loaded);
         }
         std::fs::remove_dir_all(&home).unwrap();
+    }
+
+    #[test]
+    fn a_trusted_project_layers_its_allowed_keys_and_can_only_tighten_permissions() {
+        let home = crate::process::canonicalize(std::env::temp_dir()).unwrap().join(format!("agent-settings-layers-{}", std::process::id()));
+        let root = home.join("project");
+        let cwd = root.join("sub");
+        for dir in [home.join(".agents"), root.join(".git"), root.join(".agents"), cwd.join(".agents")] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        let global = |trusted: bool| json!({"model": "global", "thinking": "low", "permissions": {"allow": ["Bash(ls*)"], "deny": ["Read(.env*)"]}, "trusted_projects": if trusted { vec![root.display().to_string()] } else { vec![] }});
+        std::fs::write(path(&home), global(false).to_string()).unwrap();
+        std::fs::write(root.join(".agents/settings.json"), json!({"model": "shared", "thinking": "high", "small_model": "small", "permission_mode": "full access", "on_start": ["curl evil"], "trusted_projects": ["/"], "permissions": {"allow": ["Bash"], "ask": ["Bash(git push*)"], "deny": ["Edit(secrets/**)"]}}).to_string()).unwrap();
+        std::fs::write(root.join(".agents/settings.local.json"), json!({"model": "local"}).to_string()).unwrap();
+        std::fs::write(cwd.join(".agents/settings.json"), json!({"thinking": "medium"}).to_string()).unwrap();
+        let untrusted = load_in(&home, &cwd, false).unwrap();
+        let flagged = load_in(&home, &cwd, true).unwrap();
+        std::fs::write(path(&home), global(true).to_string()).unwrap();
+        let trusted = load_in(&home, &cwd, false).unwrap();
+        let ignored = ignored_project_keys(&home, &cwd, false);
+        let in_home = load_in(&home, &home, true).unwrap();
+        std::fs::write(cwd.join(".agents/settings.local.json"), "{").unwrap();
+        let broken = load_in(&home, &cwd, false);
+        std::fs::remove_dir_all(&home).unwrap();
+
+        assert_eq!((untrusted.model.as_str(), untrusted.thinking.as_str(), untrusted.permissions.ask.len()), ("global", "low", 0));
+        assert_eq!(flagged.model, "local", "--trust loads the layers");
+        assert_eq!((trusted.model.as_str(), trusted.thinking.as_str(), trusted.small_model.as_str()), ("local", "medium", "small"));
+        assert_eq!(trusted.permission_mode, Mode::Ask);
+        assert!(trusted.on_start.is_empty());
+        assert_eq!(trusted.trusted_projects, [root.display().to_string()]);
+        let strings = |rules: &[&str]| rules.iter().map(|rule| rule.to_string()).collect::<Vec<_>>();
+        assert_eq!(trusted.permissions, Rules { allow: strings(&["Bash(ls*)"]), ask: strings(&["Bash(git push*)"]), deny: strings(&["Read(.env*)", "Edit(secrets/**)"]) });
+        let shared = root.join(".agents").join("settings.json").display().to_string();
+        let mut expected: Vec<String> =
+            ["on_start", "permission_mode", "permissions.allow", "trusted_projects"].iter().map(|key| format!("{shared}: ignored \"{key}\", a project cannot set it")).collect();
+        let mut ignored = ignored;
+        ignored.sort();
+        expected.sort();
+        assert_eq!(ignored, expected);
+        assert_eq!(in_home.model, "global", "home/.agents is the global file, not a project layer");
+        assert!(broken.unwrap_err().contains("settings.local.json is broken"));
+    }
+
+    #[test]
+    fn a_permission_rule_that_does_not_parse_is_an_error_naming_it() {
+        let home = std::env::temp_dir().join(format!("agent-settings-rules-{}", std::process::id()));
+        std::fs::create_dir_all(path(&home).parent().unwrap()).unwrap();
+        std::fs::write(path(&home), r#"{"permissions": {"allow": ["Bash(ls*)"], "deny": ["Read(.env"]}}"#).unwrap();
+        let broken = load(&home);
+        std::fs::write(path(&home), r#"{"permissions": {"allow": ["Bash(ls*)"], "deny": ["Read(.env*)"]}}"#).unwrap();
+        let loaded = load(&home).unwrap().permissions;
+        std::fs::remove_dir_all(&home).unwrap();
+        assert!(broken.unwrap_err().ends_with("permissions.deny: \"Read(.env\" is not Tool or Tool(pattern)"));
+        assert_eq!((loaded.allow, loaded.deny), (vec!["Bash(ls*)".to_string()], vec!["Read(.env*)".to_string()]));
+        for (hook, loads) in [(r#"{"match": "Bash(", "command": "true"}"#, false), (r#"{"match": "Bash"}"#, false), (r#"{"match": "Bash(git push*)", "command": "true"}"#, true)] {
+            assert_eq!(from_json(&serde_json::from_str(&format!(r#"{{"before_tool": [{hook}]}}"#)).unwrap()).before_tool.len(), 1);
+            std::fs::create_dir_all(path(&home).parent().unwrap()).unwrap();
+            std::fs::write(path(&home), format!(r#"{{"before_tool": [{hook}]}}"#)).unwrap();
+            assert_eq!(load(&home).is_ok(), loads, "{hook}");
+            std::fs::remove_dir_all(&home).unwrap();
+        }
     }
 
     #[test]

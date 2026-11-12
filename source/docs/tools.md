@@ -22,6 +22,10 @@ Built-in tools are defined in `tools/mod.rs` (`schemas` gives the JSON schema li
 
 Every anchor is four ASCII letters so a long session can hold one per line read without growing the context much.
 
+## PDF
+
+`Read` on a file that starts with `%PDF-` returns its text through poppler's `pdftotext -layout` (`tools/pdf.rs`), with no anchors: 20 pages per call, `pages` (`"3"`, `"21-40"`) picks others, 50KB at most. A scan has no text, so the result names the `pdftoppm` command that renders its pages to PNG files, which `Read` shows as images.
+
 ## Bash
 
 `Bash` runs `sh -c` with the command first passed through `rtk rewrite` when `rtk` is on and installed (`tools/rtk.rs`): rtk exits 0 or 3 with a replacement, 1 when it has none, 2 when it refuses. Output loses ANSI sequences and keeps its last `max_bytes`; the full log lands in a temp file named at the end.
@@ -35,6 +39,27 @@ Every anchor is four ASCII letters so a long session can hold one per line read 
 `agent/permissions.rs`. Three modes: `Ask`, `Auto` (a reviewer model approves), `FullAccess`. `request_for(tool, input, files)` decides which calls need approval and under which `Kind`: `Command` (Bash), `Edit` (every file an edit call touches), `Subagent`, `Workflow`, `Web` (WebFetch, WebSearch with `includeContent`), `Mcp`, `Plugin`, and worktree moves. Everything else runs in every mode.
 
 "Don't ask again" stores a `Grant` keyed by the request's key (a command prefix, a file, a workflow path) for the session. In `Auto` the reviewer sees the request capped at `REVIEW_DETAIL_CHARS`; a longer call is denied unreviewed, since a cut would hide its tail.
+
+`permissions` in `settings.json` holds rules that outlive the session:
+
+```json
+"permissions": {"allow": ["Bash(cargo test*)", "mcp__github__*"], "ask": ["Bash(git push*)"], "deny": ["Read(.env*)", "Edit(**/secrets/**)"]}
+```
+
+A rule is `Tool` or `Tool(pattern)`; `*` in the tool name matches any run of characters. The pattern is matched against the command (`Bash`), the URLs (`WebFetch`, `Video`) or the files (`Read`, the `path` of `Grep` and the edit tools). In a command or URL `*` matches anything. A file pattern is an edit-hooks glob: without a slash it matches the file name, otherwise the path from the working directory, or an absolute one when it starts with `/` or `~/`. Deny beats ask beats allow. Deny refuses in every mode, `FullAccess` included; ask prompts the user in `Ask` and `Auto` whatever was granted; allow runs the call in `Ask` and `Auto`. Deny and ask also test each part of a chained command, and allow never covers a command that chains, substitutes or redirects, so `Bash(cargo test*)` does not approve `cargo test; rm -rf ~`. A rule that does not parse stops the agent at start (`permissions::check_rules`). Rules are not a sandbox: a deny rule for `Read` does not stop a shell command that reads the same file, or a `Grep` over the directory that holds it, and a command pattern does not see through `sh -c`, a variable or `$(...)`.
+
+### before_tool hooks
+
+`before_tool` in `settings.json` runs a command before a tool call and can refuse it:
+
+```json
+"before_tool": [
+  {"match": "Bash(git push*)", "command": "~/bin/check-push {call}"},
+  {"match": "Edit", "command": "test ! -e .release-freeze"}
+]
+```
+
+`match` is a permission rule, matched the way a deny rule is. The command runs in the session's directory with a 10 s limit, in every mode and for tools that never ask. `{call}` is the path of a private file holding `{"tool", "input", "cwd"}`, removed when the command ends. Exit 0 lets the call go on to the rules and the mode. Any other exit, or the time limit, refuses it: the model reads `Blocked by the before_tool hook "<command>":` and the first 4000 characters of the output. The hook's own command is not permission-checked (`Agent::before_tool_refusal`).
 
 ## Edit hooks and language servers
 
