@@ -471,6 +471,9 @@ fn checked(own: &Value, home: &Path) -> Result<Settings, String> {
     if let Some(hook) = settings.before_tool.iter().find(|hook| crate::agent::permissions::parse_rule(&hook.matches).is_none() || hook.command.trim().is_empty()) {
         return Err(format!("{}: before_tool: {{\"match\": \"{}\", \"command\": \"{}\"}} needs a match that is Tool or Tool(pattern) and a command", path(home).display(), hook.matches, hook.command));
     }
+    if let Some(hook) = settings.before_tool.iter().find(|hook| crate::agent::permissions::pattern_never_matches(&hook.matches)) {
+        return Err(format!("{}: before_tool: \"{}\" has a pattern, which only {} take; name the tool alone", path(home).display(), hook.matches, crate::agent::permissions::SUBJECT_TOOLS.join(", ")));
+    }
     Ok(settings)
 }
 

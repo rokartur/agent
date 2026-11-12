@@ -18,7 +18,7 @@
       "type": "object",
       "additionalProperties": false,
       "default": { "allow": [], "ask": [], "deny": [] },
-      "description": "Rules per tool, each `Tool` or `Tool(pattern)`: `Bash(cargo test*)`, `Read(.env*)`, `Edit(src/**)`, `WebFetch(https://docs.rs/*)`, `mcp__github__*`. Deny beats ask beats allow, and deny holds in every permission mode.",
+      "description": "Rules per tool, each `Tool` or `Tool(pattern)`: `Bash(cargo test*)`, `Read(.env*)`, `Edit(src/**)`, `WebFetch(https://docs.rs/*)`, `mcp__github__*`. A pattern works on Bash, Read, Grep, Write, Edit, ReplaceLines, InsertLines, ImageGenerate, WebFetch and Video; any other tool takes its name alone. Deny beats ask beats allow, and deny holds in every permission mode.",
       "properties": {
         "allow": { "type": "array", "items": { "type": "string" }, "default": [], "description": "Calls that run without asking in ask and auto mode. Never covers a command that chains, substitutes or redirects." },
         "ask": { "type": "array", "items": { "type": "string" }, "default": [], "description": "Calls that ask the user in ask and auto mode, whatever was granted before." },
