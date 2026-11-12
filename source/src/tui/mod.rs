@@ -2320,7 +2320,13 @@ impl App {
     /// Asks whether to trust a project with `.agents` files to load; another open panel gets a notice instead.
     fn offer_trust(&mut self) {
         let files = crate::agent::prompt::untrusted_files(&self.home.join(".agents"), &self.cwd);
-        if self.settings.trusts(&self.cwd) || files.is_empty() {
+        if self.settings.trusts(&self.cwd) {
+            for ignored in settings::ignored_project_keys(&self.home, &self.cwd, true) {
+                self.system("settings", ignored);
+            }
+            return;
+        }
+        if files.is_empty() {
             return;
         }
         let root = crate::agent::prompt::project_root(&self.cwd);

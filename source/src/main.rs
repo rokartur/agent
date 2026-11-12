@@ -515,7 +515,8 @@ fn run(options: Options) -> Result<(), String> {
     }
     let home = home()?;
     // The flags below apply to this run only; /settings saves only the keys it changes.
-    let mut settings = settings::load(&home)?;
+    let cwd = std::env::current_dir().map_err(|e| format!("Cannot read the working directory: {e}"))?;
+    let mut settings = settings::load_in(&home, &cwd, options.trust)?;
     settings.reset_to_defaults();
     if let Some(model) = options.model {
         settings.model = model;
@@ -526,7 +527,6 @@ fn run(options: Options) -> Result<(), String> {
     if let Some(mode) = options.permission_mode {
         settings.permission_mode = mode;
     }
-    let cwd = std::env::current_dir().map_err(|e| format!("Cannot read the working directory: {e}"))?;
     if options.trust {
         settings.trusted_projects.push(prompt::project_root(&cwd).display().to_string());
     }

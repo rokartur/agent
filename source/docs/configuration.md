@@ -27,6 +27,8 @@ Everything lives under `~/.agents` (the agent dir) and, per project, under `.age
 
 Looked up in `cwd` and its parents up to the git root, nearest first. A project is **untrusted** until `/trust` or `--trust` adds its root to `trusted_projects`; an untrusted project contributes only its `AGENTS.md` files. Trusted, it also contributes `SYSTEM.md`, `APPEND_SYSTEM.md`, `skills/`, `prompts/`, `swarm-prompt.md`, `edit-hooks.json`, `workflows/` and runs the hooks. `conflict_priority` decides whether a project or global skill wins a name clash.
 
+A trusted project also layers `settings.json` and `settings.local.json` (yours, keep it out of git) from each of those `.agents` dirs over the global file: git root first, cwd last, `settings.local.json` over `settings.json`, each key replacing the earlier value (`settings::load_in`). A project file may set only `model`, `default_model`, `thinking`, `default_thinking`, `small_model`, `output_style`, `caveman`, `ponytail`, `auto_compact`, `reserve_tokens`, `keep_recent_tokens`, `condense`, `context_windows`, `expand_tools`, `subagents` and `rtk` (`PROJECT_KEYS`). Its `permissions.ask` and `permissions.deny` are added to the global lists; `permissions.allow` and every other key are ignored and named in a notice at start, so a repository can tighten approval but never loosen it, run a command or grant itself trust. `/settings` writes the global file, so a key the project sets stays overridden. Layers apply to sessions started after `/trust`.
+
 `.mcp.json` in the project is read in every project but each server runs only once approved in `/mcp` (`approved_mcp`).
 
 ## System prompt

@@ -2007,7 +2007,7 @@ impl Agent {
     /// /worktree and `cd`: pi pins a session to its cwd, so the history moves to a new session started in `cwd`.
     pub fn move_to(&mut self, cwd: PathBuf, emit: &mut dyn FnMut(Event)) -> Result<(), String> {
         // Everything that can fail runs before the agent changes, so an error leaves it in the old checkout.
-        let settings = crate::settings::load(&self.home)?;
+        let settings = crate::settings::load_in(&self.home, &cwd, false)?;
         let session = self.copy_session(&cwd)?;
         // Earlier snapshots belong to the old checkout's snapshot repo.
         session.append(&json!({"type": "checkpoints_reset"}))?;
