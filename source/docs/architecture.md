@@ -24,7 +24,7 @@ One binary, no async runtime: threads and `mpsc` channels. HTTP is `ureq` with r
 | `update.rs` | Self-update from GitHub releases; only CI builds update themselves. |
 | `worktree.rs` | `git worktree` wrappers for `/worktree`, `EnterWorktree`, `ExitWorktree`. |
 
-`src/tui/mod.rs` is the largest file by far (6k lines). The `App` struct, the key handler and every panel's rendering live there; `panel.rs`, `editor.rs`, `render.rs`, `markdown.rs`, `selection.rs` hold the pieces that were worth pulling out.
+`src/tui/mod.rs` holds the `App` struct and the event loop. The key handler is in `input.rs`, rendering in `view.rs`, `footer.rs`, `screens.rs` and `transcript.rs`, and each family of panels in its own `*_panels.rs`.
 
 ## Threads
 
@@ -49,7 +49,7 @@ The split rule: the worker thread mutates conversation state, the UI thread read
    - Tool calls: each goes through `permissions::request_for` (ask, reviewer model, or allowed), a file snapshot around it, the tool itself, plugin `tool_call`/`tool_result` events, and a `tool_time` journal entry. Results go back as one user message with `tool_result` blocks.
 3. The TUI renders events as they arrive and gets `Msg::Done` with the answer or the error.
 
-Esc sets `agent.abort`; the stream reader (`api::watched_body`) and running bash commands check it. The aborted reply keeps its finished text and the journal records `Operation aborted` as each open tool call's result.
+Esc sets `agent.abort`; the stream reader (`api/stream.rs`, `watched_body`) and running bash commands check it. The aborted reply keeps its finished text and the journal records `Operation aborted` as each open tool call's result.
 
 ## Where state lives
 
