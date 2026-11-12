@@ -2990,6 +2990,15 @@ impl App {
                         return;
                     }
                     KeyCode::Char('d') if view.installed => crate::plugins::remove(&self.home, &view.name),
+                    KeyCode::Char('u') if view.installed => crate::plugins::update(&self.home, std::slice::from_ref(&view.name)).map(|notices| {
+                        for notice in notices {
+                            self.system("plugins", notice);
+                        }
+                        // `sync` starts only stopped plugins, so stop this one for the sync below to start the new copy.
+                        let mut stopped = self.settings.disabled_plugins.clone();
+                        stopped.push(view.name.clone());
+                        self.plugins.sync(&stopped, &self.settings.plugin_settings);
+                    }),
                     _ => return,
                 };
                 if let Err(error) = changed {
@@ -4268,19 +4277,29 @@ impl App {
                 lines
             }
             Panel::Plugins { index, confirm } => {
-                let rows: Vec<panel::Row> = self
-                    .plugins
-                    .list()
+                let views = self.plugins.list();
+                let name_width = views.iter().map(|view| view.name.len()).max().unwrap_or(0);
+                let update_width = views.iter().filter_map(|view| view.update.as_ref()).map(|version| "update ".len() + version.len()).max().unwrap_or(0);
+                let rows: Vec<panel::Row> = views
                     .into_iter()
                     .map(|view| {
-                        let right = match (view.installed, &view.error, self.settings.disabled_plugins.contains(&view.name)) {
-                            (false, _, _) => span("available", MUTED),
-                            (true, _, true) => span("disabled", MUTED),
-                            (true, Some(error), false) => span(error.clone(), WARN),
-                            (true, None, false) => span(if view.running { "running" } else { "stopped" }, PLAIN),
-                        };
                         let author = view.author.map(|author| format!("  @{author}")).unwrap_or_default();
-                        panel::Row { left: format!("{} {}  {}{author}", view.name, view.version, view.description), right: vec![right] }
+                        let about = format!("{}{author}", view.description);
+                        let (status, tone, about) = match (view.installed, self.settings.disabled_plugins.contains(&view.name), view.error) {
+                            (false, _, _) => ("available", MUTED, about),
+                            (true, true, _) => ("disabled", MUTED, about),
+                            (true, false, Some(error)) => ("error", ERROR, error),
+                            (true, false, None) if view.running => ("running", OK, about),
+                            (true, false, None) => ("stopped", MUTED, about),
+                        };
+                        // Fixed columns before the description, so a narrow terminal cuts only the description.
+                        let mut right = Vec::new();
+                        if update_width > 0 {
+                            let update = view.update.map(|version| format!("update {version}")).unwrap_or_default();
+                            right.push(span(format!("{update:<update_width$}   "), WARN));
+                        }
+                        right.extend([span(format!("{status:<9}"), tone), span(format!("  {about}"), DIM)]);
+                        panel::Row { left: format!("{:<name_width$}  {}", view.name, view.version), right }
                     })
                     .collect();
                 let view = panel::Panel {
@@ -4294,7 +4313,7 @@ impl App {
                     hint: if *confirm {
                         "d again removes the plugin and the state it saved     any other key cancels"
                     } else {
-                        "↑↓ navigate     space install/enable/disable     enter settings     d remove     esc close"
+                        "↑↓ navigate     space install/enable/disable     u update     enter settings     d remove     esc close"
                     },
                 };
                 view.render(width, PANEL_ROWS)
@@ -7023,6 +7042,16 @@ mod tests {
         let shells: Vec<String> = tasks_panel(&[], &runs, &[], false, 0, 80).iter().map(text).collect();
         assert_eq!(shells[1], "Background  [Shells 0]  Agents 2");
         assert_eq!(shells[4], "  No shells yet.");
+    }
+
+    #[test]
+    fn plugin_rows_keep_the_status_when_a_narrow_terminal_cuts_the_description() {
+        let home = std::env::temp_dir().join(format!("agent-tui-plugins-{}", std::process::id()));
+        let app = test_app(&home);
+        std::fs::remove_dir_all(&home).ok();
+        let lines: Vec<String> = app.render_panel(&Panel::Plugins { index: 0, confirm: false }, 40).iter().map(text).collect();
+        let version = crate::plugins::Plugins::new(&home).list()[0].version.clone();
+        assert!(lines[2].starts_with(&format!("→ usagefleet  {version}    available  ")), "{lines:?}");
     }
 
     #[test]
