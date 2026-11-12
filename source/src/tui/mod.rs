@@ -5832,10 +5832,10 @@ fn render_tool(name: &str, input: &Value, result: Option<&(String, bool)>, width
     lines
 }
 
-/// `args` with its main part bright: Bash's command, Grep's pattern, a file tool's file name.
+/// `args` with its main part bright: Grep's pattern, a file tool's file name. Bash's command stays gray.
 fn arg_spans(name: &str, input: &Value, args: &str) -> Line {
     let main = match name {
-        "Bash" => input["command"].as_str().and_then(|command| command.lines().next()),
+        "Bash" => None,
         "Grep" => input["pattern"].as_str(),
         _ => input["file_path"].as_str().and_then(|path| Path::new(path).file_name()?.to_str()),
     };
@@ -7259,7 +7259,9 @@ mod tests {
         assert_eq!(text(&read), "✓ Read src/a.rs · 3 lines");
         assert_eq!(read.iter().filter(|s| s.style == BRIGHT).map(|s| s.text.as_str()).collect::<Vec<_>>(), ["a.rs"]);
         assert_eq!(text(&row("Bash", json!({"command": "cargo test"}), "running\ntest x ... FAILED\n\n", true)), "✗ Bash cargo test · test x ... FAILED");
-        assert_eq!(text(&row("Bash", json!({"command": "true"}), "", false)), "✓ Bash true");
+        let bash = row("Bash", json!({"command": "true"}), "", false);
+        assert_eq!(text(&bash), "✓ Bash true");
+        assert!(bash.iter().all(|s| s.style != BRIGHT), "{bash:?}");
         assert!(running_seconds(Some(Instant::now())).is_empty());
         assert_eq!(text(&running_seconds(Instant::now().checked_sub(Duration::from_secs(4)))), " · 4s");
     }
