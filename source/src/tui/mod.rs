@@ -88,9 +88,9 @@ const OK: Style = Style::rgb(0x7ee787);
 const ERROR: Style = Style::rgb(0xff7b72);
 const TOOL_NAME: Style = Style::rgb(0xffffff);
 const TOOL_ARGS: Style = Style::rgb(0x858585);
-const PINNED_BG: u8 = 237;
+const TOOL_INPUT: Style = Style::rgb(0xbbbbbb);
+const PROMPT_BG: u8 = 237;
 const PROMPT_LEAD: Style = SYSTEM.bold();
-const RULE: Style = Style::fg(238);
 
 enum Msg {
     Attached(server::Client),
@@ -1565,7 +1565,7 @@ impl App {
             let Some(index) = tail.len().checked_sub(line + 1) else { continue };
             let row = &tail[index];
             let (from, to) = self.selection.columns(line).expect("line is inside the range");
-            let from = if row.first().is_some_and(|s| s.style == PROMPT_LEAD) { from.max(2) } else { from };
+            let from = if row.first().is_some_and(|s| Style { bg: None, ..s.style } == PROMPT_LEAD) { from.max(2) } else { from };
             rows.push((row, from, to));
         }
         plain_text(&rows)
@@ -5021,47 +5021,29 @@ impl App {
         let mut panel_view = (0, Vec::new());
         match &self.panel {
             Some(panel) => {
-                let rule_title = match panel {
-                    Panel::Settings { .. } | Panel::ContextWindows { .. } | Panel::Headroom { .. } | Panel::ProviderOrder { .. } | Panel::Profiles { .. } | Panel::ProfileSkills { .. } => {
-                        Some("Settings")
-                    }
-                    Panel::Models { back: ModelsBack::Settings, .. } => Some("Settings"),
-                    Panel::Ask(_) => Some("Question"),
-                    _ => None,
-                };
-                let lines = match rule_title {
-                    Some(title) => {
-                        let mut lines = panel::ruled(self.render_panel(panel, width), title, width);
-                        panel_cursor = take_cursor(&mut lines).map(|(x, y)| (x, bottom.len() + y));
-                        lines
-                    }
-                    None => {
-                        let mut lines = self.render_panel(panel, width.saturating_sub(panel::BOX_COLUMNS));
-                        // The border adds a row above the panel's first line and two columns left of it.
-                        panel_cursor = take_cursor(&mut lines).map(|(x, y)| (x + 2, bottom.len() + y + 1));
-                        panel::boxed(lines, width)
-                    }
-                };
+                let mut lines = self.render_panel(panel, width);
+                panel_cursor = take_cursor(&mut lines).map(|(x, y)| (x, bottom.len() + y));
                 panel_view = (bottom.len(), lines.clone());
                 bottom.extend(lines);
+                bottom.push(Vec::new());
             }
             None => bottom.extend(self.menu()),
         }
-        let mut status = Line::new();
+        // Queued prompts, todos and the menu lead with a blank line; without them the editor needs its own gap.
+        if bottom.is_empty() {
+            bottom.push(Vec::new());
+        }
         if let Some(started) = self.working {
             let tick = (started.elapsed().as_millis() / 80) as usize;
-            // Without the margin shimmer_line leads with: the rule already ends in a space.
-            status = shimmer_line(working_label(self.entries.last().map(|e| &e.item)), tick).split_off(1);
+            // Without the margin shimmer_line leads with, so the status lines up with the transcript.
+            let mut status = shimmer_line(working_label(self.entries.last().map(|e| &e.item)), tick).split_off(1);
             // shortcut: about 4 chars per token for the request still streaming; tool inputs are not counted until its usage arrives.
             let output = self.prompt_usage.output + self.streamed_chars as u64 / 4;
             self.shown_output = count_toward(self.shown_output, output);
             status.push(span(format!(" {} · ↓ {} tokens", duration(started.elapsed()), tokens(self.shown_output)), DIM));
-        }
-        // Queued prompts, todos and the menu lead with a blank line; without them the rule needs its own gap.
-        if bottom.is_empty() {
+            bottom.push(status);
             bottom.push(Vec::new());
         }
-        bottom.push(rule(status, MUTED, width));
         if self.editor_width != width {
             // The selection counts wrapped rows, which a new width renumbers; input_line would index past them.
             self.input_selection = Selection::default();
@@ -5069,7 +5051,7 @@ impl App {
         }
         let (mut editor_rows, (cursor_x, cursor_row)) = self.editor.render(width);
         if self.editor.text().is_empty() {
-            editor_rows[0].push(span("Ask anything, / commands and skills, @ files", DIM));
+            editor_rows[0].push(span("Ask, /command, @file", DIM));
         }
         let editor_top = bottom.len();
         let shown = editor_rows.len().min(EDITOR_ROWS);
@@ -5084,7 +5066,6 @@ impl App {
         }
         bottom.extend(editor_rows);
         let cursor = panel_cursor.unwrap_or((cursor_x, editor_top + cursor_row - self.input_top));
-        bottom.push(rule(Line::new(), MUTED, width));
         bottom.extend(self.footer(width));
         let focus = match self.panel {
             Some(Panel::Agents { row }) => Some(row.min(pills + workflows.len())),
@@ -5588,21 +5569,27 @@ fn unnamed_title(cwd: &Path) -> String {
 const TODO_ROWS: usize = 5;
 const PINNED_PROMPT_ROWS: usize = 3;
 
-/// Draws a prompt over the top transcript rows on a background, cut to three rows with "…".
+/// Draws a prompt over the top transcript rows, cut to three rows with "…".
 fn pin_prompt(rows: &mut [Line], prompt: &[Line], width: usize) {
     let pinned = PINNED_PROMPT_ROWS.min(rows.len()).min(prompt.len());
     for index in 0..pinned {
         let mut row = prompt[index].clone();
         if index + 1 == pinned && prompt.len() > pinned {
+            row.pop();
             row.push(span("…", PLAIN));
-            row = truncate(&row, width);
-        }
-        row.push(span(" ".repeat(width.saturating_sub(line_width(&row))), PLAIN));
-        for span in &mut row {
-            span.style.bg = Some(PINNED_BG);
+            row = band(truncate(&row, width), width);
         }
         rows[index] = row;
     }
+}
+
+/// `row` padded to `width` and set on the prompt background; its last span is the padding.
+fn band(mut row: Line, width: usize) -> Line {
+    row.push(span(" ".repeat(width.saturating_sub(line_width(&row))), PLAIN));
+    for span in &mut row {
+        span.style.bg = Some(PROMPT_BG);
+    }
+    row
 }
 
 /// The widget above the editor: up to five tasks from the first open one, gone once nothing is open.
@@ -5626,7 +5613,7 @@ fn todo_lines(todos: &Todos) -> Vec<Line> {
 }
 
 fn update_todos_lines(tasks: &[Task], width: usize) -> Vec<Line> {
-    let mut lines = vec![vec![span("✓", OK), span(" Update Todos", TOOL_NAME)]];
+    let mut lines = vec![vec![span("✓", OK), span(" Update Todos", TOOL_ARGS)]];
     for (index, task) in tasks.iter().enumerate() {
         let gutter = if index == 0 { "  ⎿  " } else { "     " };
         lines.push(truncate(&vec![span(gutter, MUTED), todo_span(task.status, &task.subject)], width));
@@ -5687,7 +5674,7 @@ fn render_item(item: &Item, width: usize, expanded: bool, cwd: &Path) -> Vec<Lin
         }
         Item::Subagent(run) => subagent_done_lines(run, width),
         Item::Error(text) => system_lines("✗", "error", text, ERROR, width),
-        Item::User(text) => prompt_rows(text, BRIGHT.bold(), width),
+        Item::User(text) => prompt_rows(text, BRIGHT, width).into_iter().map(|row| band(row, width)).collect(),
         Item::Images(tags) => tags.iter().map(|tag| image_row(tag)).collect(),
         Item::Assistant { text, thinking } => {
             let mut lines = Vec::new();
@@ -5715,7 +5702,7 @@ fn render_item(item: &Item, width: usize, expanded: bool, cwd: &Path) -> Vec<Lin
         Item::Todos(tasks) => update_todos_lines(tasks, width),
         Item::Done { took, usage, total } => {
             let stats = format!(" ↑{} ↓{} · total {}", tokens(usage.input), tokens(usage.output), duration(*total));
-            vec![rule(vec![star(usize::MAX), span(format!(" {}", duration(*took)), MUTED), span(stats, DIM)], RULE, width)]
+            vec![vec![star(usize::MAX), span(format!(" {}", duration(*took)), MUTED), span(stats, DIM)]]
         }
     }
 }
@@ -5772,7 +5759,7 @@ fn subagent_done_lines(run: &Run, width: usize) -> Vec<Line> {
 fn render_tool(name: &str, input: &Value, result: Option<&(String, bool)>, width: usize, expanded: bool, cwd: &Path) -> Vec<Line> {
     // The list itself replaces this row once the call ends; see show_todos.
     if result.is_none() && edits_todos(name, input) {
-        return vec![vec![span("•", MUTED), span(" Update Todos", TOOL_NAME)]];
+        return vec![vec![span("•", MUTED), span(" Update Todos", TOOL_ARGS)]];
     }
     let edits_lines = matches!(name, "ReplaceLines" | "Edit" | "InsertLines");
     let (icon, icon_style) = match result {
@@ -5786,17 +5773,20 @@ fn render_tool(name: &str, input: &Value, result: Option<&(String, bool)>, width
     let header = match skill_name(name, input) {
         Some(skill) => {
             let hint = if expanded { "" } else { " (ctrl+o to expand)" };
-            vec![span(icon, icon_style), span(" Skill ", TOOL_NAME), span(skill, TOOL_ARGS), span(hint, MUTED)]
+            vec![span(icon, icon_style), span(" Skill ", TOOL_ARGS), span(skill, TOOL_INPUT), span(hint, DIM)]
         }
         None => {
-            let mut header = match mcp_tool(name) {
-                Some((server, tool)) => vec![span(icon, icon_style), span(" ", PLAIN), span(tool, TOOL_NAME), span(format!(" MCP: {server}"), MUTED)],
-                None => vec![span(icon, icon_style), span(" ", PLAIN), span(name, TOOL_NAME)],
+            let (tool, server) = match mcp_tool(name) {
+                Some((server, tool)) => (tool, Some(server)),
+                None => (name.to_string(), None),
             };
+            let mut header = vec![span(icon, icon_style), span(format!(" {tool}"), TOOL_ARGS)];
             let args = tool_args(name, input, cwd);
             if !args.is_empty() {
-                header.push(span(" ", PLAIN));
-                header.extend(arg_spans(name, input, &args));
+                header.push(span(format!(" {args}"), TOOL_INPUT));
+            }
+            if let Some(server) = server {
+                header.push(span(format!(" MCP: {server}"), DIM));
             }
             // The diff comes first; an LSP report or a truncation note follows after a blank line.
             if let Some((output, false)) = result
@@ -5836,30 +5826,18 @@ fn render_tool(name: &str, input: &Value, result: Option<&(String, bool)>, width
     lines
 }
 
-/// `args` with its main part bright: Grep's pattern, a file tool's file name. Bash's command stays gray.
-fn arg_spans(name: &str, input: &Value, args: &str) -> Line {
-    let main = match name {
-        "Bash" => None,
-        "Grep" => input["pattern"].as_str(),
-        _ => input["file_path"].as_str().and_then(|path| Path::new(path).file_name()?.to_str()),
-    };
-    // shortcut: the first match is lit, so a directory that contains the file's name wins over the name; upgrade when tool_args returns spans.
-    let Some((at, main)) = main.filter(|main| !main.is_empty()).and_then(|main| Some((args.find(main)?, main))) else {
-        return vec![span(args, TOOL_ARGS)];
-    };
-    vec![span(&args[..at], TOOL_ARGS), span(main, BRIGHT), span(&args[at + main.len()..], TOOL_ARGS)]
-}
-
-/// What a collapsed call says about its result: an error's last line, or how many lines came back when more than one.
+/// What a collapsed call says about its result: an error's last line, a one-line result itself, or how many lines came back.
 fn result_note(result: Option<&(String, bool)>) -> Line {
     let Some((output, is_error)) = result else { return Line::new() };
     if *is_error {
         let Some(last) = output.lines().rfind(|line| !line.trim().is_empty()) else { return Line::new() };
         return vec![span(" · ", DIM), span(last.trim(), ERROR)];
     }
-    match output.lines().count() {
-        0 | 1 => Line::new(),
-        count => vec![span(format!(" · {count} lines"), DIM)],
+    let mut lines = output.lines().filter(|line| !line.trim().is_empty());
+    match (lines.next(), lines.count()) {
+        (None, _) => Line::new(),
+        (Some(only), 0) => vec![span(format!(" · {}", only.trim()), DIM)],
+        (Some(_), rest) => vec![span(format!(" · {} lines", rest + 1), DIM)],
     }
 }
 
@@ -5877,7 +5855,7 @@ fn answer_lines(icon: &str, icon_style: Style, answers: &[(String, String)], wid
     for (index, (question, answer)) in answers.iter().enumerate() {
         let mut spans = vec![span(question, TOOL_ARGS)];
         if index == 0 {
-            spans.splice(0..0, [span(icon, icon_style), span(" ", PLAIN), span("AskUserQuestion ", TOOL_NAME)]);
+            spans.splice(0..0, [span(icon, icon_style), span(" ", PLAIN), span("AskUserQuestion ", TOOL_ARGS)]);
         }
         let mut rows = wrap(&spans, width, &vec![span("  ", PLAIN)]);
         if index == 0 {
@@ -6348,7 +6326,14 @@ fn history_items(messages: &[Value]) -> Vec<Item> {
     for message in messages {
         for block in message["content"].as_array().into_iter().flatten() {
             match (message["role"].as_str(), block["type"].as_str()) {
-                (Some("user"), Some("text")) => items.push(Item::User(block["text"].as_str().unwrap_or_default().to_string())),
+                (Some("user"), Some("text")) => {
+                    let text = block["text"].as_str().unwrap_or_default();
+                    items.push(match crate::agent::harness_source(text) {
+                        // The live transcript shows these as a one-line notice too, not as a prompt.
+                        Some(source) => Item::System { source: source.into(), text: text.lines().next().unwrap_or_default().into(), tone: Tone::Info },
+                        None => Item::User(text.to_string()),
+                    });
+                }
                 (Some("assistant"), Some("text")) => items.push(Item::Assistant { text: block["text"].as_str().unwrap_or_default().to_string(), thinking: String::new() }),
                 (Some("assistant"), Some("tool_use")) => items.push(Item::Tool {
                     id: block["id"].as_str().unwrap_or_default().to_string(),
@@ -7130,12 +7115,11 @@ mod tests {
     }
 
     #[test]
-    fn done_line_is_a_rule_across_the_width_with_the_dim_star() {
+    fn done_line_leads_with_the_dim_star() {
         let item = Item::Done { took: Duration::from_secs(83), usage: Usage { input: 1200, output: 300, ..Usage::default() }, total: Duration::from_secs(600) };
         let line = &render_item(&item, 80, false, Path::new("/repo"))[0];
-        assert!(text(line).starts_with("──── ✧ 1m 23s ↑"), "{}", text(line));
-        assert_eq!(line[1].style, DIM);
-        assert_eq!(line_width(line), 80);
+        assert!(text(line).starts_with("✧ 1m 23s ↑"), "{}", text(line));
+        assert_eq!(line[0].style, DIM);
         assert_eq!(text(&rule(Line::new(), MUTED, 3)), "───");
     }
 
@@ -7144,6 +7128,13 @@ mod tests {
         let rows = prompt_rows("a\nb", BRIGHT, 10);
         assert_eq!(rows.iter().map(text).collect::<Vec<_>>(), ["❯ a", "  b"]);
         assert!(rows.iter().all(|row| row[0].style == PROMPT_LEAD && row.iter().all(|s| s.style.bg.is_none())));
+    }
+
+    #[test]
+    fn user_prompt_sits_on_a_full_width_band() {
+        let rows = render_item(&Item::User("a\nb".into()), 6, false, Path::new("/repo"));
+        assert_eq!(rows.iter().map(text).collect::<Vec<_>>(), ["❯ a   ", "  b   "]);
+        assert!(rows.iter().flatten().all(|s| s.style.bg == Some(PROMPT_BG)));
     }
 
     #[test]
@@ -7257,15 +7248,16 @@ mod tests {
     }
 
     #[test]
-    fn collapsed_tool_row_ends_with_its_result_and_lights_the_main_argument() {
+    fn collapsed_tool_row_ends_with_its_result_and_keeps_its_arguments_gray() {
         let row = |name: &str, input: Value, output: &str, failed: bool| render_tool(name, &input, Some(&(output.to_string(), failed)), 80, false, Path::new("/repo")).remove(0);
         let read = row("Read", json!({"file_path": "/repo/src/a.rs"}), "1\n2\n3\n", false);
         assert_eq!(text(&read), "✓ Read src/a.rs · 3 lines");
-        assert_eq!(read.iter().filter(|s| s.style == BRIGHT).map(|s| s.text.as_str()).collect::<Vec<_>>(), ["a.rs"]);
-        assert_eq!(text(&row("Bash", json!({"command": "cargo test"}), "running\ntest x ... FAILED\n\n", true)), "✗ Bash cargo test · test x ... FAILED");
-        let bash = row("Bash", json!({"command": "true"}), "", false);
-        assert_eq!(text(&bash), "✓ Bash true");
-        assert!(bash.iter().all(|s| s.style != BRIGHT), "{bash:?}");
+        assert_eq!(read[2].style, TOOL_INPUT);
+        let failed = row("Bash", json!({"command": "cargo test"}), "running\ntest x ... FAILED\n\n", true);
+        assert_eq!(text(&failed), "✗ Bash cargo test · test x ... FAILED");
+        assert_eq!(failed[0].style, ERROR);
+        assert_eq!(text(&row("Bash", json!({"command": "pwd"}), "\n/repo\n", false)), "✓ Bash pwd · /repo");
+        assert_eq!(text(&row("Bash", json!({"command": "true"}), "", false)), "✓ Bash true");
         assert!(running_seconds(Some(Instant::now())).is_empty());
         assert_eq!(text(&running_seconds(Instant::now().checked_sub(Duration::from_secs(4)))), " · 4s");
     }
@@ -7310,7 +7302,7 @@ mod tests {
         };
         let rows = |item: &Item| render_item(item, 80, false, Path::new("/repo")).iter().map(text).collect::<Vec<_>>();
         assert_eq!(rows(&tool(None)), ["• Video source: a.mp4", "└ transcribing 0:10 / 1:00"]);
-        assert_eq!(rows(&tool(Some(("done".into(), false)))), ["✓ Video source: a.mp4"]);
+        assert_eq!(rows(&tool(Some(("done".into(), false)))), ["✓ Video source: a.mp4 · done"]);
     }
 
     #[test]
@@ -7323,17 +7315,17 @@ mod tests {
     #[test]
     fn mcp_tool_shows_its_name_and_server() {
         let lines = render_tool("mcp__vexdock__get_service", &json!({"service_id": "s1"}), None, 80, false, Path::new("/repo"));
-        assert_eq!(text(&lines[0]), "• GetService MCP: vexdock service_id: s1");
+        assert_eq!(text(&lines[0]), "• GetService service_id: s1 MCP: vexdock");
     }
 
     #[test]
     fn tool_rows_show_paths_relative_to_the_working_directory() {
         let ok = ("body".to_string(), false);
         let row = |name: &str, input: Value| text(&render_tool(name, &input, Some(&ok), 80, false, Path::new("/repo"))[0]);
-        assert_eq!(row("Read", json!({"file_path": "/repo/src/a.rs"})), "✓ Read src/a.rs");
-        assert_eq!(row("Read", json!({"paths": ["/repo/a.rs", "/etc/hosts"]})), "✓ Read a.rs, /etc/hosts");
-        assert_eq!(row("Grep", json!({"pattern": "fn", "path": "/repo"})), "✓ Grep fn in .");
-        assert_eq!(row("Write", json!({"file_path": "/repository/a.rs"})), "✓ Write /repository/a.rs");
+        assert_eq!(row("Read", json!({"file_path": "/repo/src/a.rs"})), "✓ Read src/a.rs · body");
+        assert_eq!(row("Read", json!({"paths": ["/repo/a.rs", "/etc/hosts"]})), "✓ Read a.rs, /etc/hosts · body");
+        assert_eq!(row("Grep", json!({"pattern": "fn", "path": "/repo"})), "✓ Grep fn in . · body");
+        assert_eq!(row("Write", json!({"file_path": "/repository/a.rs"})), "✓ Write /repository/a.rs · body");
     }
 
     #[test]
@@ -7504,7 +7496,7 @@ mod tests {
         assert_eq!(text(&rows), ["❯ a       ", "  b       ", "x", "x", "x"]);
         pin_prompt(&mut rows, &render_item(&Item::User("1\n2\n3\n4".into()), 10, false, Path::new("/repo")), 10);
         assert_eq!(text(&rows), ["❯ 1       ", "  2       ", "  3…      ", "x", "x"]);
-        assert!(rows[2].iter().all(|s| s.style.bg == Some(PINNED_BG)));
+        assert!(rows[2].iter().all(|s| s.style.bg == Some(PROMPT_BG)));
     }
 
     #[test]
@@ -7521,10 +7513,18 @@ mod tests {
     }
 
     #[test]
+    fn history_shows_agent_added_texts_as_notices() {
+        let shell = json!({"type": "text", "text": "Ran `cd ..`\n```\nmoved\n```"});
+        let messages = [json!({"role": "user", "content": [shell, {"type": "text", "text": "go"}]})];
+        let items = history_items(&messages);
+        assert!(matches!(&items[0], Item::System { source, text, .. } if source == "shell" && text == "Ran `cd ..`"));
+        assert!(matches!(&items[1], Item::User(text) if text == "go"));
+    }
+
+    #[test]
     fn rewind_entry_finds_the_chosen_prompt_among_repeats_and_bash_output() {
         let entry = |item: Item| Entry { item, cache: None };
         let user = |text: &str| entry(Item::User(text.into()));
-        // A resumed session shows shell output blocks as user items too; they are not rewind points.
         let entries = [user("go"), entry(Item::Lines(Vec::new())), user("Ran `ls`"), user("go"), user("done?")];
         let point = |at: usize, text: &str| RewindPoint { at, text: text.into(), images: Vec::new() };
         let points = [point(0, "go"), point(2, "go"), point(4, "done?")];

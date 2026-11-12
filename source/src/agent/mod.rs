@@ -2651,10 +2651,33 @@ pub fn rewind_points(messages: &[Value]) -> Vec<RewindPoint> {
         }
         // The typed text is the last block; shell output and todo notes come before it.
         let Some(text) = blocks.iter().rev().find_map(|block| block["text"].as_str()) else { continue };
+        // A turn started by finished background work has no typed prompt.
+        if harness_source(text).is_some() {
+            continue;
+        }
         let images = blocks.iter().filter(|block| block["type"] == "image").cloned().collect();
         points.push(RewindPoint { at, text: text.to_string(), images });
     }
     points
+}
+
+/// The source of a text the agent added to a user message itself (finished background work, `!cmd` output, a move),
+/// matched by the openings their producers write. shortcut: a new producer counts as a typed prompt until it is listed here.
+pub fn harness_source(text: &str) -> Option<&'static str> {
+    const OPENINGS: [(&str, &str); 11] = [
+        ("Background terminal ", "terminal"),
+        ("Subagent ", "subagent"),
+        ("Answer from ", "subagent"),
+        ("Message from subagent ", "subagent"),
+        ("Message from another agent session ", "peer"),
+        ("Workflow ", "workflow"),
+        ("Scheduled task ", "cron"),
+        ("Ran `", "shell"),
+        ("Session moved from ", "session"),
+        ("The user set todo #", "todo"),
+        ("The user deleted todo #", "todo"),
+    ];
+    OPENINGS.iter().find(|(opening, _)| text.starts_with(opening)).map(|(_, source)| *source)
 }
 
 /// A file this session's tool calls changed, with its diff from before the first of them to now.
@@ -3642,7 +3665,7 @@ mod tests {
         let tool_result = json!({"role": "user", "content": [{"type": "tool_result", "tool_use_id": "1", "content": "x"}, {"type": "text", "text": "steer"}]});
         let image = json!({"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AA"}});
         let with_context = json!({"role": "user", "content": [{"type": "text", "text": "$ ls"}, image, {"type": "text", "text": "fix [Image #1]"}]});
-        let messages = [user("hi"), assistant("b"), tool_result, with_context];
+        let messages = [user("hi"), assistant("b"), tool_result, with_context, assistant("c"), user("Background terminal bt-1 \"x\" exited (exit 0) after 1s.")];
         let hi = RewindPoint { at: 0, text: "hi".into(), images: Vec::new() };
         let fix = RewindPoint { at: 3, text: "fix [Image #1]".into(), images: vec![image] };
         assert_eq!(rewind_points(&messages), [hi, fix]);
