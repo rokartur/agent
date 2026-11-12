@@ -530,10 +530,10 @@ fn update_todos_marks_each_task_and_strikes_through_the_done_ones() {
     let task = |subject: &str, status| Task { id: 1, subject: subject.into(), description: None, active_form: None, status };
     let lines = update_todos_lines(&[task("review", Status::Completed), task("fix", Status::InProgress), task("test", Status::Pending)], 40);
     let rows: Vec<String> = lines.iter().map(text).collect();
-    assert_eq!(rows, ["✓ Update Todos", "  ⎿  ✔ review", "     ◼ fix", "     ◻ test"]);
+    assert_eq!(rows, ["✓ Update Todos", "  ⎿  ✓ review", "     • fix", "     ○ test"]);
     let running: Vec<String> = render_tool("Todo", &json!({"action": "create", "subject": "x"}), None, 40, false, Path::new("/repo")).iter().map(text).collect();
     assert_eq!(running, ["• Update Todos"]);
-    assert!(lines[1][1].style.strikethrough && lines[2][1].style.bold && lines[3][1].style == PLAIN);
+    assert!(lines[1][1].style == OK && lines[1][2].style.strikethrough && lines[2][1].style.bold && lines[3][1].style == DIM && lines[3][2].style == PLAIN);
 }
 
 #[test]

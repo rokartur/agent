@@ -57,6 +57,9 @@ impl App {
             bottom.push(Vec::new());
         }
         if let Some(started) = self.working {
+            if bottom.last().is_some_and(|line| !line.is_empty()) {
+                bottom.push(Vec::new());
+            }
             let tick = (started.elapsed().as_millis() / 80) as usize;
             // Without the margin shimmer_line leads with, so the status lines up with the transcript.
             let mut status = shimmer_line(working_label(self.entries.last().map(|e| &e.item)), tick).split_off(1);
@@ -460,10 +463,10 @@ pub(super) fn todo_lines(todos: &Todos) -> Vec<Line> {
             (Status::InProgress, Some(form)) => form,
             _ => &task.subject,
         };
-        lines.push(vec![span(" ", PLAIN), todo_span(task.status, text)]);
+        lines.push(todo_spans(task.status, text));
     }
     if tasks.len() > TODO_ROWS {
-        lines.push(vec![span(format!("   +{} more, /todos", tasks.len() - TODO_ROWS), DIM)]);
+        lines.push(vec![span(format!("  +{} more, /todos", tasks.len() - TODO_ROWS), DIM)]);
     }
     lines
 }
