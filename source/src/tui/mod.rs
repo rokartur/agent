@@ -1186,7 +1186,7 @@ fn event_loop(app: &mut App, inbox: &Receiver<Msg>) -> Result<(), String> {
         } else if app.working.is_some()
             || app.hint.is_some()
             || app.transcribing.is_some()
-            || (matches!(app.panel, Some(Panel::Tasks { .. })) && (app.subagents.lock().unwrap().running() > 0 || app.terminals.lock().unwrap().running() > 0))
+            || (matches!(app.panel, Some(Panel::Tasks { .. } | Panel::Terminal { .. })) && (app.subagents.lock().unwrap().running() > 0 || app.terminals.lock().unwrap().running() > 0))
         {
             ANIMATION_TICK
         } else {
@@ -5151,8 +5151,8 @@ impl App {
     fn diff_view(&mut self, width: usize, height: usize) -> Vec<Line> {
         let Some(Panel::Diff { files, index, scroll }) = self.panel.as_mut() else { unreachable!("frame checks the panel") };
         let lines: Vec<Line> = diff_lines(&files[*index]).iter().map(|line| truncate(line, width)).collect();
-        let header = vec![span(format!(" {}", files[*index].path), TOOL_NAME), span(format!("  {}/{}", *index + 1, files.len()), DIM)];
-        full_screen(header, &lines, scroll, width, height, " ↑↓ scroll     ←→ previous/next file     esc back")
+        let header = screen_header(vec![span(&files[*index].path, BRIGHT.bold())], *index, files.len(), width);
+        full_screen(header, &lines, scroll, width, height, &[("↑↓", "scroll"), ("←→", "file"), ("esc", "back")])
     }
 
     fn diff_key(&mut self, code: KeyCode) {
@@ -5189,8 +5189,20 @@ impl App {
             *loaded = Some((size, width));
             *lines = log_lines(&terminal.log(), width);
         }
-        let header = vec![span(format!(" {} {}", terminal.id, terminal.title), SYSTEM), span(format!("  {} {}", terminal.status().as_str(), terminal.elapsed()), DIM)];
-        full_screen(header, lines, scroll, width, height, " ↑↓ scroll     ←→ previous/next shell     x stop     esc back")
+        let status = terminal.status();
+        let frames = crate::spinner::FRAMES;
+        let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default();
+        let mark = match status {
+            TerminalStatus::Running => span(frames[(now.as_millis() / ANIMATION_TICK.as_millis()) as usize % frames.len()], MUTED),
+            TerminalStatus::Done => span("✓", OK),
+            TerminalStatus::Failed => span("✗", ERROR),
+            TerminalStatus::Killed => span("✗", WARN),
+        };
+        let about = format!(" {} · {} {} · {}", terminal.id, status.as_str(), terminal.elapsed(), short_path(&terminal.cwd.display().to_string()));
+        let label = vec![mark, span(" ", PLAIN), span(&terminal.title, BRIGHT.bold()), span(about, DIM)];
+        let count = self.terminals.lock().unwrap().list.len();
+        let header = screen_header(label, *index, count, width);
+        full_screen(header, lines, scroll, width, height, &[("↑↓", "scroll"), ("←→", "shell"), ("x", "stop"), ("esc", "back")])
     }
 
     fn terminal_key(&mut self, code: KeyCode) {
@@ -6220,7 +6232,24 @@ fn rewind_note(files: Option<RestoredFiles>) -> String {
 
 /// A full-screen read-only view: `header`, the last screenful of `lines` scrolled up by `scroll`, a rule and `hint`.
 /// Lines shorter than the screen start under the header, like a pager.
-fn full_screen(header: Line, lines: &[Line], scroll: &mut usize, width: usize, height: usize, hint: &str) -> Vec<Line> {
+/// A full-screen view's top rule: `label`, then "2/3" near the right end when there is more than one.
+fn screen_header(label: Line, index: usize, count: usize, width: usize) -> Line {
+    let position = if count > 1 { vec![span(format!(" {}/{count} ", index + 1), DIM), span("──", MUTED)] } else { Line::new() };
+    let mut header = rule(label, MUTED, width.saturating_sub(line_width(&position)));
+    header.extend(position);
+    header
+}
+
+/// `keys` as `key label` pairs, the key bright and its label dim.
+fn key_hints(keys: &[(&str, &str)]) -> Line {
+    let mut line = Vec::new();
+    for (key, label) in keys {
+        line.extend([span(format!(" {key}"), BRIGHT), span(format!(" {label}  "), DIM)]);
+    }
+    line
+}
+
+fn full_screen(header: Line, lines: &[Line], scroll: &mut usize, width: usize, height: usize, keys: &[(&str, &str)]) -> Vec<Line> {
     let room = height.saturating_sub(3);
     *scroll = (*scroll).min(lines.len().saturating_sub(room));
     let end = lines.len() - *scroll;
@@ -6228,8 +6257,8 @@ fn full_screen(header: Line, lines: &[Line], scroll: &mut usize, width: usize, h
     let mut rows = vec![header];
     rows.extend_from_slice(&lines[start..end]);
     rows.resize(room + 1, Vec::new());
-    rows.push(vec![span("─".repeat(width), Style::fg(240))]);
-    rows.push(vec![span(hint, DIM)]);
+    rows.push(rule(Line::new(), MUTED, width));
+    rows.push(key_hints(keys));
     rows
 }
 
@@ -7582,8 +7611,15 @@ mod tests {
     #[test]
     fn full_screen_starts_short_output_under_the_header() {
         let lines = vec![vec![span("a", PLAIN)], vec![span("b", PLAIN)]];
-        let rows: Vec<String> = full_screen(vec![span("head", PLAIN)], &lines, &mut 0, 4, 7, "hint").iter().map(text).collect();
-        assert_eq!(rows, ["head", "a", "b", "", "", "────", "hint"]);
+        let rows: Vec<String> = full_screen(vec![span("head", PLAIN)], &lines, &mut 0, 4, 7, &[("esc", "back")]).iter().map(text).collect();
+        assert_eq!(rows, ["head", "a", "b", "", "", "────", " esc back  "]);
+    }
+
+    #[test]
+    fn screen_header_is_a_rule_with_the_position_only_among_several() {
+        let header = screen_header(vec![span("ls", PLAIN)], 1, 3, 20);
+        assert_eq!((text(&header).as_str(), line_width(&header)), ("──── ls ───── 2/3 ──", 20));
+        assert_eq!(text(&screen_header(vec![span("ls", PLAIN)], 0, 1, 10)), "──── ls ──");
     }
 
     #[test]
