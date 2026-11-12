@@ -755,7 +755,7 @@ mod tests {
         assert_eq!(trusted.trusted_projects, [root.display().to_string()]);
         let strings = |rules: &[&str]| rules.iter().map(|rule| rule.to_string()).collect::<Vec<_>>();
         assert_eq!(trusted.permissions, Rules { allow: strings(&["Bash(ls*)"]), ask: strings(&["Bash(git push*)"]), deny: strings(&["Read(.env*)", "Edit(secrets/**)"]) });
-        let shared = root.join(".agents/settings.json").display().to_string();
+        let shared = root.join(".agents").join("settings.json").display().to_string();
         let mut expected: Vec<String> =
             ["on_start", "permission_mode", "permissions.allow", "trusted_projects"].iter().map(|key| format!("{shared}: ignored \"{key}\", a project cannot set it")).collect();
         let mut ignored = ignored;

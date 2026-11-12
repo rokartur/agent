@@ -539,7 +539,8 @@ mod tests {
         assert_eq!(subjects("Bash", &json!({"command": "ls"}), &[], &dir), ["ls"]);
         assert_eq!(subjects("WebFetch", &json!({"urls": ["a"], "url": "b"}), &[], &dir), ["a", "b"]);
         assert!(subjects("Grep", &json!({"pattern": "x"}), &[], &dir).is_empty());
-        assert_eq!(subjects("Grep", &json!({"pattern": "x", "path": "/nowhere/.env"}), &[], &dir), ["/nowhere/.env"]);
+        // Windows puts a drive in front.
+        assert!(subjects("Grep", &json!({"pattern": "x", "path": "/nowhere/.env"}), &[], &dir)[0].ends_with("/nowhere/.env"));
     }
 
     #[test]
