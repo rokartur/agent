@@ -97,6 +97,19 @@ fn a_permission_digit_inside_the_settle_time_is_ignored_and_esc_denies() {
 }
 
 #[test]
+fn up_from_the_first_background_row_hands_keys_back_to_the_editor() {
+    let home = std::env::temp_dir().join(format!("agent-tui-background-up-{}", std::process::id()));
+    let mut app = test_app(&home);
+    std::fs::remove_dir_all(&home).ok();
+    app.subagents.lock().unwrap().list.push(Arc::new(crate::agent::subagent::scan_run()));
+    app.key(KeyEvent::from(KeyCode::Down));
+    assert!(matches!(app.panel, Some(Panel::Agents { row: 1 })));
+    app.key(KeyEvent::from(KeyCode::Up));
+    app.key(KeyEvent::from(KeyCode::Char('a')));
+    assert_eq!(app.editor.text(), "a");
+}
+
+#[test]
 fn ctrl_c_on_context_windows_goes_back_to_its_settings_row() {
     let home = std::env::temp_dir().join(format!("agent-tui-ctrl-c-{}", std::process::id()));
     let mut app = test_app(&home);
