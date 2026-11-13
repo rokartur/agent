@@ -71,6 +71,7 @@ pub const PLAIN: Style = Style { fg: Color::Default, bg: None, bold: false, ital
 pub const BRIGHT: Style = Style::fg(255);
 pub const MUTED: Style = Style::fg(245);
 pub const DIM: Style = Style::fg(241);
+pub const ACTIVE_TAB: Style = BRIGHT.bold().on(240);
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Span {

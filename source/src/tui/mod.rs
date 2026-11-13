@@ -78,7 +78,7 @@ use complete::*;
 use editor::Editor;
 use footer::*;
 use panels::*;
-use render::{BRIGHT, DIM, Line, MUTED, PLAIN, Span, Style, line_width, link_at, overlay_center, overlay_right, plain_text, select, span, take_cursor, text_in, truncate, width, wrap};
+use render::{ACTIVE_TAB, BRIGHT, DIM, Line, MUTED, PLAIN, Span, Style, line_width, link_at, overlay_center, overlay_right, plain_text, select, span, take_cursor, text_in, truncate, width, wrap};
 use screens::*;
 use selection::{Point, Selection};
 use session_panels::*;

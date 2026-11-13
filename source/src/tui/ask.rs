@@ -4,7 +4,7 @@ use std::sync::mpsc::Sender;
 
 use super::OK;
 use super::editor::Editor;
-use super::render::{BRIGHT, Line, MUTED, PLAIN, Style, span, wrap};
+use super::render::{ACTIVE_TAB, BRIGHT, Line, MUTED, PLAIN, Style, span, wrap};
 use crate::tools::ask::{Answer, Question, TYPE_SOMETHING};
 
 const PREVIEW_LINES: usize = 8;
@@ -144,7 +144,7 @@ impl AskPanel {
             }
             let mark = if self.answers[index].is_some() { "✓ " } else { "" };
             let tab = format!("{mark}{}", question.header);
-            line.push(if index == self.current { span(format!("[{tab}]"), BRIGHT.bold()) } else { span(tab, MUTED) });
+            line.push(if index == self.current { span(format!(" {tab} "), ACTIVE_TAB) } else { span(tab, MUTED) });
         }
         line
     }
@@ -261,6 +261,6 @@ mod tests {
         let mut panel = AskPanel::new(crate::tools::ask::parse(&input).unwrap(), reply);
         panel.key(KeyCode::Enter.into());
         let text: Vec<String> = panel.render(40).iter().map(|l| l.iter().map(|s| s.text.as_str()).collect()).collect();
-        assert_eq!(text[1], "✓ One   [Two]", "{text:#?}");
+        assert_eq!(text[1], "✓ One    Two ", "{text:#?}");
     }
 }

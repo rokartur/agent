@@ -1,5 +1,5 @@
 use super::OK;
-use super::render::{BRIGHT, DIM, Line, MUTED, PLAIN, span, truncate, width};
+use super::render::{ACTIVE_TAB, BRIGHT, DIM, Line, MUTED, PLAIN, span, truncate, width};
 
 pub struct Row {
     pub left: String,
@@ -24,7 +24,7 @@ pub fn search_rank(text: &str, query: &str) -> Option<u8> {
     query.chars().filter(|c| !c.is_whitespace()).all(|wanted| chars.any(|c| c == wanted)).then_some(1)
 }
 
-/// fx's bottom panel: a blank line, `Title  [Tab]  Tab`, `> search` when it filters, rows with the selected one bright, key hints.
+/// fx's bottom panel: a blank line, `Title   Tab   Tab` with the active tab on a background, `> search` when it filters, rows with the selected one bright, key hints.
 pub struct List<'a> {
     pub title: String,
     pub tabs: &'a [&'a str],
@@ -42,7 +42,7 @@ impl List<'_> {
         let mut header = vec![span(self.title.clone(), BRIGHT.bold())];
         for (index, tab) in self.tabs.iter().enumerate() {
             header.push(span("  ", PLAIN));
-            header.push(if index == self.tab { span(format!("[{tab}]"), BRIGHT.bold()) } else { span(*tab, MUTED) });
+            header.push(if index == self.tab { span(format!(" {tab} "), ACTIVE_TAB) } else { span(*tab, MUTED) });
         }
         let mut head = vec![header];
         if let Some(search) = &self.search {
@@ -96,7 +96,8 @@ mod tests {
         let rows = [Row { left: "a".into(), right: vec![span("x", MUTED)] }, Row { left: "abc".into(), right: vec![span("y", MUTED)] }];
         let panel = List { title: "Sessions 2".into(), tabs: &["One", "Two"], tab: 0, search: None, rows: &rows, selected: 1, empty: "", hint: "esc close" };
         let lines = panel.render(20, 5);
-        assert_eq!(text(&lines[1]), "Sessions 2  [One]  Two");
+        assert_eq!(text(&lines[1]), "Sessions 2   One   Two");
+        assert_eq!(lines[1][2].style, ACTIVE_TAB);
         assert_eq!(text(&lines[2]), "  a      x");
         assert_eq!(text(&lines[3]), "→ abc    y");
         assert_eq!(lines[3][0].style, OK);
@@ -128,7 +129,7 @@ mod tests {
         let rows = [Row { left: "a".into(), right: Vec::new() }];
         let panel = List { title: "History".into(), tabs: &["All", "Here"], tab: 0, search: Some("fo".into()), rows: &rows, selected: 0, empty: "", hint: "" };
         let lines: Vec<String> = panel.render(40, 5).iter().map(text).collect();
-        assert_eq!(lines[1..4], ["History  [All]  Here", "> fo", "→ a    "]);
+        assert_eq!(lines[1..4], ["History   All   Here", "> fo", "→ a    "]);
     }
 
     #[test]
