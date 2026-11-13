@@ -18,6 +18,20 @@ fn picking_an_account_reports_it_before_the_next_request() {
 }
 
 #[test]
+fn a_default_account_no_longer_saved_reports_the_first_one() {
+    let home = std::env::temp_dir().join(format!("agent-stale-default-{}", std::process::id()));
+    let client = Client::new(&home).unwrap();
+    let account = |name: &str| Account { provider: "anthropic".into(), name: name.into(), secret: Secret::ApiKey("sk".into()) };
+    client.reload(vec![account("home"), account("work")]);
+    let mut settings = crate::settings::load(&home).unwrap();
+    settings.default_accounts.insert("anthropic".into(), "deleted".into());
+    client.configure(&settings);
+    std::fs::remove_dir_all(&home).ok();
+
+    assert_eq!(client.account("anthropic"), Some(("home".into(), None)));
+}
+
+#[test]
 fn a_remote_headroom_gets_the_requests_with_the_proxy_token() {
     let home = std::env::temp_dir().join(format!("agent-remote-headroom-{}", std::process::id()));
     let mut client = Client::new(&home).unwrap();

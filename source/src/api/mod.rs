@@ -904,13 +904,10 @@ fn key(account: &Account) -> String {
 }
 
 /// The account the next request to `provider` is likely to use: the current pick, the pinned one, or the first.
+/// A pinned name no longer saved, as a stale `accounts.default`, falls through to the first.
 fn likely_account<'a>(state: &'a State, provider: &str) -> Option<&'a Account> {
-    let name = state.current.get(provider).or_else(|| state.pinned.get(provider));
-    let mut candidates = state.accounts.iter().filter(|a| a.provider == provider);
-    match name {
-        Some(name) => candidates.find(|a| &a.name == name),
-        None => candidates.next(),
-    }
+    let saved = |name: Option<&String>| state.accounts.iter().find(|a| a.provider == provider && Some(&a.name) == name);
+    saved(state.current.get(provider)).or_else(|| saved(state.pinned.get(provider))).or_else(|| state.accounts.iter().find(|a| a.provider == provider))
 }
 
 pub(crate) fn models_agent() -> ureq::Agent {
