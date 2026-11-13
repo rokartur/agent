@@ -257,7 +257,7 @@ impl App {
         let selected = (*row).min(last);
         let workflow = selected.checked_sub(1 + pills).map(|offset| workflows[offset].clone());
         match code {
-            KeyCode::Up if selected > 0 => *row = selected - 1,
+            KeyCode::Up if selected > 1 => *row = selected - 1,
             KeyCode::Down => *row = (selected + 1).min(last),
             KeyCode::Char('x') => {
                 if let Some(workflow) = workflow {
