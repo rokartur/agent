@@ -15,12 +15,18 @@ describe("usagefleet", () => {
 		const ultra = { limits: { fiveHourPct: null, sevenDayPct: 41, at: "2026-10-15T11:52:00Z" } };
 		expect(formatLimits(ultra, now)).toEqual([{ text: "7d " }, { text: "41%", tone: "ok" }]);
 		expect(hasFiveHourWindow(context, ultra)).toBe(false);
-		expect(hasFiveHourWindow(context, null)).toBe(true);
+		expect(hasFiveHourWindow(context, null)).toBeNull();
 		// The watcher reads another account, so the agent's reading of the session's account decides.
 		expect(hasFiveHourWindow({ ...context, accountUsage: { fiveHourPct: null, sevenDayPct: 41 } }, null)).toBe(false);
 		expect(hasFiveHourWindow({ ...context, accountUsage: { fiveHourPct: 0, sevenDayPct: 41 } }, ultra)).toBe(true);
 		const view = { group: "Artur", sessionPct: 0, weeklyPct: 17 };
 		expect(formatGroupLimits(view, true, false)?.map((part) => part.text).join("")).toBe("Artur: 7d 17%");
+	});
+
+	test("an account nobody has read yet shows its 5h window only once it is used", () => {
+		const unread = (sessionPct: number) => footer({ ...context, accountUsage: null }, { group: "Artur", sessionPct, weeklyPct: 17 }, null, now);
+		expect(unread(0)?.map((part) => part.text).join("")).toBe("7d 17%");
+		expect(unread(30)?.map((part) => part.text).join("")).toBe("5h 30% · 7d 17%");
 	});
 
 	test("falls back to the agent's reading of an account without a token or the watcher", () => {
