@@ -126,6 +126,22 @@ fn left_and_right_walk_between_the_shells_and_agents_pills() {
 }
 
 #[test]
+fn cmd_c_copies_the_selection_when_copy_on_select_is_off() {
+    let home = std::env::temp_dir().join(format!("agent-tui-cmd-c-{}", std::process::id()));
+    let mut app = test_app(&home);
+    std::fs::remove_dir_all(&home).ok();
+    app.settings.copy_on_select = false;
+    app.layout.width = 40;
+    app.editor.set("hello");
+    app.input_selection.press(Point { line: 0, column: 2 }, "❯ hello");
+    app.input_selection.drag(Point { line: 0, column: 7 }, "❯ hello");
+    app.input_selection.release();
+    app.key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::SUPER));
+    assert!(matches!(app.pending_copy, Some(Copied::Hint(_))));
+    assert_eq!(app.editor.text(), "hello");
+}
+
+#[test]
 fn ctrl_c_on_context_windows_goes_back_to_its_settings_row() {
     let home = std::env::temp_dir().join(format!("agent-tui-ctrl-c-{}", std::process::id()));
     let mut app = test_app(&home);
