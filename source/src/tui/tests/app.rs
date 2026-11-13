@@ -110,6 +110,22 @@ fn up_from_the_first_background_row_hands_keys_back_to_the_editor() {
 }
 
 #[test]
+fn left_and_right_walk_between_the_shells_and_agents_pills() {
+    let home = std::env::temp_dir().join(format!("agent-tui-background-sideways-{}", std::process::id()));
+    let mut app = test_app(&home);
+    std::fs::remove_dir_all(&home).ok();
+    let follow_ups = Arc::new(Mutex::new(Vec::new()));
+    app.terminals.lock().unwrap().start(&serde_json::json!({"command": "sleep 30"}), &std::env::temp_dir(), &follow_ups).unwrap();
+    app.subagents.lock().unwrap().list.push(Arc::new(crate::agent::subagent::scan_run()));
+    app.key(KeyEvent::from(KeyCode::Down));
+    app.key(KeyEvent::from(KeyCode::Right));
+    assert!(matches!(app.panel, Some(Panel::Agents { row: 2 })));
+    app.key(KeyEvent::from(KeyCode::Left));
+    assert!(matches!(app.panel, Some(Panel::Agents { row: 1 })));
+    app.terminals.lock().unwrap().kill_all();
+}
+
+#[test]
 fn ctrl_c_on_context_windows_goes_back_to_its_settings_row() {
     let home = std::env::temp_dir().join(format!("agent-tui-ctrl-c-{}", std::process::id()));
     let mut app = test_app(&home);

@@ -259,6 +259,9 @@ impl App {
         match code {
             KeyCode::Up if selected > 1 => *row = selected - 1,
             KeyCode::Down => *row = (selected + 1).min(last),
+            // The shells and agents pills share one line, so ←/→ walk between them too.
+            KeyCode::Left if selected == 2 && pills == 2 => *row = 1,
+            KeyCode::Right if selected == 1 && pills == 2 => *row = 2,
             KeyCode::Char('x') => {
                 if let Some(workflow) = workflow {
                     workflow.stop();
