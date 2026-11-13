@@ -289,6 +289,10 @@ impl App {
             }
             KeyCode::Esc => self.hint = Some((REWIND_HINT.into(), Instant::now())),
             KeyCode::Char('c') if ctrl => self.ctrl_c(),
+            // Ghostty sends Cmd+C here only with `keybind = performable:super+c=copy_to_clipboard`.
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::SUPER) => {
+                self.copy_selected();
+            }
             KeyCode::Char('d') if ctrl && self.editor.is_empty() => self.quit = true,
             KeyCode::Char('o') if ctrl => {
                 self.expanded = !self.expanded;
@@ -394,14 +398,8 @@ impl App {
     }
 
     pub(super) fn ctrl_c(&mut self) {
-        if !self.settings.copy_on_select {
-            let text = if self.selection.range().is_some() { self.selected_text() } else { self.input_selected_text() };
-            if !text.trim().is_empty() {
-                self.copy_selection(&text);
-                self.selection = Selection::default();
-                self.input_selection = Selection::default();
-                return;
-            }
+        if !self.settings.copy_on_select && self.copy_selected() {
+            return;
         }
         if !self.editor.is_empty() {
             self.editor.set("");
@@ -413,6 +411,18 @@ impl App {
             return;
         }
         self.hint = Some((EXIT_HINT.into(), Instant::now()));
+    }
+
+    /// Copies and clears the transcript or editor selection; false when nothing is selected.
+    fn copy_selected(&mut self) -> bool {
+        let text = if self.selection.range().is_some() { self.selected_text() } else { self.input_selected_text() };
+        if text.trim().is_empty() {
+            return false;
+        }
+        self.copy_selection(&text);
+        self.selection = Selection::default();
+        self.input_selection = Selection::default();
+        true
     }
 
     pub(super) fn cycle_thinking(&mut self) {
