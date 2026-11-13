@@ -175,7 +175,8 @@ impl App {
                 return;
             }
             KeyCode::Char('d') if view.installed => crate::plugins::remove(&self.home, &view.name),
-            KeyCode::Char('u') if view.installed => crate::plugins::update(&self.home, std::slice::from_ref(&view.name)).map(|updates| {
+            // shortcut: reads main on the UI thread, a pause of a GitHub round trip; move it to a thread if that shows.
+            KeyCode::Char('u') if view.installed => crate::plugins::update(&self.home, std::slice::from_ref(&view.name), &crate::plugins::fetch_from_main).map(|updates| {
                 for update in updates {
                     self.system("plugins", update.notice());
                 }

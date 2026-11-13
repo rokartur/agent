@@ -472,19 +472,24 @@ pub fn install(home: &Path, source: &str) -> Result<String, String> {
     }
     check_name(source)?;
     let (_, files) = BUNDLED.iter().find(|(name, _)| *name == source).ok_or_else(|| format!("No bundled plugin named {source}. Pass a directory path to install your own."))?;
-    let target = plugins.join(source);
+    write_files(home, source, files.iter().copied())?;
+    Ok(source.to_string())
+}
+
+/// Writes a bundled plugin's files, from the binary or from `main`, into its install directory.
+fn write_files<'a>(home: &Path, name: &str, files: impl Iterator<Item = (&'a str, &'a str)>) -> Result<(), String> {
+    let target = home.join(".agents/plugins").join(name);
     std::fs::create_dir_all(&target).map_err(|e| format!("Cannot create {}: {e}", target.display()))?;
-    for (file, text) in *files {
+    for (file, text) in files {
         let path = target.join(file);
         std::fs::write(&path, text).map_err(|e| format!("Cannot write {}: {e}", path.display()))?;
     }
     // The bundled copy replaces a directory install, so `plugin update` must not copy that directory back.
     let marker = target.join(SOURCE_FILE);
     match std::fs::remove_file(&marker) {
-        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(format!("Cannot remove {}: {e}", marker.display())),
-        _ => {}
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(format!("Cannot remove {}: {e}", marker.display())),
+        _ => Ok(()),
     }
-    Ok(source.to_string())
 }
 
 /// What `update` did to one installed plugin, whose version was `from`.
@@ -522,9 +527,18 @@ impl Update {
 
 pub const NO_SOURCE: &str = "not installed from a directory; install it again with agent plugin install <path>.";
 
+/// Where `agent plugin update` reads bundled plugins from, so a plugin fix ships without a release of the agent.
+pub const MAIN: &str = "https://raw.githubusercontent.com/rokartur/agent/main";
+
+/// A file of this repo on `main`, by its path in the repo; None offline or on any HTTP error.
+pub fn fetch_from_main(path: &str) -> Option<String> {
+    let http: ureq::Agent = ureq::Agent::config_builder().timeout_global(Some(Duration::from_secs(5))).build().into();
+    http.get(format!("{MAIN}/{path}")).call().ok()?.body_mut().read_to_string().ok()
+}
+
 /// `agent plugin update [name...]`, every installed plugin when `names` is empty: a directory install is copied again
-/// from its directory, a bundled one updates when the agent has a newer version.
-pub fn update(home: &Path, names: &[String]) -> Result<Vec<Update>, String> {
+/// from its directory, a bundled one updates to the newer of `main` (read with `fetch`) and the agent's own copy.
+pub fn update(home: &Path, names: &[String], fetch: &dyn Fn(&str) -> Option<String>) -> Result<Vec<Update>, String> {
     let plugins = home.join(".agents/plugins");
     let names = if names.is_empty() { installed(&plugins) } else { names.to_vec() };
     let mut current = Vec::new();
@@ -534,21 +548,47 @@ pub fn update(home: &Path, names: &[String]) -> Result<Vec<Update>, String> {
         current.push((name, manifest.version));
     }
     // One failed copy, say a moved source directory, must not stop the plugins after it.
-    Ok(current.into_iter().map(|(name, from)| Update { outcome: update_one(home, &name, &from), name, from }).collect())
+    Ok(current.into_iter().map(|(name, from)| Update { outcome: update_one(home, &name, &from, fetch), name, from }).collect())
 }
 
-fn update_one(home: &Path, name: &str, version: &str) -> Result<Outcome, String> {
+fn update_one(home: &Path, name: &str, version: &str, fetch: &dyn Fn(&str) -> Option<String>) -> Result<Outcome, String> {
     let dir = home.join(".agents/plugins").join(name);
     if let Ok(source) = std::fs::read_to_string(dir.join(SOURCE_FILE)) {
         install(home, &source)?;
         return Ok(Outcome::Copied { version: read_manifest(&dir)?.version, source: Some(source) });
     }
     let Some(bundled) = bundled_version(name) else { return Ok(Outcome::NoSource) };
+    if let Some((newest, files)) = files_on_main(name, fetch)
+        && crate::update::is_newer(&newest, version)
+        && !crate::update::is_newer(&bundled, &newest)
+    {
+        write_files(home, name, files.iter().map(|(file, text)| (*file, text.as_str())))?;
+        return Ok(Outcome::Copied { version: newest, source: Some(format!("{MAIN}/plugins/{name}")) });
+    }
     if !crate::update::is_newer(&bundled, version) {
         return Ok(Outcome::Newest);
     }
     install(home, name)?;
     Ok(Outcome::Copied { version: bundled, source: None })
+}
+
+/// A bundled plugin's files on `main` with their version, when all of them arrive, the manifest is valid and its
+/// `minAgent` is at most this agent's version.
+fn files_on_main(name: &str, fetch: &dyn Fn(&str) -> Option<String>) -> Option<(String, Vec<(&'static str, String)>)> {
+    let (_, bundled) = BUNDLED.iter().find(|(bundled, _)| *bundled == name)?;
+    // shortcut: fetches only the files this agent bundles, so a file added on main needs a release; list files in plugin.json then.
+    let mut files = Vec::new();
+    for (file, _) in *bundled {
+        files.push((*file, fetch(&format!("plugins/{name}/{file}"))?));
+    }
+    let manifest = &files.iter().find(|(file, _)| *file == "plugin.json")?.1;
+    let version = parse_manifest(manifest).ok()?.version;
+    let min_agent: Value = serde_json::from_str(manifest).ok()?;
+    let min_agent = min_agent["minAgent"].as_str().unwrap_or("0.0.0");
+    if crate::update::is_newer(min_agent, env!("CARGO_PKG_VERSION")) {
+        return None;
+    }
+    Some((version, files))
 }
 
 fn bundled_version(name: &str) -> Option<String> {
@@ -930,14 +970,32 @@ done"#;
 
         let bundled = read_manifest(&home.join(".agents/plugins/usagefleet")).unwrap().version;
         assert_eq!(
-            update(&home, &[]).map(|updates| updates.iter().map(Update::notice).collect()),
+            update(&home, &[], &|_| None).map(|updates| updates.iter().map(Update::notice).collect()),
             Ok(vec![
                 format!("mine: updated to 1.1.0 from {}.", crate::process::canonicalize(&source).unwrap().display()),
                 "old: not installed from a directory; install it again with agent plugin install <path>.".to_string(),
                 format!("usagefleet: {bundled} is the newest."),
             ])
         );
-        assert_eq!(update(&home, &["nope".into()]).err(), Some("nope is not installed.".into()));
+        assert_eq!(update(&home, &["nope".into()], &|_| None).err(), Some("nope is not installed.".into()));
+    }
+
+    #[test]
+    fn update_takes_a_bundled_plugin_from_main_unless_it_needs_a_newer_agent() {
+        let home = home_with("update-main", &[]);
+        install(&home, "usagefleet").unwrap();
+        let on_main = |manifest: &'static str| move |path: &str| Some(if path.ends_with("plugin.json") { manifest.to_string() } else { format!("// {path}") });
+        let updated = |fetch: &dyn Fn(&str) -> Option<String>| update(&home, &[], fetch).unwrap().remove(0).outcome;
+        let index = home.join(".agents/plugins/usagefleet/index.ts");
+
+        let needs_newer_agent = on_main(r#"{"version": "99.0.0", "minAgent": "999.0.0", "command": ["bun", "index.ts"]}"#);
+        assert_eq!(updated(&needs_newer_agent), Ok(Outcome::Newest));
+        assert_eq!(updated(&on_main(r#"{"version": "99.0.0"}"#)), Ok(Outcome::Newest), "an invalid manifest is skipped");
+
+        let compatible = on_main(r#"{"version": "99.0.0", "minAgent": "0.1.0", "command": ["bun", "index.ts"]}"#);
+        assert_eq!(updated(&compatible), Ok(Outcome::Copied { version: "99.0.0".into(), source: Some(format!("{MAIN}/plugins/usagefleet")) }));
+        assert_eq!(std::fs::read_to_string(&index).unwrap(), "// plugins/usagefleet/index.ts");
+        assert_eq!(updated(&compatible), Ok(Outcome::Newest));
     }
 
     #[test]

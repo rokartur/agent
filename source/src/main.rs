@@ -266,7 +266,7 @@ fn plugin_command(args: &[String]) -> Result<(), String> {
     match args {
         [action, source] if action == "install" => println!("Installed {}.", plugins::install(&home, source)?),
         [action, names @ ..] if action == "update" => {
-            for line in plugin_update_lines(&plugins::update(&home, names)?, &home.to_string_lossy(), std::io::stdout().is_terminal()) {
+            for line in plugin_update_lines(&plugins::update(&home, names, &plugins::fetch_from_main)?, &home.to_string_lossy(), std::io::stdout().is_terminal()) {
                 println!("{line}");
             }
         }
