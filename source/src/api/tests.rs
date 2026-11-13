@@ -459,6 +459,25 @@ fn an_overloaded_provider_fails_over_to_the_fallback_model_after_its_retries() {
 }
 
 #[test]
+fn an_account_a_plugin_blocks_until_a_reset_moves_the_session_to_the_next() {
+    let home = std::env::temp_dir().join(format!("agent-plugin-block-{}", std::process::id()));
+    let client = Client::new(&home).unwrap();
+    std::fs::remove_dir_all(&home).ok();
+    let account = |name: &str| Account { provider: "anthropic".into(), name: name.into(), secret: Secret::ApiKey("sk".into()) };
+    client.reload(vec![account("first"), account("second")]);
+    *client.catalog.write().unwrap() = vec![Model { provider: "anthropic".into(), id: "claude".into(), ..Model::default() }].into();
+    let in_a_week = crate::process::now_ms() + 7 * 24 * 3_600_000;
+
+    assert!(client.switch_account_until("claude", in_a_week));
+    assert_eq!(client.account("anthropic").unwrap().0, "second");
+    // A pick mid-turn must not return to the blocked account once LIMITED_FOR runs out.
+    assert!(client.state.lock().unwrap().limited["anthropic/first"] > Instant::now() + LIMITED_FOR);
+
+    client.state.lock().unwrap().threshold = 0.0;
+    assert!(!client.switch_account_until("claude", in_a_week), "switching off keeps the account");
+}
+
+#[test]
 fn a_rejected_request_does_not_fail_over() {
     let (sent, notices, fallback_requests) = send_with_failover(401, r#"{"error":{"message":"invalid x-api-key"}}"#);
 

@@ -529,7 +529,7 @@ impl Agent {
 
     /// `typed` is false for a prompt the agent wrote itself, as a goal continuation is.
     fn turn(&mut self, text: &str, typed: bool, emit: &mut dyn FnMut(Event)) -> Result<String, String> {
-        let text = &self.plugins.input(text, &self.plugin_context())?;
+        let text = &self.plugin_input(text, emit)?;
         // The reviewer judges calls against this, so only the user's own words may set it.
         if typed && self.follow_up.is_none() {
             self.user_requests.push(text.to_string());
@@ -592,6 +592,29 @@ impl Agent {
             return Ok(());
         }
         self.push(json!({"role": "user", "content": results}))
+    }
+
+    /// The prompt as the plugins let it through. A block on the session's account moves the session to the next
+    /// account and asks the plugins again; each account is tried once.
+    fn plugin_input(&self, text: &str, emit: &mut dyn FnMut(Event)) -> Result<String, String> {
+        let mut tried = Vec::new();
+        loop {
+            let context = self.plugin_context();
+            let block = match self.plugins.input(text, &context) {
+                Ok(text) => return Ok(text),
+                Err(block) => block,
+            };
+            tried.push(context["accountName"].clone());
+            let Some(until) = block.account_until else { return Err(block.reason) };
+            if !self.client.switch_account_until(&self.model, until) {
+                return Err(block.reason);
+            }
+            let next = self.plugin_context()["accountName"].clone();
+            if tried.contains(&next) {
+                return Err(block.reason);
+            }
+            emit(Event::Notice(format!("Switched to {}: {}", next.as_str().unwrap_or_default(), block.reason)));
+        }
     }
 
     /// Sent with every plugin message; see plugins/README.md.

@@ -769,6 +769,20 @@ impl Client {
         Some((account.name.clone(), account.account_id().map(String::from)))
     }
 
+    /// After a plugin refused the account `model_id` would use until `until_ms`: marks it limited until then and picks
+    /// the next account. False when the pick stays on it, as with switching off or every account over its limit.
+    pub fn switch_account_until(&self, model_id: &str, until_ms: u64) -> bool {
+        let Some(model) = self.catalog().iter().find(|m| m.id == model_id).cloned() else { return false };
+        let blocked = {
+            let mut state = self.state.lock().unwrap();
+            let Some(blocked) = likely_account(&state, &model.provider).map(key) else { return false };
+            let until = Instant::now() + Duration::from_millis(until_ms.saturating_sub(crate::process::now_ms()));
+            state.limited.insert(blocked.clone(), until);
+            blocked
+        };
+        matches!(self.choose(&model, false, &mut |_| {}), Ok(Choice::Use(next)) if key(&next) != blocked)
+    }
+
     /// The account's last fetched subscription windows; None for API keys and before the first fetch.
     pub fn account_usage(&self, provider: &str, name: &str) -> Option<accounts::Usage> {
         self.state.lock().unwrap().usage.get(&format!("{provider}/{name}")).and_then(|(_, usage)| usage.clone())

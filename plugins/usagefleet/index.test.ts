@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { accountLabels, assignToken, blockMessage, claudeAccount, formatGroupLimits, footer, formatLimits, hasFiveHourWindow, inheritToken, resolveToken, tokenReport, type Context } from "./index.ts";
+import { accountLabels, assignToken, blockMessage, claudeAccount, formatGroupLimits, footer, formatLimits, hasFiveHourWindow, inheritToken, inputAnswer, resolveToken, tokenReport, type Context } from "./index.ts";
 
 const now = Date.parse("2026-10-15T12:00:00Z");
 const context: Context = { provider: "anthropic", model: "claude-opus-5-5", accountId: "uuid-2", accountName: "home", cwd: "/", sessionId: "s", settings: { showGroupName: false } };
@@ -93,6 +93,12 @@ describe("usagefleet", () => {
 			'usagefleet: "Artur" has used 100% of its weekly budget, so new prompts are blocked.',
 		);
 		expect(blockMessage({ blocked: false, group: "Artur" }, "claude-opus-5-5")).toBeNull();
+	});
+
+	test("a block names the reset, so the agent moves to its next account", () => {
+		const blocked = { blocked: true, group: "artur", blockedWindow: "weekly", blockedPct: 101.3, blockedUntil: "2026-11-16T11:59:00.000Z" };
+		expect(inputAnswer(blocked, "claude-opus-5-5")).toMatchObject({ action: "block", accountBlockedUntil: "2026-11-16T11:59:00.000Z" });
+		expect(inputAnswer({ blocked: false }, "claude-opus-5-5")).toEqual({ action: "continue" });
 	});
 
 	test("a per-model limit blocks only that model", () => {

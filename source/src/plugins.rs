@@ -22,6 +22,13 @@ const BUNDLED: &[(&str, &[(&str, &str)])] =
 /// In an installed plugin's directory: the source directory `agent plugin update` copies it from again.
 const SOURCE_FILE: &str = ".installed-from";
 
+/// A plugin's refusal of a prompt. `account_until` (unix ms) when only the session's account is refused, until then.
+#[derive(Debug, PartialEq)]
+pub struct Block {
+    pub reason: String,
+    pub account_until: Option<u64>,
+}
+
 /// The running plugins. Clones share them.
 #[derive(Clone)]
 pub struct Plugins {
@@ -210,14 +217,19 @@ impl Plugins {
     }
 
     /// Asks each running plugin about a prompt, in name order: Ok with the text, rewritten by any
-    /// `transform`, or Err with the reason of the first `block`. Silence, errors and crashes let it through.
-    pub fn input(&self, text: &str, context: &Value) -> Result<String, String> {
+    /// `transform`, or Err with the first `block`. Silence, errors and crashes let it through.
+    pub fn input(&self, text: &str, context: &Value) -> Result<String, Block> {
         let mut text = text.to_string();
         for name in self.running() {
             let Some(answer) = self.request(&name, "input", json!({"text": text, "context": context})) else { continue };
             let result = &answer["result"];
             match result["action"].as_str() {
-                Some("block") => return Err(result["reason"].as_str().map_or_else(|| format!("{name} blocked the prompt."), String::from)),
+                Some("block") => {
+                    return Err(Block {
+                        reason: result["reason"].as_str().map_or_else(|| format!("{name} blocked the prompt."), String::from),
+                        account_until: result["accountBlockedUntil"].as_str().and_then(crate::api::accounts::iso_ms),
+                    });
+                }
                 Some("transform") => {
                     if let Some(rewritten) = result["text"].as_str() {
                         text = rewritten.to_string();
@@ -732,10 +744,11 @@ done"#
 
     #[test]
     fn first_block_refuses_the_prompt_after_earlier_rewrites() {
-        let home = home_with("block", &[("a-rewrite", &answering(r#"{"action":"transform","text":"rewritten"}"#)), ("b-block", &answering(r#"{"action":"block","reason":"over budget"}"#))]);
+        let block = r#"{"action":"block","reason":"over budget","accountBlockedUntil":"1970-01-02T00:00:01Z"}"#;
+        let home = home_with("block", &[("a-rewrite", &answering(r#"{"action":"transform","text":"rewritten"}"#)), ("b-block", &answering(block))]);
         let plugins = Plugins::new(&home);
         plugins.sync(&[], &json!({}));
-        assert_eq!(plugins.input("hi", &json!({})), Err("over budget".into()));
+        assert_eq!(plugins.input("hi", &json!({})), Err(Block { reason: "over budget".into(), account_until: Some(86_401_000) }));
         plugins.sync(&["b-block".into()], &json!({}));
         assert_eq!(plugins.input("hi", &json!({})), Ok("rewritten".into()));
     }

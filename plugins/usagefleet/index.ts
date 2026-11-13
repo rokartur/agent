@@ -240,13 +240,22 @@ export function footer(context: Context, view: unknown, ownReading: unknown, now
 	return formatLimits(ownReading, now) ?? (usage ? formatWindows(usage.fiveHourPct, usage.sevenDayPct) : null);
 }
 
+/** The `input` answer. The block is on the session's account, since each account has its own device token,
+ * so it names the reset and the agent moves the prompt to its next account. */
+export function inputAnswer(view: unknown, model: string) {
+	const reason = blockMessage(view, model);
+	if (!reason) return { action: "continue" };
+	const until = isRecord(view) && typeof view.blockedUntil === "string" ? view.blockedUntil : undefined;
+	return { action: "block", reason, accountBlockedUntil: until };
+}
+
 /** Fails open on every error, the same guarantee `usagefleet guard` makes. */
-async function blockedReason(context: Context): Promise<string | null> {
+async function blockedView(context: Context): Promise<unknown> {
 	const account = claudeAccount(context);
 	if (!account) return null;
 	const token = resolveToken(await readJson(CONFIG_PATH), account);
 	if (!token) return null;
-	return blockMessage(await fetchServerLimits(token).catch(() => null), context.model);
+	return fetchServerLimits(token).catch(() => null);
 }
 
 const send = (message: object) => process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", ...message })}\n`);
@@ -273,8 +282,8 @@ async function handle(message: Message): Promise<void> {
 		await refreshAccountLabels();
 		await refreshStatus(context);
 	} else if (message.method === "input") {
-		const reason = await blockedReason(context).catch(() => null);
-		send({ id: message.id, result: reason ? { action: "block", reason } : { action: "continue" } });
+		const view = await blockedView(context).catch(() => null);
+		send({ id: message.id, result: inputAnswer(view, context.model) });
 	} else if (message.method === "command") {
 		try {
 			send({ id: message.id, result: { text: await usagefleetCommand(message.params?.args ?? "", context) } });

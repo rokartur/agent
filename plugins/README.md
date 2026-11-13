@@ -78,6 +78,8 @@ Every message has a `context`:
 { "action": "block", "reason": "Shown to the user instead of running the prompt." }
 ```
 
+A block can add `"accountBlockedUntil"`, an ISO 8601 UTC time, when it refuses only the session's account. The agent then does not use that account until that time, moves the session to its next account and asks the plugins again. Each account is tried once. If there is no other account, or account switching is off, the agent shows the reason.
+
 The agent asks plugins in name order. Each plugin gets the text that the plugins before it returned. If a plugin does not answer in 5 seconds, sends an error, or exits, the prompt continues.
 
 `command` is a request with `params.name`, `params.args` and `params.context`. The agent sends it when the user types `/name args`. Answer with `{ "text": "Shown to the user." }`, or send an error with a `message`. The agent waits 5 seconds. Commands do not go to the model, also during a turn.
