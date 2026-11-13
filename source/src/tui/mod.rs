@@ -287,7 +287,7 @@ const HOTKEYS: [(&str, &[(&str, &str)]); 4] = [
             ("Ctrl+P", "cycle the models pinned with Tab in /model"),
             ("PageUp, PageDown", "scroll the transcript"),
             (if cfg!(target_os = "macos") { "Option+Down" } else { "Alt+Down" }, "jump to the latest message"),
-            ("Down", "walk the shells and agents pills and workflows, Enter opens one (empty editor)"),
+            ("Down", "walk the shells and agents pills (Left/Right between them) and workflows, Enter opens one (empty editor)"),
         ],
     ),
     (
