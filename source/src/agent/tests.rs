@@ -953,3 +953,41 @@ fn resume_refuses_an_id_that_is_not_alphanumeric() {
     }
     std::fs::remove_dir_all(&root).unwrap();
 }
+
+#[test]
+fn steering_typed_before_an_abort_stays_queued_for_the_next_turn() {
+    let home = std::env::temp_dir().join(format!("agent-abort-steer-{}", std::process::id()));
+    let cwd = home.join("project");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let call = [
+        r#"{"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","call_id":"call_1","name":"Bash","arguments":""}}"#,
+        r#"{"type":"response.function_call_arguments.delta","output_index":0,"delta":"{\"command\":\"true\"}"}"#,
+        r#"{"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","call_id":"call_1","name":"Bash","arguments":""}}"#,
+        r#"{"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":1,"output_tokens":1}}}"#,
+    ];
+    let body: String = call.iter().map(|event| format!("event: x\ndata: {event}\n\n")).collect();
+    let (client, _) = crate::api::images::tests::fake_codex_client(&home, &[(200, &body)]);
+    let model = Model { provider: "openai-codex".into(), id: "openai-codex/gpt-5.5".into(), ..Default::default() };
+    std::fs::create_dir_all(home.join(".agents/cache")).unwrap();
+    std::fs::write(home.join(".agents/cache/models.json"), crate::api::models::to_cache(&[model])).unwrap();
+    assert!(client.load_cached_catalog("openai-codex/gpt-5.5"));
+    let settings = crate::settings::load(&home).unwrap();
+    let session = Session::start(&home.join("sessions"), false, &cwd, "m").unwrap();
+    let mut agent = Agent::new(client, &settings, home.clone(), cwd, session, home.join("sessions"), None);
+    agent.model = "openai-codex/gpt-5.5".into();
+    agent.tools = agent.tool_schemas();
+
+    let (abort, steering) = (agent.abort.clone(), agent.steering.clone());
+    let result = agent.prompt("run it", &mut |event| {
+        if let Event::ToolStart { .. } = event {
+            steering.lock().unwrap().push(("then this".into(), Vec::new()));
+            abort.store(true, Ordering::Relaxed);
+        }
+    });
+    let last = agent.history.messages.last().cloned();
+    std::fs::remove_dir_all(&home).ok();
+
+    result.unwrap();
+    assert_eq!(agent.steering.lock().unwrap().len(), 1, "the abort swallowed the steering");
+    assert_eq!(last.unwrap()["content"].as_array().unwrap().len(), 1, "only the tool result goes into history");
+}

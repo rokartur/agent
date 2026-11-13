@@ -757,9 +757,13 @@ impl Agent {
                 results.push(json!({"type": "tool_result", "tool_use_id": id, "content": content, "is_error": is_error}));
                 finished.push(condense::Call { id, name, input, output, is_error });
             }
-            results.extend(self.take_queued(emit));
+            // An aborted turn leaves steering queued, so the idle TUI sends it as the next turn.
+            let stopped = self.abort.load(Ordering::Relaxed);
+            if !stopped {
+                results.extend(self.take_queued(emit));
+            }
             self.push(json!({"role": "user", "content": results}))?;
-            if self.abort.load(Ordering::Relaxed) {
+            if stopped {
                 emit(Event::Notice(ABORTED.into()));
                 return Ok(answer);
             }
