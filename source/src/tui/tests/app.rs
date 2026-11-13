@@ -359,3 +359,18 @@ fn a_long_turn_resends_the_progress_bar_before_the_terminal_drops_it() {
     assert_eq!(progress_due(true, Some(start), start + PROGRESS_REFRESH), Some(true));
     assert_eq!(progress_due(false, Some(start), start + Duration::from_secs(1)), Some(false));
 }
+
+#[test]
+fn esc_with_queued_messages_aborts_but_keeps_the_prompt() {
+    let home = std::env::temp_dir().join(format!("agent-tui-esc-queued-{}", std::process::id()));
+    let mut app = test_app(&home);
+    std::fs::remove_dir_all(&home).ok();
+    app.push(Item::User("go".into()));
+    app.working = Some(Instant::now());
+    app.steering.lock().unwrap().push(("then this".into(), Vec::new()));
+
+    app.key(KeyEvent::from(KeyCode::Esc));
+
+    assert!(app.abort.load(Ordering::Relaxed));
+    assert!(!app.retract, "the prompt the steering builds on would go back to the editor");
+}

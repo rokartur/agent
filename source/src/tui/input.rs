@@ -273,7 +273,8 @@ impl App {
                 self.submit(text, alt);
             }
             KeyCode::Esc if self.viewed.is_some() => self.view_run(None),
-            KeyCode::Esc if self.working.is_some() && self.editor.is_empty() && !answered(&self.entries) => {
+            // Queued messages build on the prompt, so Esc keeps it and they go out after the abort.
+            KeyCode::Esc if self.working.is_some() && self.editor.is_empty() && !answered(&self.entries) && self.steering.lock().unwrap().is_empty() && self.queued_commands.is_empty() => {
                 self.retract = true;
                 self.abort.store(true, Ordering::Relaxed);
             }

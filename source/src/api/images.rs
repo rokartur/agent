@@ -179,10 +179,11 @@ pub(crate) mod tests {
                     }
                     header.clear();
                 }
-                let length = headers["content-length"].as_str().unwrap().parse().unwrap();
+                // A GET, such as the Codex usage check, has no body.
+                let length = headers.get("content-length").map_or(0, |length| length.as_str().unwrap().parse().unwrap());
                 let mut body = vec![0; length];
                 reader.read_exact(&mut body).unwrap();
-                let _ = sent.send((path, Value::Object(headers), serde_json::from_slice(&body).unwrap()));
+                let _ = sent.send((path, Value::Object(headers), serde_json::from_slice(&body).unwrap_or_default()));
                 let (status, reply) = if replies.len() > 1 { replies.remove(0) } else { replies[0].clone() };
                 write!(stream, "HTTP/1.1 {status} X\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{reply}", reply.len()).unwrap();
             }
