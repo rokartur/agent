@@ -468,13 +468,14 @@ fn an_account_a_plugin_blocks_until_a_reset_moves_the_session_to_the_next() {
     *client.catalog.write().unwrap() = vec![Model { provider: "anthropic".into(), id: "claude".into(), ..Model::default() }].into();
     let in_a_week = crate::process::now_ms() + 7 * 24 * 3_600_000;
 
+    client.state.lock().unwrap().threshold = 0.0;
+    assert!(!client.switch_account_until("claude", in_a_week), "switching off keeps the account");
+    client.state.lock().unwrap().threshold = 90.0;
+
     assert!(client.switch_account_until("claude", in_a_week));
     assert_eq!(client.account("anthropic").unwrap().0, "second");
     // A pick mid-turn must not return to the blocked account once LIMITED_FOR runs out.
     assert!(client.state.lock().unwrap().limited["anthropic/first"] > Instant::now() + LIMITED_FOR);
-
-    client.state.lock().unwrap().threshold = 0.0;
-    assert!(!client.switch_account_until("claude", in_a_week), "switching off keeps the account");
 }
 
 #[test]
