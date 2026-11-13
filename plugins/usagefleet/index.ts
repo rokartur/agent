@@ -55,20 +55,22 @@ export function formatLimits(config: unknown, now: number): StatusPart[] | null 
 }
 
 /** "Artur: 5h 30% · 7d 17%", or null when the device is in no group. */
-export function formatGroupLimits(view: unknown, showName: boolean, hasFiveHour: boolean): StatusPart[] | null {
+export function formatGroupLimits(view: unknown, showName: boolean, hasFiveHour: boolean | null): StatusPart[] | null {
 	if (!isRecord(view)) return null;
 	const { group, sessionPct, weeklyPct } = view;
 	if (typeof group !== "string" || typeof sessionPct !== "number" || typeof weeklyPct !== "number") return null;
-	// The server sends sessionPct 0 for an Ultra plan, so only the watcher's reading tells it has no 5h window.
-	const windows = formatWindows(hasFiveHour ? sessionPct : null, weeklyPct);
+	// The server sends sessionPct 0 for an Ultra plan; with no reading of the account, only a used 5h window proves one.
+	const windows = formatWindows((hasFiveHour ?? sessionPct > 0) ? sessionPct : null, weeklyPct);
 	return showName ? [{ text: `${group}: ` }, ...windows] : windows;
 }
 
-/** Ultra plans have no 5h window: the agent's reading of the session's account, else the watcher's, has `fiveHourPct: null`. */
-export const hasFiveHourWindow = (context: Context, config: unknown): boolean =>
-	context.accountUsage
-		? context.accountUsage.fiveHourPct !== null
-		: !(isRecord(config) && isRecord(config.limits) && config.limits.fiveHourPct === null);
+/** Ultra plans have no 5h window: the agent's reading of the session's account, else the watcher's, has `fiveHourPct: null`.
+ * Null when neither has read the account yet, as before the session's first request. */
+export const hasFiveHourWindow = (context: Context, config: unknown): boolean | null => {
+	if (context.accountUsage) return context.accountUsage.fiveHourPct !== null;
+	if (!isRecord(config) || !isRecord(config.limits)) return null;
+	return config.limits.fiveHourPct !== null;
+};
 
 const formatWindows = (fiveHourPct: number | null, sevenDayPct: number): StatusPart[] =>
 	fiveHourPct === null
