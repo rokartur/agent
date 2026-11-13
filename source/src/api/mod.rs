@@ -322,7 +322,7 @@ impl Client {
             if !error.retryable || out_of_retries || abort.load(Ordering::Relaxed) {
                 return Err(error.message);
             }
-            on_delta(Delta::Notice(&format!("{} Retrying in {}s.", error.message, RETRY_DELAYS_SECS[attempt])));
+            on_delta(Delta::Notice(&format!("{}. Retrying in {}s.", error.message.trim_end_matches('.'), RETRY_DELAYS_SECS[attempt])));
             let wake = Instant::now() + Duration::from_secs(RETRY_DELAYS_SECS[attempt]);
             while Instant::now() < wake {
                 if abort.load(Ordering::Relaxed) {
@@ -681,7 +681,11 @@ impl Client {
             let retryable = status == 408 || status == 429 || status >= 500;
             let error: Value = serde_json::from_str(&text).unwrap_or_default();
             let code = error["error"]["details"]["error_code"].as_str().or(error["error"]["type"].as_str()).unwrap_or_default().to_string();
-            return Err(ApiError { message: format!("API error {status}: {}", text.trim()), retryable, quota, code });
+            let message = match text.trim() {
+                "" => format!("API error {status}."),
+                body => format!("API error {status}: {body}"),
+            };
+            return Err(ApiError { message, retryable, quota, code });
         }
         match parser {
             Parser::Messages => parse_stream(&mut reader, abort, on_delta),
