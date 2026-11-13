@@ -469,12 +469,7 @@ pub(super) fn tasks_panel(terminals: &[Arc<Terminal>], runs: &[Arc<Run>], catalo
     if !agents {
         for (index, terminal) in terminals.iter().enumerate() {
             let status = terminal.status();
-            let dot = match status {
-                TerminalStatus::Running | TerminalStatus::Killed => MUTED,
-                TerminalStatus::Done => OK,
-                TerminalStatus::Failed => ERROR,
-            };
-            let mut row = vec![span("● ", dot)];
+            let mut row = vec![status_mark(status.as_str())];
             row.extend(name(&terminal.title, index, status == TerminalStatus::Running));
             row.push(span(status.as_str(), DIM));
             rows.push(row);
@@ -482,13 +477,13 @@ pub(super) fn tasks_panel(terminals: &[Arc<Terminal>], runs: &[Arc<Run>], catalo
     } else {
         for (index, run) in runs.iter().enumerate() {
             let state = run.state.lock().unwrap();
-            let (status, dot) = match state.result {
-                None if state.last_tool.is_empty() => ("running".to_string(), MUTED),
-                None => (format!("running {}", state.last_tool), MUTED),
-                Some(Ok(_)) => ("done".to_string(), OK),
-                Some(Err(_)) => ("failed".to_string(), ERROR),
+            let (status, mark) = match state.result {
+                None if state.last_tool.is_empty() => ("running".to_string(), status_mark("running")),
+                None => (format!("running {}", state.last_tool), status_mark("running")),
+                Some(Ok(_)) => ("done".to_string(), status_mark("done")),
+                Some(Err(_)) => ("failed".to_string(), status_mark("failed")),
             };
-            let mut row = vec![span("● ", dot)];
+            let mut row = vec![mark];
             row.extend(name(&run.label, index, state.result.is_none()));
             row.push(span(format!("{status} · {} tools · {} {}", state.tool_calls, model_name(catalog, &run.model), run.thinking), DIM));
             rows.push(row);
@@ -511,6 +506,16 @@ pub(super) fn tasks_panel(terminals: &[Arc<Terminal>], runs: &[Arc<Run>], catalo
     }
     lines.extend([Vec::new(), vec![span("↑/↓ to select · Tab to switch · Enter to view · x to stop · Esc to close", MUTED.italic())]]);
     lines
+}
+
+/// A distinct glyph per state, so it reads without color too.
+fn status_mark(status: &str) -> Span {
+    match status {
+        "running" => span("● ", SYSTEM),
+        "done" => span("✓ ", OK),
+        "failed" => span("✗ ", ERROR),
+        _ => span("■ ", WARN),
+    }
 }
 
 /// One frame of the token counter: a quarter of the gap, at least 1, so a jump plays as a quick count.
