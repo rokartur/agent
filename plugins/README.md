@@ -16,7 +16,7 @@ Plugins go to `~/.agents/plugins/<name>/`. In the TUI, `/plugins` installs, upda
 
 At startup, the agent updates each installed plugin from this directory when the agent has a higher `version`, and shows a message. When you change a plugin here, increase its `version`, or users keep the old copy. A local copy with the same or a higher version is not changed.
 
-`agent plugin update` copies each plugin installed from a directory again from that directory, so edit your plugin there and run it. A bundled plugin updates only when the agent has a higher `version`. A plugin installed from a directory before this command existed needs one more `agent plugin install <path>`. Running sessions keep the old plugin process until they restart.
+`agent plugin update` copies each plugin installed from a directory again from that directory, so edit your plugin there and run it. A bundled plugin updates to the higher `version` of two copies: the one on this repo's `main` branch and the one in the agent. So a fix to a bundled plugin reaches users after its merge, without a new agent release. The copy on `main` is skipped when it is not available (for example, offline) or when its `minAgent` is higher than the agent's version. When a bundled plugin needs a feature of a newer agent, set `"minAgent": "X.Y.Z"` in its `plugin.json`. A plugin installed from a directory before this command existed needs one more `agent plugin install <path>`. Running sessions keep the old plugin process until they restart.
 
 ## plugin.json
 
