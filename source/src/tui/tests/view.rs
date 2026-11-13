@@ -83,7 +83,7 @@ fn tasks_list_shells_and_agents_on_separate_tabs() {
     let runs = [Arc::new(done), Arc::new(running)];
     let rows: Vec<String> = tasks_panel(&[], &runs, &[sonnet], true, 1, 80).iter().map(text).collect();
     assert_eq!(rows[1..3], ["Background  Shells 0  [Agents 2]", "1 active agent"]);
-    assert_eq!(rows[4], "  ● scan       done · 0 tools · opus high");
+    assert_eq!(rows[4], "  ✓ scan       done · 0 tools · opus high");
     assert_eq!(rows[5], "❯ ● recon 1a   running · 0 tools · sonnet 5 medium");
     assert_eq!(rows.last().unwrap(), "↑/↓ to select · Tab to switch · Enter to view · x to stop · Esc to close");
     let shells: Vec<String> = tasks_panel(&[], &runs, &[], false, 0, 80).iter().map(text).collect();
