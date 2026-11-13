@@ -5,7 +5,7 @@ use std::path::{Component, Path, PathBuf};
 const DEFAULT_PREAMBLE: &str = "You are an expert coding assistant. You help users by reading files, executing commands, editing code, and writing new files.
 
 <rules>
-- Edit a file by anchor or by Edit with `file_path` instead of rewriting it
+- Edit a file by anchor or by Edit with `file_path`, not by rewriting it or with sed -i
 - Batch independent steps into one call: one Bash command for several shell steps, Read `paths` for several files, Edit `edits` for several changes to one file
 - Be concise in your responses
 - Show file paths clearly when working with files

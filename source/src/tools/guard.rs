@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 const MIN_BLOCKED_SLEEP_SECS: u64 = 15;
 const HEAD_DEFAULT_LINES: u64 = 10;
 
-/// Why bash should not run `command` (a blind sleep or a merge that ignores CI), or None when it may run.
+/// Why bash should not run `command` (a blind sleep, a merge that ignores CI or an in-place edit of one file), or None when it may run.
 /// File reads chained with other commands run as written: refusing them cost every benchmark run 1-3 turns,
 /// and Edit by `file_path` needs no anchors.
 pub fn bash(command: &str) -> Option<String> {
@@ -15,7 +15,69 @@ pub fn bash(command: &str) -> Option<String> {
     if unchecked_merge(command) {
         return Some("gh pr merge would run whatever gh pr checks returned. Gate it on the exit status: gh pr checks N --watch --fail-fast && gh pr merge N ...".into());
     }
+    if in_place_edit(command) {
+        return Some("Edit one file with Edit (`edits` for several changes), ReplaceLines or InsertLines: they run the edit checks and show new language server errors. sed -i and perl -i stay for many files at once (a glob, xargs, find -exec) or on another machine.".into());
+    }
     None
+}
+
+/// `sed -i` or `perl -i` on one named file. A glob, a variable, xargs, find -exec, ssh or offload passes:
+/// Edit cannot reach those files in one call.
+fn in_place_edit(command: &str) -> bool {
+    if command.contains("ssh ") || command.contains("offload ") {
+        return false;
+    }
+    shell_segments(command).iter().any(|words| {
+        let start = words.iter().position(|word| !word.contains('=') && !matches!(word.as_str(), "do" | "then" | "else")).unwrap_or(words.len());
+        let [tool, args @ ..] = &words[start..] else { return false };
+        let in_place = match tool.as_str() {
+            "sed" => args.iter().any(|arg| arg.starts_with("--in-place") || short_flags(arg, char::is_ascii_alphanumeric).contains('i')),
+            // Perl's uppercase switches take a glued argument, as in -MList::Util.
+            "perl" => args.iter().any(|arg| short_flags(arg, |ch| ch.is_ascii_lowercase() || ch.is_ascii_digit()).contains('i')),
+            _ => false,
+        };
+        let file = args.iter().rev().find(|arg| !arg.contains(['>', '<']));
+        in_place && file.is_some_and(|file| !file.contains(['*', '?', '[', '{', '$', '`']))
+    })
+}
+
+/// The switch letters a `-xyz` word starts with, up to the first one `is_switch` rejects; empty for `--long` and non-flags.
+fn short_flags(word: &str, is_switch: impl Fn(&char) -> bool) -> String {
+    match word.strip_prefix('-') {
+        Some(flags) if !flags.starts_with('-') => flags.chars().take_while(is_switch).collect(),
+        _ => String::new(),
+    }
+}
+
+/// The words of each command `;`, `&`, `|` or a newline separates, quotes kept, so a quoted script stays one word.
+fn shell_segments(command: &str) -> Vec<Vec<String>> {
+    let mut segments = vec![Vec::new()];
+    let mut word = String::new();
+    let mut quote = None;
+    let mut chars = command.chars();
+    while let Some(ch) = chars.next() {
+        if quote.is_none() && (ch.is_whitespace() || ";&|".contains(ch)) {
+            if !word.is_empty() {
+                segments.last_mut().unwrap().push(std::mem::take(&mut word));
+            }
+            if ch != ' ' && ch != '\t' {
+                segments.push(Vec::new());
+            }
+            continue;
+        }
+        word.push(ch);
+        match quote {
+            Some(open) if ch == open => quote = None,
+            Some('\'') => {}
+            _ if ch == '\\' => word.extend(chars.next()),
+            None if ch == '\'' || ch == '"' => quote = Some(ch),
+            _ => {}
+        }
+    }
+    if !word.is_empty() {
+        segments.last_mut().unwrap().push(word);
+    }
+    segments
 }
 
 /// `gh pr merge` reached from `gh pr checks` through `;`, a newline or a pipe, which drop the checks' exit status.
@@ -158,7 +220,7 @@ mod tests {
     }
 
     #[test]
-    fn blocks_blind_sleeps_and_unchecked_merges_only() {
+    fn blocks_blind_sleeps_unchecked_merges_and_one_file_in_place_edits_only() {
         let blocked = [
             ("sleep 150; gh run list --limit 3", "gh run watch"),
             ("(bun run dev &) ; sleep 30 && curl localhost:3000", "curl -sf --retry"),
@@ -174,6 +236,12 @@ mod tests {
             ("gh pr checks 12 --watch; gh pr merge 12 --squash", "&& gh pr merge"),
             ("gh pr checks 12 --watch\ngh pr merge 12", "&& gh pr merge"),
             ("gh pr checks 12 --watch || gh pr merge 12", "&& gh pr merge"),
+            ("sed -i '' 's/a/b/' src/main.rs", "Edit one file"),
+            ("cd source && sed -i 's/foo; bar/baz/' src/a.rs && cargo build", "Edit one file"),
+            ("perl -pi -e 's/x/y/' README.md", "Edit one file"),
+            ("sed -Ei.bak 's/a b/c/' 'my notes.md'", "Edit one file"),
+            ("LC_ALL=C sed --in-place 's/a/b/' a.md 2>/dev/null", "Edit one file"),
+            ("if true; then sed -i '' \"s/a/\\\"b/\" a.md; fi", "Edit one file"),
         ];
         for (command, advice) in blocked {
             let reason = bash(command).unwrap_or_else(|| panic!("{command} should be blocked"));
@@ -203,6 +271,15 @@ mod tests {
             "gh pr checks 5 --watch --fail-fast && gh pr merge 5 --squash --delete-branch",
             "gh pr checks 13 --watch >/dev/null 2>&1; s=$?; [ $s -eq 0 ] && gh pr merge 13 --squash",
             "gh pr merge 7 --squash; gh pr checks 8",
+            "sed -i '' 's/a/b/' src/*.ts",
+            "sed -i 's/a/b/; s/c/d/' src/{a,b}.rs",
+            "rg -l foo | xargs sed -i '' 's/foo/bar/'",
+            "for f in a b; do sed -i '' 's/x/y/' \"$f\"; done",
+            "find . -name '*.md' -exec sed -i '' 's/a/b/' {} +",
+            "ssh studio 'cd /tmp/x && sed -i \"\" \"s/a/b/\" src/a.rs'",
+            "offload 'sed -i \"\" \"\\$d\" src/a.rs'",
+            "perl -MList::Util -ne 'print' a.txt",
+            "sed -n 's/a/b/p' a.md",
         ];
         for command in allowed {
             assert_eq!(bash(command), None, "{command}");
