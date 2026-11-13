@@ -449,7 +449,7 @@ pub(super) fn tasks_panel(terminals: &[Arc<Terminal>], runs: &[Arc<Run>], catalo
         counts.push(format!("{active_agents} active {}", if active_agents == 1 { "agent" } else { "agents" }));
     }
     let summary = if counts.is_empty() { "nothing running".to_string() } else { counts.join(" · ") };
-    let tab = |label: String, active: bool| if active { span(format!("[{label}]"), BRIGHT.bold()) } else { span(label, MUTED) };
+    let tab = |label: String, active: bool| if active { span(format!(" {label} "), ACTIVE_TAB) } else { span(label, MUTED) };
     let header = vec![span("Background", SYSTEM.bold()), span("  ", PLAIN), tab(format!("Shells {}", terminals.len()), !agents), span("  ", PLAIN), tab(format!("Agents {}", runs.len()), agents)];
     let names: Vec<&str> = if agents { runs.iter().map(|run| run.label.as_str()).collect() } else { terminals.iter().map(|t| t.title.as_str()).collect() };
     let name_width = names.iter().map(|name| width(name)).max().unwrap_or(0).min(TASK_NAME_WIDTH);
