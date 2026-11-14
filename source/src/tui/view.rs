@@ -372,13 +372,16 @@ pub(super) fn short_path(path: &str) -> String {
     parts.join("/")
 }
 
-pub(super) fn context_lines(split: agent::context::PerPart, window: u64, session: Usage, last: Usage) -> Vec<Line> {
+pub(super) fn context_lines(split: agent::context::PerPart, instructions: &[(String, u64)], window: u64, session: Usage, last: Usage) -> Vec<Line> {
     let used: u64 = split.iter().sum();
     let percent = |part: u64, of: u64| format!("{}%", (part * 100).checked_div(of).unwrap_or(0));
     let mut lines = vec![vec![span("Context ", TOOL_NAME), span(format!("{} of {} ({})", tokens(used), tokens(window), percent(used, window)), PLAIN)]];
     for (name, part) in agent::context::PARTS.iter().zip(split) {
         lines.push(vec![span(format!("  {name:<16}"), MUTED), span(format!("{:>7} {:>5}", tokens(part), percent(part, used)), PLAIN)]);
     }
+    let sources = instructions.iter().map(|(source, part)| vec![span(format!("    {:>7}  ", tokens(*part)), MUTED), span(source.clone(), TOOL_ARGS)]);
+    // Under the "System prompt" row, the first after the header.
+    lines.splice(2..2, sources);
     lines.push(vec![span(format!("  {:<16}{:>7} {:>7} {:>5}", "Cache", "read", "write", "hit"), MUTED)]);
     for (name, usage) in [("Session", session), ("Last request", last)] {
         let hit = percent(usage.cache_read, usage.input + usage.cache_read + usage.cache_write);

@@ -26,6 +26,30 @@ pub fn split(system: &str, tools: &Value, messages: &[Value], total: u64) -> Per
     parts
 }
 
+const INSTRUCTION_TAGS: [(&str, &str); 6] =
+    [("addendum", "APPEND_SYSTEM.md"), ("skills", "Skills list"), ("ponytail", "Ponytail mode"), ("caveman", "Caveman mode"), ("cwd", "Working directory"), ("computer", "Remote device")];
+
+/// What the system prompt is made of, as (label, tokens) with `tokens` split by bytes: each AGENTS.md by path,
+/// each tagged section from `prompt` and `modes`, and the untagged rest (SYSTEM.md or the default, output style, plan mode).
+pub fn instructions(system: &str, tokens: u64) -> Vec<(String, u64)> {
+    let mut sections = Vec::new();
+    for block in system.split("<project_instructions path=\"").skip(1) {
+        let Some((path, body)) = block.split_once("\">\n") else { continue };
+        let body = body.split_once("\n</project_instructions>").map_or(body, |(body, _)| body);
+        sections.push((path.to_string(), body.len()));
+    }
+    for (tag, label) in INSTRUCTION_TAGS {
+        // The last match, since these sections follow the AGENTS.md files, whose text could quote a tag.
+        let Some((_, after)) = system.rsplit_once(&format!("<{tag}>\n")) else { continue };
+        let Some((body, _)) = after.split_once(&format!("\n</{tag}>")) else { continue };
+        sections.push((label.to_string(), body.len()));
+    }
+    let listed: usize = sections.iter().map(|(_, bytes)| bytes).sum();
+    sections.insert(0, ("Preamble".to_string(), system.len().saturating_sub(listed)));
+    let total = system.len() as u64;
+    sections.into_iter().filter(|(_, bytes)| *bytes > 0).map(|(label, bytes)| (label, (bytes as u64 * tokens).checked_div(total).unwrap_or(0))).collect()
+}
+
 pub const BYTES_PER_TOKEN: u64 = 4;
 
 /// Context tokens a request would use, at ~4 bytes per token, for when no reply has reported them yet.
@@ -117,6 +141,23 @@ mod tests {
         assert_eq!(split("", &tools, &[], 0), [0; 5]);
         assert_eq!(split(&"s".repeat(100), &tools, &messages, 7).iter().sum::<u64>(), 7);
         assert_eq!(estimate(&"s".repeat(100), &tools, &messages), sum / 4, "the base64 image counts by estimate, not its 100 KB");
+    }
+
+    #[test]
+    fn instructions_list_each_agents_md_and_tagged_section() {
+        let agents = "a".repeat(40);
+        let system = format!(
+            "{}\n\n<project_context>\n<project_instructions path=\"/p/AGENTS.md\">\n{agents}\n</project_instructions>\n</project_context>\n\n<skills>\n{}\n</skills>\n<cwd>\n/p\n</cwd>",
+            "p".repeat(20),
+            "s".repeat(10)
+        );
+        let rows = instructions(&system, system.len() as u64);
+        let labels: Vec<&str> = rows.iter().map(|(label, _)| label.as_str()).collect();
+        assert_eq!(labels, ["Preamble", "/p/AGENTS.md", "Skills list", "Working directory"]);
+        assert_eq!(rows[1].1, 40);
+        assert_eq!(rows[2].1, 10);
+        assert_eq!(rows.iter().map(|(_, tokens)| tokens).sum::<u64>(), system.len() as u64);
+        assert_eq!(instructions("", 0), []);
     }
 
     #[test]

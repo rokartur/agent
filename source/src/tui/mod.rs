@@ -197,6 +197,7 @@ enum Msg {
     Changes(Result<Option<Vec<FileChange>>, String>),
     Context {
         split: agent::context::PerPart,
+        instructions: Vec<(String, u64)>,
         session: Usage,
     },
 }
