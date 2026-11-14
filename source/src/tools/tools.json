@@ -696,5 +696,17 @@
       "required": ["prompt", "file_path"],
       "additionalProperties": false
     }
+  },
+  {
+    "name": "Code",
+    "description": "Run a JavaScript script that makes tool calls and returns one value, in place of many separate calls: a change repeated across files, a search whose results need filtering before you read them, a chain where one result feeds the next. The script is the body of an async function. `await tool(name, input)` runs any tool offered to you, with the input and the permission checks of a direct call, and resolves to its result text or rejects with its error text; `.nothrow()` on it resolves to the error text instead. `` $`cmd ${value}` `` is `tool(\"Bash\", {command})` with each interpolated value shell-quoted, an array as one argument per item. Calls run one at a time, in the order made. End with `return value`: a string comes back as is, anything else as JSON. Only that value reaches you, so return the part you need to read. Plain JavaScript: no modules, timers, files or network outside `tool()`; every script starts fresh; it stops after 10 minutes.\n\nExample:\nconst files = (await $`rg -l \"maxAttempts: 3\" src`).trim().split(\"\\n\");\nfor (const file of files) await tool(\"Edit\", { file_path: file, old_string: \"maxAttempts: 3\", new_string: \"maxAttempts: 5\" });\nreturn { edited: files, tests: await $`npm test -- retryPolicy`.nothrow() };",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "code": { "type": "string", "description": "The script: the body of an async function" }
+      },
+      "required": ["code"],
+      "additionalProperties": false
+    }
   }
 ]

@@ -24,6 +24,7 @@ pub mod usage;
 pub mod workflow;
 
 mod agent_tools;
+mod code;
 mod compaction;
 mod rewind;
 mod session;
@@ -214,6 +215,10 @@ pub struct Agent {
     pub steering: Steering,
     /// Blocks the running call returns after its text: AskUserQuestion's pasted images, or Video's frames and the speech between them.
     result_blocks: Vec<Value>,
+    /// Files the tool calls of the prompt in progress edited, for the edit hooks at its end.
+    edited: Vec<PathBuf>,
+    /// The `code_mode` setting: the Code tool is offered.
+    code_mode: bool,
     /// The Page tool's server, started by its first call.
     pages: Option<tools::page::Pages>,
     /// Shared with the UI so a mode change applies to the next tool call.
@@ -460,6 +465,8 @@ impl Agent {
             abort: Arc::default(),
             steering: Arc::new(Mutex::new(Vec::new())),
             result_blocks: Vec::new(),
+            edited: Vec::new(),
+            code_mode: settings.code_mode,
             pages: None,
             permission_mode: Arc::new(Mutex::new(settings.permission_mode)),
             grants: Grants::default(),
@@ -636,7 +643,7 @@ impl Agent {
     }
 
     fn run_turns(&mut self, emit: &mut dyn FnMut(Event)) -> Result<String, String> {
-        let mut edited = Vec::new();
+        self.edited.clear();
         let mut fix_rounds = 0;
         loop {
             if self.auto_compact && self.last_context_tokens > self.context_window.saturating_sub(self.reserve_tokens) {
@@ -705,7 +712,7 @@ impl Agent {
                 let queued = self.take_queued(emit);
                 if queued.is_empty() {
                     // Every file edited this prompt, so a fix round that leaves a failing file alone still sees it fail.
-                    let failures = self.run_edit_hooks(edited.clone(), emit);
+                    let failures = self.run_edit_hooks(self.edited.clone(), emit);
                     if failures.is_empty() || self.abort.load(Ordering::Relaxed) {
                         return Ok(answer);
                     }
@@ -730,53 +737,8 @@ impl Agent {
                 let id = call["id"].as_str().unwrap_or_default().to_string();
                 let name = call["name"].as_str().unwrap_or_default().to_string();
                 let input = call["input"].clone();
-                let targets = edit_hooks::edited_files(&name, &input, &self.cwd, &self.anchors);
-                let mut shown = input.clone();
-                // Anchors mean nothing to the user, show the file they resolve to.
-                if let Some(file) = targets.first() {
-                    shown["file_path"] = file.strip_prefix(&self.cwd).unwrap_or(file).display().to_string().into();
-                }
-                emit(Event::ToolStart { id: id.clone(), name: name.clone(), input: shown });
-                self.plugins.event(json!({"type": "tool_call", "name": name, "input": input, "context": self.plugin_context()}));
-                let started = Instant::now();
-                let bad_input = reply.bad_tool_inputs.iter().find(|bad| bad.id == id);
-                let (mut output, is_error, extra_blocks) = if let Some(bad) = bad_input {
-                    (format!("{} The call did not run; send it again with valid JSON.", bad.error), true, Vec::new())
-                } else if let Some(error) = tools::undeclared_params(&self.tools, &name, &input) {
-                    (format!("{error} The call did not run; send it again with only the parameters its schema lists."), true, Vec::new())
-                } else if let Some(path) = self.requested_image(&name, &input) {
-                    match crate::image::block(&path) {
-                        Ok(block) => (format!("[{} is attached as an image.]", path.display()), false, vec![block]),
-                        Err(error) => (error, true, Vec::new()),
-                    }
-                } else {
-                    let (output, is_error) = self.run_tool_with_checkpoint(&id, &name, &input, &targets, emit)?;
-                    (output, is_error, std::mem::take(&mut self.result_blocks))
-                };
-                if !is_error {
-                    for file in &targets {
-                        match self.lsp.after_edit(file, &self.cwd, &self.abort) {
-                            Ok(Some(report)) => output = format!("{output}\n\n{report}"),
-                            Ok(None) => {}
-                            Err(notice) => emit(Event::Notice(notice)),
-                        }
-                    }
-                    edited.extend(targets);
-                }
-                self.tool_calls += 1;
-                // Includes the LSP check after an edit: the whole wait before the next tool.
-                self.session.append(&json!({"type": "tool_time", "id": id, "name": name, "ms": started.elapsed().as_millis() as u64}))?;
-                let content = if extra_blocks.is_empty() {
-                    json!(output)
-                } else {
-                    let mut blocks = vec![json!({"type": "text", "text": output})];
-                    blocks.extend(extra_blocks);
-                    json!(blocks)
-                };
-                // Video puts its transcript in text blocks between the frames; the UI, plugins and condense read it too.
-                let output = crate::acp::result_text(&content);
-                self.plugins.event(json!({"type": "tool_result", "name": name, "output": output, "isError": is_error, "context": self.plugin_context()}));
-                emit(Event::ToolEnd { id: id.clone(), output: output.clone(), is_error });
+                let bad_input = reply.bad_tool_inputs.iter().find(|bad| bad.id == id).map(|bad| bad.error.as_str());
+                let (content, output, is_error) = self.run_call(&id, &name, &input, bad_input, emit)?;
                 results.push(json!({"type": "tool_result", "tool_use_id": id, "content": content, "is_error": is_error}));
                 finished.push(condense::Call { id, name, input, output, is_error });
             }
@@ -875,6 +837,7 @@ impl Agent {
         self.subagent_concurrency = settings.subagent_concurrency;
         self.subagent_effort = settings.subagent_effort.clone();
         self.subagent_model = settings.subagent_model.clone();
+        self.code_mode = settings.code_mode;
         self.tools = self.tool_schemas();
         *self.permission_mode.lock().unwrap() = settings.permission_mode;
         self.rtk = if settings.rtk { Rtk::ON } else { Rtk::OFF };
@@ -962,6 +925,7 @@ impl Agent {
             &subagent::swarm_prompt(&self.agent_dir, &self.cwd, prompt::is_trusted(&self.trusted_projects, &self.cwd), &self.subagent_effort),
             context_tree_query,
             self.client.generates_images(&self.image_model),
+            self.code_mode,
         )
     }
 

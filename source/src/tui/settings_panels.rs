@@ -20,6 +20,7 @@ pub(super) enum Setting {
     Ponytail,
     Caveman,
     Rtk,
+    CodeMode,
     HeadroomProxy,
     SubagentEffort,
     Notifications,
@@ -66,6 +67,7 @@ impl Setting {
             Setting::Ponytail => "Ponytail",
             Setting::Caveman => "Caveman",
             Setting::Rtk => "rtk",
+            Setting::CodeMode => "Code mode (experimental)",
             Setting::HeadroomProxy => "Headroom proxy",
             Setting::SubagentEffort => "Subagent effort",
             Setting::Notifications => "Notifications",
@@ -101,7 +103,7 @@ pub(super) const SETTING_SECTIONS: [(&str, &[Setting]); 5] = {
         ("Model", &[Model, Thinking, Speed, ContextWindow, PermissionMode, SubagentEffort, SubagentModel, ReviewerModel, SmallModel]),
         ("Context", &[AutoCompact, CompactionReserve, KeepRecent, Condense, CondenseModel, CondenseMinBatch, CacheTtl, MessageThreads]),
         ("Accounts", &[SwitchAt, WhenAllOverLimit, FallbackModel, ProviderOrder]),
-        ("Modes", &[OutputStyle, Ponytail, Caveman, Rtk, HeadroomProxy, HeadroomUrl, HeadroomToken, ConflictPriority]),
+        ("Modes", &[OutputStyle, Ponytail, Caveman, Rtk, CodeMode, HeadroomProxy, HeadroomUrl, HeadroomToken, ConflictPriority]),
         ("Interface", &[ExpandTools, FooterCost, FooterAccount, Notifications, ProgressBar, ScrollLines, MenuRows, CopyOnSelect, UpdateChannel, PruneSessions, MidTurn, WorkingAnimation]),
     ]
 };
@@ -189,6 +191,7 @@ impl App {
             Ponytail => s.ponytail = step(&PONYTAIL_LEVELS, &s.ponytail.as_str(), forward).to_string(),
             Caveman => s.caveman = step(&CAVEMAN_LEVELS, &s.caveman.as_str(), forward).to_string(),
             Rtk => s.rtk = !s.rtk,
+            CodeMode => s.code_mode = !s.code_mode,
             HeadroomProxy => s.headroom = !s.headroom,
             SubagentEffort => s.subagent_effort = step(&THINKING_LEVELS, &s.subagent_effort.as_str(), forward).to_string(),
             Notifications => s.notifications = !s.notifications,
@@ -238,6 +241,7 @@ impl App {
             Setting::Ponytail => choices(PONYTAIL_LEVELS.map(String::from), &s.ponytail),
             Setting::Caveman => choices(CAVEMAN_LEVELS.map(String::from), &s.caveman),
             Setting::Rtk => optional_tool(s.rtk, "rtk"),
+            Setting::CodeMode => on_off_choices(s.code_mode),
             Setting::HeadroomProxy => {
                 if s.headroom_url.is_empty() {
                     optional_tool(s.headroom, "headroom")
