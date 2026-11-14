@@ -56,6 +56,7 @@ pub fn command(program: impl AsRef<OsStr>) -> Command {
     command.env_remove(crate::mcp::CLIENT_SERVERS_ENV);
     // Set for a session's process only: an `agent acp` its Bash starts routes again.
     command.env_remove(crate::acp::SESSION_ENV);
+    command.envs(super::NO_HISTORY);
     // SAFETY: the hook only calls setsid, which is async-signal-safe.
     unsafe { command.pre_exec(new_session) };
     command
