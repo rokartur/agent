@@ -81,7 +81,8 @@ pub(super) fn spawn_worker(mut agent: Agent, mut settings: Settings, model_lists
                     }
                 }
                 Command::Context => {
-                    let _ = events.send(Msg::Context { split: agent.context_split(), session: agent.usage });
+                    let (split, instructions) = agent.context_split();
+                    let _ = events.send(Msg::Context { split, instructions, session: agent.usage });
                     continue;
                 }
                 Command::Changes => {

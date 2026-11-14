@@ -910,11 +910,12 @@ impl Agent {
         prompt::cwd_section(&self.cwd, &self.extra_dirs, self.user_device.as_deref())
     }
 
-    /// The last request's context tokens split across `context::PARTS`.
-    pub fn context_split(&self) -> context::PerPart {
+    /// The last request's context tokens split across `context::PARTS`, and the system prompt's part across its sources.
+    pub fn context_split(&self) -> (context::PerPart, Vec<(String, u64)>) {
         let (system, tools) = self.system_and_tools();
         let system = format!("{system}{}", self.cwd_section());
-        context::split(&system, &tools, &self.provider_view(), self.last_context_tokens)
+        let split = context::split(&system, &tools, &self.provider_view(), self.last_context_tokens);
+        (split, context::instructions(&system, split[0]))
     }
 
     /// Set after a resume or rewind, so auto-compact runs before a first request that would not fit.

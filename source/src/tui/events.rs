@@ -145,9 +145,9 @@ impl App {
             Msg::Changes(Err(error)) => self.push(Item::Error(error)),
             Msg::ModesFetched(Err(error)) => self.push(Item::Error(error)),
             Msg::ModesFetched(Ok(())) => {}
-            Msg::Context { split, session } => {
+            Msg::Context { split, instructions, session } => {
                 let window = self.context_window();
-                self.push(Item::Lines(context_lines(split, window, session, self.last_usage)));
+                self.push(Item::Lines(context_lines(split, &instructions, window, session, self.last_usage)));
             }
             Msg::Retracted(point) => self.take_back(point),
             Msg::Rewound { messages, files, entry } => {
