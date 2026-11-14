@@ -231,6 +231,13 @@ fn bracketed_notice_prefix_becomes_the_source() {
 }
 
 #[test]
+fn error_notices_get_the_error_tone() {
+    assert!(matches!(notice_tone(r#"API stream error: {"type":"overloaded_error"}. Retrying in 2s."#), Tone::Error));
+    assert!(matches!(notice_tone("headroom sync failed: x"), Tone::Error));
+    assert!(matches!(notice_tone("Compacting context..."), Tone::Info));
+}
+
+#[test]
 fn a_failed_mode_rules_download_is_reported_in_the_transcript() {
     let home = std::env::temp_dir().join(format!("agent-modes-fetched-{}", std::process::id()));
     let mut app = test_app(&home);

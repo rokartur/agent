@@ -195,7 +195,8 @@ impl App {
             }
             Event::Notice(text) => {
                 let (source, text) = notice_source(&text);
-                self.system(source, text);
+                let tone = notice_tone(text);
+                self.push(Item::System { source: source.into(), text: text.into(), tone });
             }
             Event::SubagentDone(run) => self.push(Item::Subagent(run)),
             Event::ToolStart { id, name, input } => self.push(Item::Tool { id, name, input, result: None, progress: None, started: Some(Instant::now()) }),
