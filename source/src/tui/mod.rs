@@ -1086,6 +1086,12 @@ fn notice_source(text: &str) -> (&str, &str) {
     text.strip_prefix('[').and_then(|rest| rest.split_once("] ")).unwrap_or(("agent", text))
 }
 
+// shortcut: notices carry no severity, so the wording decides; give Event::Notice a tone if this misfires.
+fn notice_tone(text: &str) -> Tone {
+    let text = text.to_lowercase();
+    if text.contains("error") || text.contains("fail") { Tone::Error } else { Tone::Info }
+}
+
 fn rewind_note(files: Option<RestoredFiles>) -> String {
     let Some(files) = files else { return "Rewound the conversation. Files are not tracked outside a git repo.".into() };
     let mut note = match files.restored.len() {
