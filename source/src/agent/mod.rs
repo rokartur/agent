@@ -136,6 +136,8 @@ pub enum Event {
 
 /// Messages typed mid-turn with their pasted images, read after each tool batch.
 pub type Steering = Arc<Mutex<Vec<(String, Vec<Value>)>>>;
+/// A summarizer thread: the batch, the size of the outputs it replaces, and the reply for the usage books.
+type CondenseJob = JoinHandle<Result<(Condensed, usize, api::Reply), String>>;
 
 /// Work that finished in the background; it reaches the model after the current tool batch or turn, or starts a turn when idle.
 pub struct FollowUp {
@@ -202,7 +204,9 @@ pub struct Agent {
     pub condense: condense::Config,
     /// Number of the next short ref (`t7`).
     pub next_ref: usize,
-    pub pending_condense: Vec<JoinHandle<Result<(Condensed, api::Reply), String>>>,
+    pub pending_condense: Vec<CondenseJob>,
+    /// Finished summaries not applied yet, each with the size of the outputs it replaces.
+    pub held_condensed: Vec<(Condensed, usize)>,
     pub pending_title: Option<JoinHandle<Result<String, String>>>,
     pub usage: Usage,
     pub turns: u64,
@@ -461,6 +465,7 @@ impl Agent {
             condense: condense::Config::new(settings, ""),
             next_ref: 1,
             pending_condense: Vec::new(),
+            held_condensed: Vec::new(),
             pending_title: None,
             usage: Usage::default(),
             turns: 0,

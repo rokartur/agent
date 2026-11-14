@@ -585,6 +585,7 @@ fn run(options: Options) -> Result<(), String> {
     let cwd = std::env::current_dir().map_err(|e| format!("Cannot read the working directory: {e}"))?;
     let mut settings = settings::load_in(&home, &cwd, options.trust)?;
     settings.reset_to_defaults();
+    let model_flag = options.model.clone();
     if let Some(model) = options.model {
         settings.model = model;
     }
@@ -693,6 +694,8 @@ fn run(options: Options) -> Result<(), String> {
             }
         }
         match agent.settle_model(&mut settings) {
+            // A run that asked for a model by flag has no one watching stderr; swapping it would quietly answer for another model.
+            Ok(Some(_)) if model_flag.is_some() && !options.acp => return Err(format!("--model {}: no account lists this model.", model_flag.unwrap_or_default())),
             Ok(Some(notice)) => eprintln!("{notice}"),
             Ok(None) => {}
             // An editor asks for a login when session/new finds no model to run, which it cannot show if this exits.

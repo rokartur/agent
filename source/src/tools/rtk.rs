@@ -38,7 +38,16 @@ fn rewritten(original: &str, exit_code: Option<i32>, stdout: &str) -> Option<Str
         return None;
     }
     let command = stdout.trim();
-    (!command.is_empty() && command != original.trim()).then(|| command.to_string())
+    (!command.is_empty() && command != original.trim() && !has_short_git_status(command)).then(|| command.to_string())
+}
+
+/// shortcut: rtk 1.2.0 prints `git status --short/--porcelain` without its final newline (rtk-ai/rtk#3303), which glues the
+/// last path to the next command's output; such a command runs unrewritten until rtk fixes it.
+fn has_short_git_status(rewritten: &str) -> bool {
+    rewritten.split("rtk git status").skip(1).any(|rest| {
+        let args = rest.split(['&', '|', ';', '\n']).next().unwrap_or_default();
+        args.split_whitespace().any(|arg| arg.starts_with("--porcelain") || arg == "--short" || (arg.starts_with('-') && !arg.starts_with("--") && arg.contains('s')))
+    })
 }
 
 /// Removes CSI (`ESC [ ... final byte`), OSC (`ESC ] ... BEL` or `ESC ] ... ESC \`) and charset (`ESC ( B`) sequences.
@@ -85,6 +94,15 @@ mod tests {
         assert_eq!(rewritten("rm x", Some(2), "rtk rm x"), None);
         assert_eq!(rewritten("ls", Some(0), "ls\n"), None);
         assert_eq!(rewritten("ls", Some(0), "  "), None);
+    }
+
+    #[test]
+    fn short_git_status_runs_unrewritten() {
+        for flags in ["--porcelain", "--porcelain=v2", "-s", "-sb", "--short"] {
+            assert_eq!(rewritten("x", Some(3), &format!("rtk git add a && rtk git status {flags} && rtk git diff --stat")), None, "{flags}");
+        }
+        let long = "rtk git status && rtk git diff -s --stat";
+        assert_eq!(rewritten("x", Some(3), long).as_deref(), Some(long));
     }
 
     #[test]

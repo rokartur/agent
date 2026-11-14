@@ -21,6 +21,9 @@ const PROTECTED_TOOLS: [&str; 5] = ["ContextTreeQuery", "AskUserQuestion", "Todo
 /// Below this a cached tool output costs 0.1x input, so a summary saves little and costs a context_tree_query turn when the model needs the original back.
 const MIN_CONTEXT_TOKENS: u64 = 60_000;
 pub const SUMMARY_MAX_TOKENS: u64 = 4096;
+/// Finished summaries wait until the outputs they replace reach this size: the model keeps the outputs it is still working
+/// from, and one swap rewrites the prompt cache once where a swap per turn rewrote it every turn.
+const HELD_CHARS: usize = 60_000;
 
 pub struct Config {
     pub enabled: bool,
@@ -63,6 +66,17 @@ pub fn select(calls: Vec<Call>, min_chars: u64, context_tokens: u64) -> Vec<Call
         return Vec::new();
     }
     selected
+}
+
+/// Takes the summaries to apply now out of `held` (each with the size of the outputs it replaces): all but the newest once
+/// they reach HELD_CHARS together, none before.
+pub fn release(held: &mut Vec<(Condensed, usize)>) -> Vec<Condensed> {
+    let total: usize = held.iter().map(|(_, chars)| chars).sum();
+    if total < HELD_CHARS || held.len() < 2 {
+        return Vec::new();
+    }
+    let newest = held.len() - 1;
+    held.drain(..newest).map(|(batch, _)| batch).collect()
 }
 
 /// Restored originals and skill files must reach the model verbatim.
@@ -262,6 +276,19 @@ mod tests {
         assert_eq!(batch.summary, "`t4` ran ls\n`t5` found x\n invented");
         assert_eq!(batch.refs, [("t4".to_string(), "a".to_string()), ("t5".to_string(), "b".to_string())]);
         assert_eq!(condensed("a [[x", &calls, 4).summary, "a [[x");
+    }
+
+    #[test]
+    fn summaries_wait_for_enough_output_and_the_newest_stays_held() {
+        let batch = |id: &str| condensed("[[1:Bash]] ran", &[call(id, "Bash", json!({}), "")], 1);
+        let mut held = vec![(batch("a"), HELD_CHARS - 1)];
+        assert_eq!(release(&mut held), []);
+        held.push((batch("b"), 1));
+        held.push((batch("c"), 5));
+        assert_eq!(release(&mut held), [batch("a"), batch("b")]);
+        assert_eq!(held, [(batch("c"), 5)]);
+        let mut one_huge = vec![(batch("d"), HELD_CHARS * 2)];
+        assert_eq!(release(&mut one_huge), []);
     }
 
     #[test]
