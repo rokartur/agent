@@ -512,8 +512,10 @@ impl Agent {
         }
         let questions = ask::parse(input)?;
         let (reply, answers) = mpsc::channel();
+        let asked = std::time::Instant::now();
         emit(Event::Ask { questions: questions.clone(), reply });
         let (answers, images) = answers.recv().unwrap_or_default();
+        self.waited_on_user += asked.elapsed();
         self.result_blocks = images;
         Ok(ask::response(&questions, &answers))
     }

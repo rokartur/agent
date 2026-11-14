@@ -4,6 +4,7 @@ use serde_json::Value;
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use super::{ABORTED, Agent, Event};
@@ -28,12 +29,17 @@ impl Agent {
             return Err("Code mode is off. Make the tool calls directly.".into());
         }
         let code = input["code"].as_str().ok_or("Code needs `code`.")?;
+        self.run_script(id, code, TIME_LIMIT, emit)
+    }
+
+    /// `limit` bounds the script's own work: its JavaScript and its tool calls, not the time the user takes to answer a prompt.
+    fn run_script(&mut self, id: &str, code: &str, limit: Duration, emit: &mut dyn FnMut(Event)) -> Result<String, String> {
         let js = |e: rquickjs::Error| format!("JavaScript runtime: {e}");
         let runtime = Runtime::new().map_err(js)?;
         runtime.set_memory_limit(512 << 20);
-        let deadline = Instant::now() + TIME_LIMIT;
-        let abort = self.abort.clone();
-        runtime.set_interrupt_handler(Some(Box::new(move || abort.load(Ordering::Relaxed) || Instant::now() > deadline)));
+        let deadline = Arc::new(Mutex::new(Instant::now() + limit));
+        let (abort, js_deadline) = (self.abort.clone(), deadline.clone());
+        runtime.set_interrupt_handler(Some(Box::new(move || abort.load(Ordering::Relaxed) || Instant::now() > *js_deadline.lock().unwrap())));
         let context = Context::full(&runtime).map_err(js)?;
         let inbox = Rc::new(RefCell::new(Inbox::default()));
         context.with(|ctx| install(&ctx, &inbox, code))?;
@@ -44,8 +50,8 @@ impl Agent {
             if self.abort.load(Ordering::Relaxed) {
                 return Err(ABORTED.into());
             }
-            if Instant::now() > deadline {
-                return Err(format!("The script ran past {} minutes and was stopped after {ran} tool calls.", TIME_LIMIT.as_secs() / 60));
+            if Instant::now() > *deadline.lock().unwrap() {
+                return Err(format!("The script ran past {} minutes and was stopped after {ran} tool calls.", limit.as_secs() / 60));
             }
             if let Some(outcome) = inbox.borrow_mut().outcome.take() {
                 // Images and frames the script's calls returned go to the model with the script's value.
@@ -64,8 +70,12 @@ impl Agent {
                     ran += 1;
                     // The script parses what Bash prints, so the command runs as written: rtk turns the `total` row of `wc -l` into `Σ 9`.
                     let rtk = std::mem::replace(&mut self.rtk, tools::rtk::Rtk::OFF);
+                    let waited = self.waited_on_user;
+                    self.in_script = true;
                     let call = self.run_call(&format!("{id}-{ran}"), &name, &input, None, emit);
+                    self.in_script = false;
                     self.rtk = rtk;
+                    *deadline.lock().unwrap() += self.waited_on_user - waited;
                     let (content, output, is_error) = call?;
                     blocks.extend(content.as_array().into_iter().flatten().filter(|block| block["type"] != "text").cloned());
                     if is_error { Err(output) } else { Ok(output) }
@@ -92,12 +102,10 @@ fn install(ctx: &Ctx, inbox: &Rc<RefCell<Inbox>>, code: &str) -> Result<(), Stri
     let request = move |id: u32, name: String, input: String| calls.borrow_mut().calls.push((id, name, serde_json::from_str(&input).unwrap_or(Value::Null)));
     globals.set("__request", Function::new(ctx.clone(), request).map_err(js)?).map_err(js)?;
     let finished = inbox.clone();
-    let finish = move |ok: bool, text: String| finished.borrow_mut().outcome = Some(if ok { Ok(super::workflow::present(&text)) } else { Err(text) });
+    let finish = move |ok: bool, text: String| finished.borrow_mut().outcome = Some(if ok { Ok(text) } else { Err(text) });
     globals.set("__finish", Function::new(ctx.clone(), finish).map_err(js)?).map_err(js)?;
     ctx.eval::<(), _>(HARNESS).catch(ctx).map_err(|e| format!("Code harness: {e}"))?;
-    let main = format!(
-        "(async function () {{{code}\n}})().then((result) => __finish(true, JSON.stringify(result === undefined ? 'The script returned no value.' : result)), (error) => __finish(false, error && error.stack ? `${{error}}\\n${{error.stack}}` : String(error)));"
-    );
+    let main = format!("(async function () {{{code}\n}})().then((value) => __done(true, value), (error) => __done(false, error));");
     ctx.eval::<(), _>(main).catch(ctx).map_err(|e| format!("The script failed: {e}"))
 }
 
@@ -113,7 +121,7 @@ fn settle(ctx: &Ctx, promise: u32, outcome: Result<String, String>) -> Result<()
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::permissions::Mode;
+    use crate::agent::permissions::{Decision, Mode};
     use crate::agent::{Client, Session};
     use serde_json::json;
     use std::path::PathBuf;
@@ -179,7 +187,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_call_the_user_denies_stops_the_script() {
-        use crate::agent::permissions::Decision;
         let (mut agent, home) = agent("denied");
         *agent.permission_mode.lock().unwrap() = Mode::Ask;
         let code = "await $`touch made`; await $`touch after`; return 'done';";
@@ -207,5 +214,48 @@ mod tests {
         assert!(syntax.starts_with("The script failed:"), "{syntax}");
         assert_eq!(stuck, "The script is awaiting something that never settles.");
         assert_eq!(silent, "The script returned no value.");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cat_in_a_script_prints_the_file_as_it_is_unless_a_read_rule_denies_it() {
+        let (mut agent, home) = agent("cat");
+        std::fs::write(agent.cwd.join("data.json"), r#"{"name": "x"}"#).unwrap();
+        std::fs::write(agent.cwd.join(".env"), "KEY=1").unwrap();
+        agent.permission_rules.deny = vec!["Read(.env*)".into()];
+        let name = run(&mut agent, "return JSON.parse(await $`cat data.json`).name;");
+        let denied = run(&mut agent, "return await $`cat .env`.nothrow();");
+        std::fs::remove_dir_all(&home).unwrap();
+        assert_eq!(name.unwrap(), "x");
+        assert_eq!(denied.unwrap(), "Denied by the permission rule \"Read(.env*)\" in settings.json.");
+    }
+
+    #[test]
+    fn what_a_script_logs_comes_back_before_its_value_or_error() {
+        let (mut agent, home) = agent("logs");
+        let both = run(&mut agent, "console.log('found', { n: 2 }); console.error(new Error('odd')); return [1];");
+        let only_logs = run(&mut agent, "console.log('done');");
+        let thrown = run(&mut agent, "console.log('step 1'); throw new Error('boom');").unwrap_err();
+        std::fs::remove_dir_all(&home).unwrap();
+        assert_eq!(both.unwrap(), "found {\"n\":2}\nError: odd\n[\n  1\n]");
+        assert_eq!(only_logs.unwrap(), "done");
+        assert!(thrown.starts_with("step 1\nError: boom"), "{thrown}");
+    }
+
+    #[test]
+    fn the_time_limit_stops_a_busy_script_but_not_one_waiting_for_the_user() {
+        let (mut agent, home) = agent("limit");
+        let busy = agent.run_script("c1", "await null; while (true) {}", Duration::from_millis(100), &mut |_| {});
+        *agent.permission_mode.lock().unwrap() = Mode::Ask;
+        let write = "await tool('Write', { file_path: 'a.txt', content: 'x' }); return 'done';";
+        let asked = agent.run_script("c2", write, Duration::from_millis(500), &mut |event| {
+            if let Event::Permission { reply, .. } = event {
+                std::thread::sleep(Duration::from_millis(600));
+                reply.send(Decision::Allow).unwrap();
+            }
+        });
+        std::fs::remove_dir_all(&home).unwrap();
+        assert!(busy.unwrap_err().starts_with("The script ran past"));
+        assert_eq!(asked.unwrap(), "done");
     }
 }

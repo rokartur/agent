@@ -123,8 +123,14 @@ impl Agent {
         if name == "Bash"
             && let Some(read) = guard::file_read(input["command"].as_str().unwrap_or_default())
         {
-            let (output, is_error) = self.run_tool(id, "Read", &read, &[], emit);
-            return (format!("Ran as read, so these anchors are what edits use.\n{output}"), is_error);
+            if !self.in_script {
+                let (output, is_error) = self.run_tool(id, "Read", &read, &[], emit);
+                return (format!("Ran as read, so these anchors are what edits use.\n{output}"), is_error);
+            }
+            // A script parses what `cat` prints (`JSON.parse`), so there it stays a command. The Read it stands for is still checked: a deny rule on the file holds.
+            if let Some(reason) = self.check_permission(Some(id), "Read", &read, &[], emit) {
+                return (reason, true);
+            }
         }
         if name == "Bash"
             && let Some(reason) = guard::bash(input["command"].as_str().unwrap_or_default())
@@ -281,8 +287,11 @@ impl Agent {
             Step::AskUser(request) => request,
         };
         let (reply, answer) = mpsc::channel();
+        let asked = Instant::now();
         emit(Event::Permission { call: call.map(String::from), request: request.clone(), reply });
-        match answer.recv().unwrap_or(Decision::Deny) {
+        let decision = answer.recv().unwrap_or(Decision::Deny);
+        self.waited_on_user += asked.elapsed();
+        match decision {
             Decision::Allow => None,
             Decision::AllowAlways => {
                 self.grants.add(&request);
