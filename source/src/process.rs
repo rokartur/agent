@@ -16,6 +16,10 @@ pub const SIGHUP: i32 = 1;
 pub const SIGKILL: i32 = 9;
 pub const SIGTERM: i32 = 15;
 
+/// Set on every child, so a shell it starts interactively (`bash -i`, a tmux pane) keeps out of the user's history.
+/// fish saves nothing when `fish_history` is empty; macOS' /etc/zshrc resets HISTFILE, so a zsh there still writes.
+const NO_HISTORY: [(&str, &str); 2] = [("HISTFILE", "/dev/null"), ("fish_history", "")];
+
 /// Runs a `command(..)` with stdout and stderr captured. Past `timeout` its group is killed and the result is None.
 pub fn output_within(command: &mut Command, timeout: Duration) -> std::io::Result<Option<Output>> {
     let mut child = command.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
@@ -165,6 +169,19 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(3), "a leftover child holding the pipe was waited for");
         let output = output_within(sh().args(["-c", "head -c 200000 /dev/zero"]), Duration::from_secs(5)).unwrap().expect("more than a pipe buffer is read while it runs");
         assert_eq!(output.stdout.len(), 200_000);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_interactive_shell_writes_no_history() {
+        let home = std::env::temp_dir().join(format!("agent-history-{}", std::process::id()));
+        std::fs::create_dir_all(&home).unwrap();
+        let mut child = command(shell("bash").unwrap()).args(["--norc", "-i"]).env("HOME", &home).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
+        std::io::Write::write_all(&mut child.stdin.take().unwrap(), b"echo secret\nexit\n").unwrap();
+        child.wait().unwrap();
+        let written = home.join(".bash_history").exists();
+        std::fs::remove_dir_all(&home).unwrap();
+        assert!(!written, "bash -i saved its history");
     }
 
     #[test]
