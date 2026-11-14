@@ -219,6 +219,10 @@ pub struct Agent {
     edited: Vec<PathBuf>,
     /// The `code_mode` setting: the Code tool is offered.
     code_mode: bool,
+    /// A Code script is making the call in progress, so its Bash commands run as written.
+    in_script: bool,
+    /// Time spent at permission prompts and AskUserQuestion; a Code script's time limit leaves it out.
+    waited_on_user: Duration,
     /// The Page tool's server, started by its first call.
     pages: Option<tools::page::Pages>,
     /// Shared with the UI so a mode change applies to the next tool call.
@@ -467,6 +471,8 @@ impl Agent {
             result_blocks: Vec::new(),
             edited: Vec::new(),
             code_mode: settings.code_mode,
+            in_script: false,
+            waited_on_user: Duration::ZERO,
             pages: None,
             permission_mode: Arc::new(Mutex::new(settings.permission_mode)),
             grants: Grants::default(),
