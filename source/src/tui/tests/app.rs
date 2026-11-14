@@ -318,6 +318,18 @@ fn a_click_on_a_shown_editor_row_moves_the_cursor_there() {
 }
 
 #[test]
+fn open_todos_keep_a_blank_row_above_the_editor() {
+    let home = std::env::temp_dir().join(format!("agent-tui-todo-gap-{}", std::process::id()));
+    let mut app = test_app(&home);
+    let _ = std::fs::remove_dir_all(&home);
+    app.todos.lock().unwrap().apply(&json!({"action": "create", "subject": "ship it"})).unwrap();
+    let rows: Vec<String> = app.frame(80, 20).0.iter().map(text).collect();
+    let todo = rows.iter().position(|row| row.contains("ship it")).expect("todo is shown");
+    assert_eq!(rows[todo + 1].trim(), "", "{rows:?}");
+    assert!(rows[todo + 2].contains("Ask, /command"), "{rows:?}");
+}
+
+#[test]
 fn a_drag_outside_the_editor_clamps_to_its_edge_row() {
     let layout = Layout { input_top: 20, input_rows: 3, input_below: 2, ..Layout::default() };
     assert_eq!(layout.input_point(0, 7), Point { line: 4, column: 7 }, "above the editor: its first shown row");

@@ -82,7 +82,9 @@ impl App {
             bottom.push(Vec::new());
             bottom.push(shimmer_line(TRANSCRIBING, (started.elapsed().as_millis() / 80) as usize, &self.settings.working_animation));
         }
-        bottom.extend(todo_lines(&self.todos.lock().unwrap()));
+        let todos = todo_lines(&self.todos.lock().unwrap());
+        let has_todos = !todos.is_empty();
+        bottom.extend(todos);
         let shells = self.terminals.lock().unwrap().running();
         let agents = footer_agents(&self.subagents.lock().unwrap());
         let workflows = footer_workflows(&self.workflows);
@@ -100,7 +102,14 @@ impl App {
                 bottom.extend(lines);
                 bottom.push(Vec::new());
             }
-            None => bottom.extend(self.menu()),
+            None => {
+                let menu = self.menu();
+                // Todos keep one blank line above the editor; the menu brings its own.
+                if has_todos && menu.is_empty() {
+                    bottom.push(Vec::new());
+                }
+                bottom.extend(menu);
+            }
         }
         // Queued prompts, todos and the menu lead with a blank line; without them the editor needs its own gap.
         if bottom.is_empty() {
