@@ -113,7 +113,7 @@ fn settle(ctx: &Ctx, promise: u32, outcome: Result<String, String>) -> Result<()
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::permissions::{Decision, Mode};
+    use crate::agent::permissions::Mode;
     use crate::agent::{Client, Session};
     use serde_json::json;
     use std::path::PathBuf;
@@ -179,6 +179,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_call_the_user_denies_stops_the_script() {
+        use crate::agent::permissions::Decision;
         let (mut agent, home) = agent("denied");
         *agent.permission_mode.lock().unwrap() = Mode::Ask;
         let code = "await $`touch made`; await $`touch after`; return 'done';";
