@@ -58,29 +58,33 @@ impl Agent {
         let client = self.client.clone();
         let first_ref = self.next_ref;
         self.next_ref += calls.len();
+        let chars: usize = calls.iter().map(|call| call.output.chars().count()).sum();
         self.pending_condense.push(std::thread::spawn(move || {
             let reply = client.send_quiet(&request, &AtomicBool::new(false))?;
             let summary = text_of(&reply.message);
             if summary.trim().is_empty() || reply.stop_reason != "end_turn" {
                 return Err("the summary came back empty or cut off".to_string());
             }
-            Ok((condense::condensed(&summary, &calls, first_ref), reply))
+            Ok((condense::condensed(&summary, &calls, first_ref), chars, reply))
         }));
     }
 
-    /// Applies finished summaries; a failed one leaves its originals in place.
+    /// Holds finished summaries and applies the ones `condense::release` lets go; a failed one leaves its originals in place.
     pub(super) fn collect_condensed(&mut self, emit: &mut dyn FnMut(Event)) -> Result<(), String> {
         let (finished, running) = std::mem::take(&mut self.pending_condense).into_iter().partition(|handle| handle.is_finished());
         self.pending_condense = running;
         for handle in finished {
             match handle.join().unwrap_or_else(|_| Err("the summarizer thread panicked".into())) {
-                Ok((batch, reply)) => {
+                Ok((batch, chars, reply)) => {
                     self.usage.add(reply.usage);
                     self.session.append(&usage::reply_entry(&reply, now_ms()))?;
-                    self.record(condense::entry(&batch))?;
+                    self.held_condensed.push((batch, chars));
                 }
                 Err(error) => emit(Event::Notice(format!("Condense failed, kept the original tool outputs: {error}"))),
             }
+        }
+        for batch in condense::release(&mut self.held_condensed) {
+            self.record(condense::entry(&batch))?;
         }
         Ok(())
     }

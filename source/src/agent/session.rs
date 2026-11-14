@@ -207,6 +207,7 @@ impl Agent {
         self.tools = self.tool_schemas();
         self.spent = saved.spent;
         self.pending_condense.clear();
+        self.held_condensed.clear();
         self.pending_title = None;
         self.nested_instructions.clear();
         self.extra_dirs = saved.extra_dirs;
