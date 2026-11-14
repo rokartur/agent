@@ -183,6 +183,16 @@ pub(super) fn render_tool(name: &str, input: &Value, result: Option<&(String, bo
         return vec![truncate(&header, width)];
     }
     let mut lines = vec![header];
+    // A script's calls are rows of their own only while it runs; in a resumed session the script is what says what ran.
+    if name == "Code" {
+        let rest: Vec<&str> = input["code"].as_str().unwrap_or_default().lines().skip_while(|line| line.trim().is_empty()).skip(1).collect();
+        for line in rest.iter().take(TOOL_OUTPUT_LINES) {
+            lines.push(truncate(&vec![span(format!("  {}", line.replace('\t', "    ")), TOOL_ARGS)], width));
+        }
+        if rest.len() > TOOL_OUTPUT_LINES {
+            lines.push(vec![span(format!("  … {} more lines", rest.len() - TOOL_OUTPUT_LINES), MUTED)]);
+        }
+    }
     let Some((output, is_error)) = result else { return lines };
     let style = if *is_error { ERROR } else { TOOL_ARGS };
     let pretty = serde_json::from_str::<Value>(output).ok().filter(|v| v.is_object() || v.is_array()).and_then(|v| serde_json::to_string_pretty(&v).ok());
@@ -297,6 +307,7 @@ pub(super) fn tool_args(name: &str, input: &Value, cwd: &Path) -> String {
         // Anchors mean nothing to the user; render_tool adds the +/- line counts instead.
         "Write" | "ReplaceLines" | "Edit" | "InsertLines" => relative(&field("file_path")),
         "Page" => field("title"),
+        "Code" => field("code").lines().map(str::trim).find(|line| !line.is_empty()).unwrap_or_default().to_string(),
         "Grep" => match input["path"].as_str() {
             Some(path) => format!("{} in {}", field("pattern"), relative(path)),
             None => field("pattern"),

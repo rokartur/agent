@@ -501,7 +501,7 @@ fn install(ctx: &Ctx, workflow: &Arc<Workflow>, inbox: &Rc<RefCell<Inbox>>, args
 }
 
 /// The script's return value as the model reads it: a string as is, anything else as JSON.
-fn present(json: &str) -> String {
+pub(super) fn present(json: &str) -> String {
     match serde_json::from_str::<Value>(json) {
         Ok(Value::String(text)) => text,
         Ok(value) => serde_json::to_string_pretty(&value).unwrap_or_default(),

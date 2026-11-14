@@ -13,6 +13,7 @@ Built-in tools are defined in `tools/mod.rs` (`schemas` gives the JSON schema li
 | Web | `WebSearch`, `WebFetch`, `GetSearchContent` | `tools/web/` |
 | Git | `EnterWorktree`, `ExitWorktree` | `worktree.rs` |
 | Context | `ContextTreeQuery` | `agent/condense.rs` |
+| Scripts | `Code` | `agent/code.rs` |
 
 `--tools a,b` (print, headless, acp) and `--parent` (subagents) narrow the list; `Agent.only_tools` is the filter.
 
@@ -33,6 +34,14 @@ Every anchor is four ASCII letters so a long session can hold one per line read 
 `tools/guard.rs` refuses three command shapes before they run: a blind `sleep` loop, `gh pr merge` chained after `gh pr checks` with `;` or a pipe (drops the exit status), and plain file reads (`cat`, `head`, `sed -n`) mixed with other commands. A command that is only file reads runs as `Read` in the same turn so the lines come back with anchors.
 
 `run_in_background: true` starts the command in its own process group tracked by `tools/bg.rs`; its exit arrives as a follow-up message, `TaskOutput` peeks, `TaskStop` sends SIGTERM then SIGKILL; on Windows it ends the process tree with taskkill at once.
+
+## Code mode
+
+Experimental, off by default: `code_mode` in `settings.json` ("Code mode" in `/settings`) offers the `Code` tool. A project's settings file cannot turn it on. The model sends a JavaScript script, the body of an async function, and `agent/code.rs` runs it in an embedded QuickJS sandbox with two globals (`agent/code-harness.js`): `tool(name, input)` and `` $`cmd` ``, which is `tool("Bash", ...)` with interpolated values shell-quoted. The script's `return` value is the tool result; nothing else the calls print reaches the model.
+
+Each `tool()` call goes through `Agent::run_call`, the function a call from the model's reply goes through, so it gets the same permission check, `before_tool` hooks, plan-mode block, rewind checkpoint, LSP report and edit hooks, and shows in the transcript as its own row under the `Code` row (id `<code call id>-<n>`). A script reaches only the tools offered to the model, so `--tools` and a subagent's shorter list hold inside it, and it cannot call `Code`. Calls run one at a time on the agent's thread; `Promise.all` over them is sequential. In `Auto` the reviewer sees each call, not the script. A script's `Bash` calls skip the `rtk` rewrite: the script parses the output, and rtk reshapes it for reading. A `before_tool` hook matching `Code` reads the script from `input.code`.
+
+Limits: 10 minutes per script, checked between calls, time at permission prompts included; 512 MB of JavaScript memory; no state kept between scripts; the session history holds only the `Code` call and its result, so a resumed transcript shows the script's row without its calls, as it shows an `Agent` row without the subagent's. The row is headed by the script's first line and, expanded, shows the whole script.
 
 ## Permissions
 

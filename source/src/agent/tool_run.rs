@@ -58,6 +58,58 @@ impl Agent {
         None
     }
 
+    /// One tool call, from the model's reply or from a Code script: its events, the run, the LSP report after an edit.
+    /// Returns the result's content, the text in it, and whether the call failed. `bad_input` is the error of an input that was not valid JSON.
+    pub(super) fn run_call(&mut self, id: &str, name: &str, input: &Value, bad_input: Option<&str>, emit: &mut dyn FnMut(Event)) -> Result<(Value, String, bool), String> {
+        let targets = edit_hooks::edited_files(name, input, &self.cwd, &self.anchors);
+        let mut shown = input.clone();
+        // Anchors mean nothing to the user, show the file they resolve to.
+        if let Some(file) = targets.first() {
+            shown["file_path"] = file.strip_prefix(&self.cwd).unwrap_or(file).display().to_string().into();
+        }
+        emit(Event::ToolStart { id: id.into(), name: name.into(), input: shown });
+        self.plugins.event(json!({"type": "tool_call", "name": name, "input": input, "context": self.plugin_context()}));
+        let started = Instant::now();
+        let (mut output, is_error, extra_blocks) = if let Some(error) = bad_input {
+            (format!("{error} The call did not run; send it again with valid JSON."), true, Vec::new())
+        } else if let Some(error) = tools::undeclared_params(&self.tools, name, input) {
+            (format!("{error} The call did not run; send it again with only the parameters its schema lists."), true, Vec::new())
+        } else if let Some(path) = self.requested_image(name, input) {
+            match crate::image::block(&path) {
+                Ok(block) => (format!("[{} is attached as an image.]", path.display()), false, vec![block]),
+                Err(error) => (error, true, Vec::new()),
+            }
+        } else {
+            let (output, is_error) = self.run_tool_with_checkpoint(id, name, input, &targets, emit)?;
+            (output, is_error, std::mem::take(&mut self.result_blocks))
+        };
+        if !is_error {
+            for file in &targets {
+                match self.lsp.after_edit(file, &self.cwd, &self.abort) {
+                    Ok(Some(report)) => output = format!("{output}\n\n{report}"),
+                    Ok(None) => {}
+                    Err(notice) => emit(Event::Notice(notice)),
+                }
+            }
+            self.edited.extend(targets);
+        }
+        self.tool_calls += 1;
+        // Includes the LSP check after an edit: the whole wait before the next tool.
+        self.session.append(&json!({"type": "tool_time", "id": id, "name": name, "ms": started.elapsed().as_millis() as u64}))?;
+        let content = if extra_blocks.is_empty() {
+            json!(output)
+        } else {
+            let mut blocks = vec![json!({"type": "text", "text": output})];
+            blocks.extend(extra_blocks);
+            json!(blocks)
+        };
+        // Video puts its transcript in text blocks between the frames; the UI, plugins and condense read it too.
+        let output = crate::acp::result_text(&content);
+        self.plugins.event(json!({"type": "tool_result", "name": name, "output": output, "isError": is_error, "context": self.plugin_context()}));
+        emit(Event::ToolEnd { id: id.into(), output: output.clone(), is_error });
+        Ok((content, output, is_error))
+    }
+
     /// Runs one tool call after the permission check; agent-level tools are handled in `agent_tools`, file and shell tools in `tools`.
     pub(super) fn run_tool(&mut self, id: &str, name: &str, input: &Value, targets: &[PathBuf], emit: &mut dyn FnMut(Event)) -> (String, bool) {
         if self.abort.load(Ordering::Relaxed) {
@@ -110,6 +162,7 @@ impl Agent {
             "ListAgents" => self.list_agents(),
             "Agent" => self.subagent(input, emit),
             "Workflow" => self.workflow(input),
+            "Code" => self.code(id, input, emit),
             "WaitForAgents" => self.bg_wait(input),
             "CronCreate" if self.interactive => tools::cron::create(&self.crons, input, &self.follow_ups),
             "ScheduleWakeup" if self.interactive => tools::cron::wakeup(&self.crons, input, &self.follow_ups),

@@ -90,6 +90,8 @@ pub struct Settings {
     /// One of `modes::OUTPUT_STYLES`, as Claude Code's `outputStyle`.
     pub output_style: String,
     pub rtk: bool,
+    /// Offer the Code tool: a JavaScript script that makes several tool calls in one step.
+    pub code_mode: bool,
     /// Send model requests through `headroom proxy`.
     pub headroom: bool,
     /// A remote `headroom proxy` (`https://headroom.example.com`); empty means the local one, which the agent installs and syncs.
@@ -541,6 +543,7 @@ fn from_json(own: &Value) -> Settings {
         caveman: level(&own["caveman"], &crate::agent::modes::CAVEMAN_LEVELS, "off"),
         output_style: level(&own["output_style"], &crate::agent::modes::OUTPUT_STYLES, "default"),
         rtk: own["rtk"].as_bool().unwrap_or(true),
+        code_mode: own["code_mode"].as_bool().unwrap_or(false),
         headroom: own["headroom"].as_bool().unwrap_or(false),
         headroom_url: own["headroom_url"].as_str().unwrap_or_default().trim_end_matches('/').to_string(),
         headroom_token: own["headroom_token"].as_str().unwrap_or_default().to_string(),
@@ -683,6 +686,7 @@ fn to_json(settings: &Settings) -> Value {
         "caveman": settings.caveman,
         "output_style": settings.output_style,
         "rtk": settings.rtk,
+        "code_mode": settings.code_mode,
         "headroom": settings.headroom,
         "headroom_url": settings.headroom_url,
         "headroom_token": settings.headroom_token,

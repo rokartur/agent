@@ -98,6 +98,10 @@ _Avoid_: Worker, child session
 A JavaScript script that orchestrates many subagents in the background and returns one result.
 _Avoid_: Pipeline, swarm
 
+**Code mode**:
+The setting under which the model may send a JavaScript script that makes its tool calls itself and returns one value, through the `Code` tool.
+_Avoid_: REPL, scripting mode
+
 **Peer**:
 Another interactive session on this or another of the user's computers, reachable with `SendMessage`; one on another computer is addressed `<environment>:<session>`.
 _Avoid_: Sibling, neighbour

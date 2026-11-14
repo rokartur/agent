@@ -80,6 +80,15 @@ fn expanded_tool_call_puts_the_output_under_a_hook() {
 }
 
 #[test]
+fn a_code_call_is_headed_by_its_first_line_and_shows_the_script_when_expanded() {
+    let input = json!({"code": "\n  const files = await $`ls`;\n\tif (files) {\n    return files;\n  }\n"});
+    let result = ("a.txt".to_string(), false);
+    let rows = |expanded: bool| render_tool("Code", &input, Some(&result), 60, expanded, Path::new("/repo")).iter().map(text).collect::<Vec<_>>();
+    assert_eq!(rows(false), ["✓ Code const files = await $`ls`; · a.txt"]);
+    assert_eq!(rows(true), ["✓ Code const files = await $`ls`;", "      if (files) {", "      return files;", "    }", "└ a.txt"]);
+}
+
+#[test]
 fn answered_question_shows_its_answer_under_a_hook() {
     let input = json!({"questions": [{"question": "Which db?", "header": "DB", "options": []}]});
     let result = ("User has answered your questions: \"Which db?\"=\"sqlite\". You can now continue.".to_string(), false);
