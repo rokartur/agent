@@ -72,7 +72,11 @@ impl App {
             Msg::BtwDone(result) => {
                 if let Some(btw) = self.btw.as_mut() {
                     btw.streaming = false;
-                    btw.error = result.err();
+                    btw.error = result.as_ref().err().cloned();
+                }
+                if !matches!(self.panel, Some(Panel::Btw)) {
+                    let outcome = if result.is_ok() { "answered" } else { "failed" };
+                    self.hint = Some((format!("btw {outcome}: /btw to read"), Instant::now()));
                 }
             }
             Msg::HandedOff(prompt) => {

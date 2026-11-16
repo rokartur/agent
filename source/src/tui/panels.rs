@@ -200,7 +200,7 @@ impl App {
             Panel::Ask(_) => self.ask_key(key),
             Panel::Login(_) => self.login_key(key),
             Panel::Trust { .. } => self.trust_key(key.code),
-            Panel::Btw => self.btw_key(key),
+            Panel::Btw => self.btw_key(key, ctrl_c),
             Panel::Models { .. } => self.models_key(key),
             Panel::ContextWindows { .. } => self.context_windows_key(key),
             Panel::ProviderOrder { .. } => self.provider_order_key(key),
