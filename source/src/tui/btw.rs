@@ -7,6 +7,8 @@ use std::time::Instant;
 use super::editor::Editor;
 use super::markdown;
 use super::render::{BRIGHT, Line, MUTED, PLAIN, span, wrap};
+use super::transcript::prompt_rows;
+use super::view::band;
 use super::{App, ERROR, Item, MODELS_STILL_LOADING, Msg, Panel};
 use crate::api::{self, Delta};
 
@@ -27,11 +29,13 @@ pub struct Btw {
     pub abort: Arc<AtomicBool>,
     pub streaming: bool,
     pub error: Option<String>,
+    /// The first body line shown; None follows the newest text. A line index stays put while an answer streams.
+    pub top: Option<usize>,
 }
 
 impl Btw {
     pub fn new(context: String) -> Btw {
-        Btw { context, turns: Vec::new(), input: Editor::new(), abort: Arc::default(), streaming: false, error: None }
+        Btw { context, turns: Vec::new(), input: Editor::new(), abort: Arc::default(), streaming: false, error: None, top: None }
     }
 
     /// pi-btw's messages: the first question carries the context, later ones continue the thread.
@@ -57,22 +61,60 @@ impl Btw {
     }
 
     pub fn render(&self, width: usize) -> Vec<Line> {
+        let body = self.body(width);
+        let first = first_line(self.top, body.len());
+        let end = (first + VISIBLE_LINES).min(body.len());
+        let below = body.len() - end;
+        let mut title = vec![span("btw", BRIGHT.bold()), span("  side question, not saved to the session", MUTED)];
+        if first > 0 {
+            title.push(span(format!("  ↑ {first} more"), MUTED));
+        }
+        let mut lines = vec![Vec::new(), title];
+        lines.extend(body.into_iter().take(end).skip(first));
+        if below > 0 {
+            lines.push(vec![span(format!(" ↓ {below} more"), MUTED)]);
+        }
+        let prompt = if self.streaming { span("  answering…", MUTED) } else { span(format!("❯ {}", self.input.field(None)), BRIGHT) };
+        let mut hint = if self.streaming { "esc hide, keeps answering     ctrl+c stop" } else { "enter ask     esc close" }.to_string();
+        if first > 0 || below > 0 {
+            hint.push_str("     ↑↓ pgup pgdn scroll");
+        }
+        if !self.streaming && self.turns.last().is_some_and(|(_, answer)| !answer.is_empty()) {
+            hint.push_str("     tab insert answer into editor");
+        }
+        lines.extend([vec![prompt], vec![span(hint, MUTED)]]);
+        lines
+    }
+
+    fn body(&self, width: usize) -> Vec<Line> {
         let mut body = Vec::new();
+        // Styled like the transcript: a prompt band for the question, a one-column margin for the answer.
         for (question, answer) in &self.turns {
-            body.extend(wrap(&[span(format!("> {question}"), BRIGHT.bold())], width, &vec![span("  ", PLAIN)]));
-            body.extend(markdown::render(answer, width));
+            body.extend(prompt_rows(question, BRIGHT, width).into_iter().map(|row| band(row, width)));
+            for line in markdown::render(answer, width.saturating_sub(1)) {
+                let mut indented = vec![span(" ", PLAIN)];
+                indented.extend(line);
+                body.push(indented);
+            }
             body.push(Vec::new());
         }
         if let Some(error) = &self.error {
             body.extend(wrap(&[span(error.clone(), ERROR)], width, &Vec::new()));
         }
-        let first = body.len().saturating_sub(VISIBLE_LINES);
-        let mut lines = vec![Vec::new(), vec![span("btw", BRIGHT.bold()), span("  side question, not saved to the session", MUTED)]];
-        lines.extend(body.into_iter().skip(first));
-        let prompt = if self.streaming { span("  answering…", MUTED) } else { span(format!("> {}", self.input.field(None)), BRIGHT) };
-        lines.extend([vec![prompt], vec![span("enter ask     tab insert answer into editor     esc close", MUTED)]]);
-        lines
+        body
     }
+
+    /// Moves the view `rows` down (negative: up); reaching the newest text follows it again.
+    pub fn scroll_by(&mut self, rows: isize, width: usize) {
+        let len = self.body(width).len();
+        let top = first_line(self.top, len).saturating_add_signed(rows);
+        self.top = (top < len.saturating_sub(VISIBLE_LINES)).then_some(top);
+    }
+}
+
+fn first_line(top: Option<usize>, len: usize) -> usize {
+    let last_page = len.saturating_sub(VISIBLE_LINES);
+    top.map_or(last_page, |top| top.min(last_page))
 }
 
 /// pi-btw's `User: …` / `Assistant: …` context, cut from the start to its last MAX_CONTEXT_CHARS characters.
@@ -105,13 +147,16 @@ impl App {
         }
     }
 
-    pub(super) fn btw_key(&mut self, key: KeyEvent) {
+    /// Esc only hides the panel, so an answer can stream while the main editor is in use; Ctrl+C stops it.
+    pub(super) fn btw_key(&mut self, key: KeyEvent, ctrl_c: bool) {
         let btw = self.btw.as_mut().expect("the btw panel opens with a thread");
         match key.code {
-            KeyCode::Esc => {
-                btw.abort.store(true, Ordering::Relaxed);
-                self.panel = None;
-            }
+            KeyCode::Esc if ctrl_c && btw.streaming => btw.abort.store(true, Ordering::Relaxed),
+            KeyCode::Esc => self.panel = None,
+            KeyCode::Up => btw.scroll_by(-1, self.layout.width),
+            KeyCode::Down => btw.scroll_by(1, self.layout.width),
+            KeyCode::PageUp => btw.scroll_by(-(VISIBLE_LINES as isize), self.layout.width),
+            KeyCode::PageDown => btw.scroll_by(VISIBLE_LINES as isize, self.layout.width),
             KeyCode::Tab => {
                 let Some((_, answer)) = btw.turns.last().filter(|(_, answer)| !answer.is_empty()) else { return };
                 let answer = answer.clone();
@@ -142,6 +187,7 @@ impl App {
         btw.turns.push((question, String::new()));
         btw.streaming = true;
         btw.error = None;
+        btw.top = None;
         btw.abort.store(false, Ordering::Relaxed);
         let request = btw.request(&model, max_tokens, &thinking);
         let (client, abort, events) = (self.client.clone(), btw.abort.clone(), self.events.clone());
@@ -199,6 +245,18 @@ mod tests {
         assert_eq!(messages[1]["content"][0]["text"], "because");
         assert!(messages[2]["content"][0]["text"].as_str().unwrap().starts_with("Continue the same side conversation."));
         assert_eq!(request["tools"], json!([]));
+    }
+
+    #[test]
+    fn a_scrolled_view_stays_put_while_the_answer_grows_and_follows_again_at_the_end() {
+        let mut btw = Btw::new(String::new());
+        btw.turns = vec![("q".into(), (0..30).map(|n| format!("line{n}\n\n")).collect())];
+        btw.scroll_by(-100, 40);
+        assert_eq!(btw.top, Some(0));
+        btw.turns[0].1.push_str("more\n\nmore\n\n");
+        assert_eq!(btw.render(40)[2].iter().map(|s| s.text.as_str()).collect::<String>().trim(), "❯ q");
+        btw.scroll_by(1000, 40);
+        assert_eq!(btw.top, None);
     }
 
     #[test]
