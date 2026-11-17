@@ -187,7 +187,8 @@ pub(crate) fn sniffed_media_type(bytes: &[u8]) -> Option<&'static str> {
     }
 }
 
-pub(crate) const CLIPBOARD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+// Tests: a cold powershell under the parallel test load passed 5 s on windows-latest (runs 43430121662, 43827333659).
+pub(crate) const CLIPBOARD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(if cfg!(test) { 30 } else { 5 });
 
 /// GDI+ cannot write a PNG to the unseekable stdout, so the image goes through a memory stream; exit 1 means no image.
 const WINDOWS_CLIPBOARD_PNG: &str = "Add-Type -AssemblyName System.Windows.Forms, System.Drawing; \
