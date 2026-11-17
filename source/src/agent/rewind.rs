@@ -50,8 +50,13 @@ impl Agent {
                 Err(text) => (text, true),
             });
         }
+        self.checkpointed(name, targets, emit, |agent, emit| agent.run_tool(id, name, input, targets, emit))
+    }
+
+    /// `run` between two snapshots when tool `name` can change files; a Code script's Bash calls that run together share one pair.
+    pub(super) fn checkpointed<T>(&mut self, name: &str, targets: &[PathBuf], emit: &mut dyn FnMut(Event), run: impl FnOnce(&mut Self, &mut dyn FnMut(Event)) -> T) -> Result<T, String> {
         let Some(snapshots) = self.snapshots.as_ref().filter(|_| tools::facts(name).is_some_and(|facts| facts.changes_files)) else {
-            return Ok(self.run_tool(id, name, input, targets, emit));
+            return Ok(run(self, emit));
         };
         let files_before = match save_files_left_out(snapshots, targets) {
             Ok(files) => files,
@@ -64,11 +69,11 @@ impl Agent {
             Ok(before) => before,
             Err(error) => {
                 emit(Event::Notice(format!("{SNAPSHOT_FAILED}: {error}")));
-                return Ok(self.run_tool(id, name, input, targets, emit));
+                return Ok(run(self, emit));
             }
         };
-        let result = self.run_tool(id, name, input, targets, emit);
-        let snapshots = self.snapshots.as_ref().expect("checked at the top of run_tool_with_checkpoint");
+        let result = run(self, emit);
+        let snapshots = self.snapshots.as_ref().expect("checked at the top of checkpointed");
         let at = self.history.messages.len();
         let mut entries = Vec::new();
         for (path, before) in files_before {

@@ -42,8 +42,8 @@ impl Drop for Home {
     }
 }
 
-/// Answers the model list and every request without tools (titles, summaries) itself, and each request with tools
-/// with the next of `replies`, one that is an error body with status 400; the bodies of the requests with tools go to `requests`.
+/// Answers the model list and every request without tools itself (titles, summaries, and the auto-mode reviewer, which it has allow every call),
+/// and each request with tools with the next of `replies`, one that is an error body with status 400; the bodies of the requests with tools go to `requests`.
 struct FakeApi {
     base: String,
     requests: Receiver<Value>,
@@ -87,7 +87,8 @@ fn answer(mut stream: TcpStream, replies: &mut impl Iterator<Item = String>, sen
     } else {
         let request: Value = serde_json::from_slice(&body).unwrap();
         if request["tools"].as_array().is_none_or(Vec::is_empty) {
-            (200, reply(&[text("Fake title")], "end_turn"))
+            let reviews = request["system"][0]["text"].as_str().is_some_and(|system| system.starts_with("You review tool calls"));
+            (200, reply(&[text(if reviews { "ALLOW the fake reviewer allows every call" } else { "Fake title" })], "end_turn"))
         } else {
             let _ = sent.send(request);
             match replies.next() {
@@ -680,6 +681,46 @@ fn a_mode_change_during_a_turn_applies_to_its_next_tool_call() {
     editor.answer(ask, "session/set_mode");
     let asked: Vec<&Value> = editor.seen.iter().filter(|message| message["method"] == "session/request_permission").map(|message| &message["params"]["toolCall"]["toolCallId"]).collect();
     assert_eq!(asked, [&json!("toolu_touch")]);
+}
+
+#[test]
+fn a_code_script_is_reviewed_once_in_auto_mode_and_its_bash_calls_run_together() {
+    let home = Home::new("code-script");
+    std::fs::create_dir_all(home.dir.join(".agents")).unwrap();
+    std::fs::write(home.dir.join(".agents/settings.json"), r#"{"code_mode": true}"#).unwrap();
+    // Each command ends only once the other has started, so the script returns only when both ran at the same time.
+    let script = r#"
+        const waits = (mine, theirs) => tool("Bash", { command: `touch ${mine}; until [ -f ${theirs} ]; do sleep 0.1; done; echo ${mine} saw ${theirs}`, timeout: 10000 });
+        const seen = await Promise.all([waits("a", "b"), waits("b", "a")]);
+        return seen.map((line) => line.trim()).join(", ");
+    "#;
+    let api = fake_api(vec![reply(&[tool_use("toolu_code", "Code", json!({"code": script}))], "tool_use"), reply(&[text("Done.")], "end_turn")]);
+    let mut editor = Editor::start(&home, &api);
+    let session_id = editor.new_session(&home.project());
+    editor.request("session/set_mode", json!({"sessionId": session_id, "modeId": "auto"})).unwrap();
+
+    editor.prompt(&session_id, "Run both.").unwrap();
+
+    let requests: Vec<Value> = api.requests.try_iter().collect();
+    let code = requests[0]["tools"].as_array().unwrap().iter().find(|tool| tool["name"] == "Code").expect("Code mode offers Code");
+    assert!(code.get("defer_loading").is_none() && code["description"].is_string(), "the model must read what Code is for: {code}");
+    let result = requests[1]["messages"].as_array().unwrap().last().unwrap()["content"].as_array().unwrap().iter().find(|block| block["type"] == "tool_result").unwrap();
+    assert!(result["content"].to_string().contains("a saw b, b saw a"), "{result}");
+    let sessions: Vec<String> =
+        files_under(&home.dir.join(".agents")).iter().filter(|path| path.extension().is_some_and(|extension| extension == "jsonl")).map(|path| std::fs::read_to_string(path).unwrap()).collect();
+    let reviewed: Vec<Value> = sessions
+        .iter()
+        .flat_map(|session| session.lines())
+        .map(|line| serde_json::from_str(line).unwrap())
+        .filter(|entry: &Value| entry["type"] == "review")
+        .map(|entry| entry["kind"].clone())
+        .collect();
+    assert_eq!(reviewed, [json!("Script")], "the reviewer judges the script, not each call it makes");
+    let calls: Vec<&str> = editor.updates("tool_call").iter().map(|update| update["toolCallId"].as_str().unwrap()).collect();
+    assert_eq!(calls, ["toolu_code", "toolu_code-1", "toolu_code-2"]);
+    let ended: Vec<&str> = editor.updates("tool_call_update").iter().map(|update| update["status"].as_str().unwrap()).collect();
+    assert_eq!(ended, ["completed"; 3]);
+    assert!(!editor.seen.iter().any(|message| message["method"] == "session/request_permission"), "auto mode asks nothing");
 }
 
 #[test]

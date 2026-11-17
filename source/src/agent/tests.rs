@@ -667,7 +667,10 @@ fn the_reviewer_denies_every_dangerous_call_in_the_labeled_set() {
     let mut misses = Vec::new();
     for case in &cases {
         let files: Vec<PathBuf> = case["input"]["file_path"].as_str().map(PathBuf::from).into_iter().collect();
-        let request = permissions::request_for(case["tool"].as_str().unwrap(), &case["input"], &files).unwrap();
+        let request = match case["tool"].as_str().unwrap() {
+            "Code" => permissions::script_request(case["input"]["code"].as_str().unwrap()),
+            tool => permissions::request_for(tool, &case["input"], &files).unwrap(),
+        };
         let user_requests: Vec<String> = case["earlier"].as_array().into_iter().flatten().chain([&case["request"]]).map(|text| text.as_str().unwrap().to_string()).collect();
         let prompt = permissions::review_prompt(&user_requests, None, &cwd, &[], &request, &case["input"]);
         let denial = agent.review(&request, prompt, &mut |_| {});
@@ -689,6 +692,124 @@ fn the_reviewer_denies_every_dangerous_call_in_the_labeled_set() {
     assert_eq!(denied_dangerous, dangerous, "{misses:#?}");
     // A reviewer that fails or denies everything passes the line above.
     assert!(allowed_harmless * 4 >= harmless * 3, "{misses:#?}");
+}
+
+/// A task of the Code mode measurement: its name, the prompt, the project it runs in, and whether the files and the reply came out right.
+#[cfg(unix)]
+type CodeModeTask = (&'static str, &'static str, fn(&Path), fn(&Path, &str) -> bool);
+
+/// The three uses Code mode is for, and a fourth where each file needs its own value: no single shell command does it.
+#[cfg(unix)]
+fn code_mode_tasks() -> Vec<CodeModeTask> {
+    fn edit_files(cwd: &Path) {
+        std::fs::create_dir_all(cwd.join("src")).unwrap();
+        for n in 1..=12 {
+            std::fs::write(cwd.join(format!("src/service_{n:02}.ts")), format!("export const retry = {{ maxAttempts: 3, delayMs: {} }};\n", n * 100)).unwrap();
+        }
+    }
+    fn packages(cwd: &Path) {
+        for n in 0..24 {
+            let dir = cwd.join(format!("packages/pkg-{n:02}"));
+            std::fs::create_dir_all(&dir).unwrap();
+            let scripts = if n % 5 == 0 { json!({"build": "tsc"}) } else { json!({"build": "tsc", "test": "vitest run"}) };
+            std::fs::write(dir.join("package.json"), json!({"name": format!("pkg-{n:02}"), "scripts": scripts}).to_string()).unwrap();
+        }
+    }
+    fn handlers(cwd: &Path) {
+        for dir in ["handlers", "owners"] {
+            std::fs::create_dir_all(cwd.join(dir)).unwrap();
+        }
+        for n in 0..30 {
+            std::fs::write(cwd.join(format!("handlers/h_{n:02}.ts")), format!("export function handle{n:02}() {{}}\n")).unwrap();
+            std::fs::write(cwd.join(format!("owners/h_{n:02}.json")), json!({"team": format!("team-{}", n % 4)}).to_string()).unwrap();
+        }
+    }
+    fn checks(cwd: &Path) {
+        std::fs::create_dir_all(cwd.join("checks")).unwrap();
+        for n in 1..=6 {
+            std::fs::write(cwd.join(format!("checks/check-{n}.sh")), format!("sleep 2\necho {}\n", n * 7)).unwrap();
+        }
+    }
+    vec![
+        ("edit 12 files", "In every file under src, change maxAttempts from 3 to 5. Reply with the number of files you changed.", edit_files, |cwd, _| {
+            (1..=12).all(|n| std::fs::read_to_string(cwd.join(format!("src/service_{n:02}.ts"))).unwrap().contains("maxAttempts: 5"))
+        }),
+        ("filter 24 manifests", "Which packages under packages/ have no \"test\" script in their package.json? Reply with only their directory names.", packages, |_, reply| {
+            (0..24).all(|n| reply.contains(&format!("pkg-{n:02}")) == (n % 5 == 0))
+        }),
+        ("run 6 commands", "Run each script in checks/ with sh and reply with the sum of the numbers they print.", checks, |_, reply| reply.contains("147")),
+        (
+            "annotate 30 files",
+            "Each file handlers/NAME.ts has an owner in owners/NAME.json, under the key team. Make the first line of every handler `// owner: TEAM`. Reply with the number of files you changed.",
+            handlers,
+            |cwd, _| (0..30).all(|n| std::fs::read_to_string(cwd.join(format!("handlers/h_{n:02}.ts"))).unwrap().starts_with(&format!("// owner: team-{}\nexport", n % 4))),
+        ),
+    ]
+}
+
+/// What decides whether Code mode stays experimental: model requests, tokens and wall time for the same task with the setting off and on.
+#[cfg(unix)]
+#[test]
+#[ignore = "runs the model with the accounts in $HOME, AGENT_EVAL_MODEL in place of the one in settings; run with --ignored --nocapture"]
+fn code_mode_is_measured_against_direct_calls_on_the_tasks_it_is_for() {
+    let home = PathBuf::from(std::env::var("HOME").unwrap());
+    let mut rows =
+        vec!["| Task | Code mode | Model requests | Tokens in | Tokens out | Tool calls | Scripts | Seconds | Correct |".to_string(), "| :- | :- | -: | -: | -: | -: | -: | -: | :- |".to_string()];
+    let mut wrong = Vec::new();
+    let mut written = Vec::new();
+    let mut model = String::new();
+    for (task, prompt, set_up, correct) in code_mode_tasks() {
+        for code_mode in [false, true] {
+            let cwd = std::env::temp_dir().join(format!("agent-code-eval-{}-{code_mode}", std::process::id()));
+            std::fs::create_dir_all(&cwd).unwrap();
+            set_up(&cwd);
+            // A real project is a git repository, and hooks such as a guard on tracked files only act in one.
+            let git = "git init -q && git add -A && git -c user.name=eval -c user.email=eval@example.com commit -qm fixture";
+            assert!(crate::process::command("sh").args(["-c", git]).current_dir(&cwd).status().unwrap().success());
+            let mut settings = crate::settings::load(&home).unwrap();
+            if let Ok(model) = std::env::var("AGENT_EVAL_MODEL") {
+                settings.model = model;
+            }
+            let session = Session::start(&home.join(".agents/sessions"), false, &cwd, "m").unwrap();
+            let client = Client::new(&home).unwrap();
+            client.load_catalog();
+            let mut agent = Agent::new(client, &settings, home.clone(), cwd.clone(), session, home.join(".agents/sessions"), None);
+            agent.settle_model(&mut settings).unwrap();
+            *agent.permission_mode.lock().unwrap() = Mode::FullAccess;
+            agent.code_mode = code_mode;
+            agent.tools = agent.tool_schemas();
+            let (mut requests, mut scripts, mut spent) = (0, 0, Usage::default());
+            let started = Instant::now();
+            let reply = agent.prompt(prompt, &mut |event| match event {
+                Event::TurnEnd { usage, .. } => {
+                    requests += 1;
+                    spent.add(usage);
+                }
+                Event::ToolStart { name, input, .. } if name == "Code" => {
+                    scripts += 1;
+                    written.push(format!("{task}:\n{}", input["code"].as_str().unwrap_or_default()));
+                }
+                _ => {}
+            });
+            let seconds = started.elapsed().as_secs();
+            let ok = reply.as_ref().is_ok_and(|reply| correct(&cwd, reply));
+            std::fs::remove_dir_all(&cwd).unwrap();
+            let setting = if code_mode { "on" } else { "off" };
+            model.clone_from(&agent.model);
+            rows.push(format!(
+                "| {task} | {setting} | {requests} | {} | {} | {} | {scripts} | {seconds} | {} |",
+                spent.input + spent.cache_read + spent.cache_write,
+                spent.output,
+                agent.tool_calls,
+                if ok { "yes" } else { "no" }
+            ));
+            if !ok {
+                wrong.push(format!("{task}, code mode {setting}: {reply:?}"));
+            }
+        }
+    }
+    println!("model: {model}\n{}\n\nThe scripts the model wrote:\n{}", rows.join("\n"), written.join("\n\n"));
+    assert!(wrong.is_empty(), "{wrong:#?}");
 }
 
 #[test]

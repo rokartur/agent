@@ -225,6 +225,8 @@ pub struct Agent {
     code_mode: bool,
     /// A Code script is making the call in progress, so its Bash commands run as written.
     in_script: bool,
+    /// The auto-mode reviewer allowed the Code script now running, so its calls skip the reviewer.
+    script_reviewed: bool,
     /// Time spent at permission prompts and AskUserQuestion; a Code script's time limit leaves it out.
     waited_on_user: Duration,
     /// The Page tool's server, started by its first call.
@@ -477,6 +479,7 @@ impl Agent {
             edited: Vec::new(),
             code_mode: settings.code_mode,
             in_script: false,
+            script_reviewed: false,
             waited_on_user: Duration::ZERO,
             pages: None,
             permission_mode: Arc::new(Mutex::new(settings.permission_mode)),

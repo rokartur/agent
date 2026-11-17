@@ -214,7 +214,8 @@ pub fn bash_in_terminal(terminal: &dyn EditorTerminal, call: &str, input: &Value
     }
 }
 
-fn bash(input: &Value, cwd: &Path, rtk: &Rtk, abort: &AtomicBool, terminal: Option<(&dyn EditorTerminal, &str)>) -> Result<String, String> {
+/// Runs a foreground Bash call, in the editor's `terminal` when one is given. Touches no session state, so a Code script's calls run it side by side.
+pub fn bash(input: &Value, cwd: &Path, rtk: &Rtk, abort: &AtomicBool, terminal: Option<(&dyn EditorTerminal, &str)>) -> Result<String, String> {
     let command = rtk.rewrite(str_arg(input, "command")?);
     let timeout = input["timeout"].as_f64().filter(|ms| *ms > 0.0).unwrap_or(DEFAULT_BASH_TIMEOUT_MS);
     // A timeout too large for an Instant is no timeout.

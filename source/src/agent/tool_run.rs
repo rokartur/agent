@@ -62,14 +62,7 @@ impl Agent {
     /// Returns the result's content, the text in it, and whether the call failed. `bad_input` is the error of an input that was not valid JSON.
     pub(super) fn run_call(&mut self, id: &str, name: &str, input: &Value, bad_input: Option<&str>, emit: &mut dyn FnMut(Event)) -> Result<(Value, String, bool), String> {
         let targets = edit_hooks::edited_files(name, input, &self.cwd, &self.anchors);
-        let mut shown = input.clone();
-        // Anchors mean nothing to the user, show the file they resolve to.
-        if let Some(file) = targets.first() {
-            shown["file_path"] = file.strip_prefix(&self.cwd).unwrap_or(file).display().to_string().into();
-        }
-        emit(Event::ToolStart { id: id.into(), name: name.into(), input: shown });
-        self.plugins.event(json!({"type": "tool_call", "name": name, "input": input, "context": self.plugin_context()}));
-        let started = Instant::now();
+        let started = self.start_call(id, name, input, &targets, emit);
         let (mut output, is_error, extra_blocks) = if let Some(error) = bad_input {
             (format!("{error} The call did not run; send it again with valid JSON."), true, Vec::new())
         } else if let Some(error) = tools::undeclared_params(&self.tools, name, input) {
@@ -93,9 +86,6 @@ impl Agent {
             }
             self.edited.extend(targets);
         }
-        self.tool_calls += 1;
-        // Includes the LSP check after an edit: the whole wait before the next tool.
-        self.session.append(&json!({"type": "tool_time", "id": id, "name": name, "ms": started.elapsed().as_millis() as u64}))?;
         let content = if extra_blocks.is_empty() {
             json!(output)
         } else {
@@ -105,44 +95,44 @@ impl Agent {
         };
         // Video puts its transcript in text blocks between the frames; the UI, plugins and condense read it too.
         let output = crate::acp::result_text(&content);
-        self.plugins.event(json!({"type": "tool_result", "name": name, "output": output, "isError": is_error, "context": self.plugin_context()}));
-        emit(Event::ToolEnd { id: id.into(), output: output.clone(), is_error });
+        self.end_call(id, name, started, &output, is_error, emit)?;
         Ok((content, output, is_error))
+    }
+
+    /// A call's row and its plugin event; returns when the call started.
+    pub(super) fn start_call(&mut self, id: &str, name: &str, input: &Value, targets: &[PathBuf], emit: &mut dyn FnMut(Event)) -> Instant {
+        let mut shown = input.clone();
+        // Anchors mean nothing to the user, show the file they resolve to.
+        if let Some(file) = targets.first() {
+            shown["file_path"] = file.strip_prefix(&self.cwd).unwrap_or(file).display().to_string().into();
+        }
+        emit(Event::ToolStart { id: id.into(), name: name.into(), input: shown });
+        self.plugins.event(json!({"type": "tool_call", "name": name, "input": input, "context": self.plugin_context()}));
+        Instant::now()
+    }
+
+    pub(super) fn end_call(&mut self, id: &str, name: &str, started: Instant, output: &str, is_error: bool, emit: &mut dyn FnMut(Event)) -> Result<(), String> {
+        self.tool_calls += 1;
+        // Includes the LSP check after an edit: the whole wait before the next tool.
+        self.session.append(&json!({"type": "tool_time", "id": id, "name": name, "ms": started.elapsed().as_millis() as u64}))?;
+        self.plugins.event(json!({"type": "tool_result", "name": name, "output": output, "isError": is_error, "context": self.plugin_context()}));
+        emit(Event::ToolEnd { id: id.into(), output: output.into(), is_error });
+        Ok(())
     }
 
     /// Runs one tool call after the permission check; agent-level tools are handled in `agent_tools`, file and shell tools in `tools`.
     pub(super) fn run_tool(&mut self, id: &str, name: &str, input: &Value, targets: &[PathBuf], emit: &mut dyn FnMut(Event)) -> (String, bool) {
-        if self.abort.load(Ordering::Relaxed) {
-            return (ABORTED.into(), true);
-        }
-        if *self.plan.lock().unwrap() != Plan::Off
-            && let Some(reason) = plan::blocked(name, input)
-        {
+        if let Some(reason) = self.stopped(name, input) {
             return (reason, true);
         }
         if name == "Bash"
+            && !self.in_script
             && let Some(read) = guard::file_read(input["command"].as_str().unwrap_or_default())
         {
-            if !self.in_script {
-                let (output, is_error) = self.run_tool(id, "Read", &read, &[], emit);
-                return (format!("Ran as read, so these anchors are what edits use.\n{output}"), is_error);
-            }
-            // A script parses what `cat` prints (`JSON.parse`), so there it stays a command. The Read it stands for is still checked: a deny rule on the file holds.
-            if let Some(reason) = self.check_permission(Some(id), "Read", &read, &[], emit) {
-                return (reason, true);
-            }
+            let (output, is_error) = self.run_tool(id, "Read", &read, &[], emit);
+            return (format!("Ran as read, so these anchors are what edits use.\n{output}"), is_error);
         }
-        if name == "Bash"
-            && let Some(reason) = guard::bash(input["command"].as_str().unwrap_or_default())
-        {
-            return (reason, true);
-        }
-        if name == "Bash"
-            && let Some(reason) = conflicts::commit_blocked(input["command"].as_str().unwrap_or_default(), &self.cwd)
-        {
-            return (reason, true);
-        }
-        if let Some(reason) = self.check_permission(Some(id), name, input, targets, emit) {
+        if let Some(reason) = self.refusal(id, name, input, targets, emit) {
             return (reason, true);
         }
         // After the permission check: starting a language server runs the repo's build scripts.
@@ -187,6 +177,32 @@ impl Agent {
             Ok(text) => (text, false),
             Err(text) => (text, true),
         }
+    }
+
+    /// Why the turn's state keeps a call from running: the user stopped the turn, or plan mode blocks the call.
+    pub(super) fn stopped(&self, name: &str, input: &Value) -> Option<String> {
+        if self.abort.load(Ordering::Relaxed) {
+            return Some(ABORTED.into());
+        }
+        if *self.plan.lock().unwrap() == Plan::Off { None } else { plan::blocked(name, input) }
+    }
+
+    /// Why a call `stopped` let through may not run: a Bash guard or the permission check.
+    pub(super) fn refusal(&mut self, id: &str, name: &str, input: &Value, targets: &[PathBuf], emit: &mut dyn FnMut(Event)) -> Option<String> {
+        if name == "Bash" {
+            let command = input["command"].as_str().unwrap_or_default();
+            // Only a script gets here with a plain `cat`: it parses what `cat` prints (`JSON.parse`), so there it stays a command.
+            // The Read it stands for is still checked: a deny rule on the file holds.
+            if let Some(read) = guard::file_read(command)
+                && let Some(reason) = self.check_permission(Some(id), "Read", &read, &[], emit)
+            {
+                return Some(reason);
+            }
+            if let Some(reason) = guard::bash(command).or_else(|| conflicts::commit_blocked(command, &self.cwd)) {
+                return Some(reason);
+            }
+        }
+        self.check_permission(Some(id), name, input, targets, emit)
     }
 
     fn run_file_tool(&mut self, id: &str, name: &str, input: &Value) -> (String, bool) {
@@ -279,6 +295,7 @@ impl Agent {
             extra_dirs: &self.extra_dirs,
             user_requests: &self.user_requests,
             follow_up: self.follow_up.as_deref(),
+            script_reviewed: self.script_reviewed,
         });
         let request = match decided {
             Step::Allow => return None,
@@ -310,7 +327,9 @@ impl Agent {
             Some(prompt) => self.ask_reviewer(&prompt),
             None => (false, format!("the call is over {} characters, too long to review", permissions::REVIEW_DETAIL_CHARS)),
         };
-        emit(Event::Reviewed { allowed, detail: request.detail.clone(), reason: reason.clone() });
+        // The Code row already shows the script.
+        let detail = if request.kind == permissions::Kind::Script { "the script".into() } else { request.detail.clone() };
+        emit(Event::Reviewed { allowed, detail, reason: reason.clone() });
         let entry = json!({"type": "review", "kind": request.kind.label(), "detail": request.detail, "allowed": allowed, "reason": reason});
         if let Err(error) = self.session.append(&entry) {
             return Some(format!("Denied: the review could not be saved: {error}."));
