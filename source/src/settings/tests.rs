@@ -12,6 +12,23 @@ fn condense_batches_below_the_floor_are_raised_to_it() {
 }
 
 #[test]
+fn a_worktree_shares_its_main_checkouts_trust_and_a_planted_git_file_does_not() {
+    let dir = crate::process::canonicalize(std::env::temp_dir()).unwrap().join(format!("agent-trust-worktree-{}", std::process::id()));
+    let (main, linked, planted) = (dir.join("main"), dir.join("linked"), dir.join("planted"));
+    std::fs::create_dir_all(&planted).unwrap();
+    let git = |args: &[&str]| assert!(crate::process::command("git").current_dir(&dir).args(args).output().unwrap().status.success());
+    git(&["init", "-q", "main"]);
+    git(&["-C", "main", "-c", "user.name=a", "-c", "user.email=a@a", "commit", "-q", "--allow-empty", "-m", "i"]);
+    git(&["-C", "main", "worktree", "add", "-q", "../linked"]);
+    std::fs::write(planted.join(".git"), format!("gitdir: {}", main.join(".git/worktrees/linked").display())).unwrap();
+    let trusted = [main.display().to_string()];
+    let results = [&main, &linked.join("sub"), &planted].map(|cwd| crate::agent::prompt::is_trusted(&trusted, cwd));
+    std::fs::remove_dir_all(&dir).unwrap();
+
+    assert_eq!(results, [true, true, false]);
+}
+
+#[test]
 fn a_trusted_project_layers_its_allowed_keys_and_can_only_tighten_permissions() {
     let home = crate::process::canonicalize(std::env::temp_dir()).unwrap().join(format!("agent-settings-layers-{}", std::process::id()));
     let root = home.join("project");

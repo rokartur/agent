@@ -66,7 +66,7 @@ impl App {
         if files.is_empty() {
             return;
         }
-        let root = crate::agent::prompt::project_root(&self.cwd);
+        let root = crate::agent::prompt::trust_root(&self.cwd);
         if self.panel.is_some() {
             self.warn("trust", format!("{} is not trusted, so its .agents files stay unloaded and its edit hooks do not run. /trust loads them.", root.display()));
             return;
@@ -76,7 +76,7 @@ impl App {
 
     /// /trust and /untrust; the agent rebuilds its system prompt once, before the next turn.
     pub(super) fn set_trust(&mut self, trusted: bool) {
-        let root = crate::agent::prompt::project_root(&self.cwd).display().to_string();
+        let root = crate::agent::prompt::trust_root(&self.cwd).display().to_string();
         if trusted {
             // A --trust root is already in the list; dropping it first makes the save see /trust as a change.
             self.settings.trusted_projects.retain(|project| *project != root);

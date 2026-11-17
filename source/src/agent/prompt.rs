@@ -69,14 +69,38 @@ pub fn project_agents_dirs(cwd: &Path, trusted: bool) -> Vec<PathBuf> {
     dirs
 }
 
-/// The directory /trust records: the git root above `cwd`, or `cwd` outside a repo.
+/// The git root above `cwd`, or `cwd` outside a repo.
 pub fn project_root(cwd: &Path) -> PathBuf {
     let cwd = crate::process::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
     cwd.ancestors().find(|dir| dir.join(".git").exists()).unwrap_or(&cwd).to_path_buf()
 }
 
+/// The directory /trust records: `project_root`, or for a linked worktree its main checkout, so worktrees share its trust.
+pub fn trust_root(cwd: &Path) -> PathBuf {
+    let root = project_root(cwd);
+    main_checkout(&root).unwrap_or(root)
+}
+
+/// The main checkout of the linked worktree at `root`, read from the `gitdir:` line of its `.git` file.
+fn main_checkout(root: &Path) -> Option<PathBuf> {
+    let dot_git = root.join(".git");
+    let link = std::fs::read_to_string(&dot_git).ok()?;
+    let admin = crate::process::canonicalize(root.join(link.trim().strip_prefix("gitdir:")?.trim())).ok()?;
+    // The back-link sits in the main checkout's .git, which a planted `.git` file cannot write, so it cannot borrow trust.
+    let back = std::fs::read_to_string(admin.join("gitdir")).ok()?;
+    if crate::process::canonicalize(admin.join(back.trim())).ok()? != dot_git {
+        return None;
+    }
+    let worktrees = admin.parent()?;
+    let git_dir = worktrees.parent()?;
+    if worktrees.file_name()? != "worktrees" || git_dir.file_name()? != ".git" {
+        return None;
+    }
+    git_dir.parent().map(Path::to_path_buf)
+}
+
 pub fn is_trusted(trusted_projects: &[String], dir: &Path) -> bool {
-    trusted_projects.contains(&project_root(dir).display().to_string())
+    trusted_projects.contains(&trust_root(dir).display().to_string())
 }
 
 /// What an untrusted project would add from its `.agents` dirs, listed in the trust question.

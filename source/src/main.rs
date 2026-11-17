@@ -596,7 +596,7 @@ fn run(options: Options) -> Result<(), String> {
         settings.permission_mode = mode;
     }
     if options.trust {
-        settings.trusted_projects.push(prompt::project_root(&cwd).display().to_string());
+        settings.trusted_projects.push(prompt::trust_root(&cwd).display().to_string());
     }
     let sessions_dir = home.join(".agents/sessions");
     let (session, saved) = match &options.resume {
