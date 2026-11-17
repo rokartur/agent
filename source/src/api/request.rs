@@ -2,7 +2,8 @@ use super::*;
 
 /// The tools nearly every coding turn calls. Anthropic's tool search loads any other when the model asks for it,
 /// so their definitions stay out of the context until then: about 6.5k tokens for the built-in ones alone.
-const CORE_TOOLS: [&str; 7] = ["Read", "Bash", "Write", "ReplaceLines", "Edit", "InsertLines", "Grep"];
+/// `Code` is in the list only once the user turned Code mode on, and a model that cannot read its description never writes a script.
+const CORE_TOOLS: [&str; 8] = ["Read", "Bash", "Write", "ReplaceLines", "Edit", "InsertLines", "Grep", "Code"];
 
 pub(super) fn defer_rare_tools(body: &mut Value) {
     // `body["tools"]` would insert `"tools": null` into a plain request, which the API rejects.

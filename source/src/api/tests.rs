@@ -199,13 +199,13 @@ fn invalid_tool_input_is_reported_not_fatal() {
 
 #[test]
 fn rare_tools_load_through_tool_search_and_the_breakpoint_moves_to_a_loaded_tool() {
-    let tools = json!([{"name": "Read"}, {"name": "Edit"}, {"name": "Agent"}, {"name": "WebSearch"}]);
+    let tools = json!([{"name": "Read"}, {"name": "Edit"}, {"name": "Code"}, {"name": "Agent"}, {"name": "WebSearch"}]);
     let mut body = request("m", 1000, "high", "5m", "sys", "", &tools, &[]);
     defer_rare_tools(&mut body);
     let names: Vec<&str> = body["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
-    assert_eq!(names, ["tool_search_tool_bm25", "Read", "Edit", "Agent", "WebSearch"]);
-    assert_eq!(body["tools"][2]["cache_control"]["type"], "ephemeral");
-    for deferred in &body["tools"].as_array().unwrap()[3..] {
+    assert_eq!(names, ["tool_search_tool_bm25", "Read", "Edit", "Code", "Agent", "WebSearch"]);
+    assert_eq!(body["tools"][3]["cache_control"]["type"], "ephemeral", "Code stays loaded: it is offered only with Code mode on");
+    for deferred in &body["tools"].as_array().unwrap()[4..] {
         assert_eq!((deferred["defer_loading"].as_bool(), deferred.get("cache_control")), (Some(true), None));
     }
     let names_deferred = body["system"].as_array().unwrap().last().unwrap()["text"].as_str().unwrap();

@@ -19,7 +19,19 @@ globalThis.__settle = (id, ok, text) => {
   else call.reject(new Error(text));
 };
 
-const __quote = (value) => (Array.isArray(value) ? value.map(__quote).join(" ") : `'${String(value).replaceAll("'", `'\\''`)}'`);
+// A missing value or a promise the script did not await would run the command with 'undefined' or '[object Promise]' as its argument.
+const __notAnArgument = (value) => {
+  if (value == null) return String(value);
+  if (value instanceof Promise) return "a promise, await it first";
+  if (typeof value === "object") return "an object";
+  if (typeof value === "function") return "a function";
+};
+const __quote = (value) => {
+  if (Array.isArray(value)) return value.map(__quote).join(" ");
+  const got = __notAnArgument(value);
+  if (got) throw new TypeError(`$ got ${got} where a command argument goes, so nothing ran. Pass a string, a number or an array of them.`);
+  return `'${String(value).replaceAll("'", `'\\''`)}'`;
+};
 globalThis.$ = (strings, ...values) => tool("Bash", { command: String.raw(strings, ...values.map(__quote)) });
 
 // QuickJS has no console, and a script that logs instead of returning must not die on a ReferenceError after its calls ran.
