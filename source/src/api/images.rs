@@ -186,6 +186,9 @@ pub(crate) mod tests {
                 let _ = sent.send((path, Value::Object(headers), serde_json::from_slice(&body).unwrap_or_default()));
                 let (status, reply) = if replies.len() > 1 { replies.remove(0) } else { replies[0].clone() };
                 write!(stream, "HTTP/1.1 {status} X\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{reply}", reply.len()).unwrap();
+                // Close only after the client does: on windows-latest a close with an 11 MB reply still queued cut it short (run 43406986213).
+                stream.shutdown(std::net::Shutdown::Write).unwrap();
+                std::io::copy(&mut reader, &mut std::io::sink()).ok();
             }
         });
         (base, received)
