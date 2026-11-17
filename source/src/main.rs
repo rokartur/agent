@@ -134,6 +134,10 @@ struct Options {
     missing_cwd: Option<PathBuf>,
     /// `agent serve` only: why `--on auto` started the session on this computer.
     placed: Option<String>,
+    /// `agent serve` only: the address of the session that started this one with StartSession and gets its answers.
+    started_by: Option<String>,
+    /// `agent serve` only: the session's name, in place of the one the model would give it.
+    title: Option<String>,
 }
 
 enum Resume {
@@ -391,6 +395,8 @@ fn parse_args(args: Vec<String>) -> Result<Options, String> {
             "--add-dir" => options.add_dirs.push(value("--add-dir")?),
             "--missing-cwd" => options.missing_cwd = Some(value("--missing-cwd")?.into()),
             "--placed" => options.placed = Some(value("--placed")?),
+            "--started-by" => options.started_by = Some(value("--started-by")?),
+            "--title" => options.title = Some(value("--title")?),
             "--on" => options.on = Some(value("--on")?),
             "--explore" => options.explore = true,
             "--web" => options.web = true,
@@ -740,6 +746,11 @@ fn run(options: Options) -> Result<(), String> {
     agent.asks = true;
     // Its card is how `agent attach` finds this session, so a session server without one would be unreachable.
     agent.inbox = Some(agent::peers::open(&home, &agent.follow_ups).map_err(|error| format!("Cannot list this session for agent attach: {error}"))?);
+    agent.started_by = options.started_by;
+    if let Some(title) = options.title {
+        agent.session.rename(&title)?;
+        agent.title = title;
+    }
     agent.describe_to_peers(false);
     agent.snapshots = snapshots::Snapshots::open(&home, &agent.cwd);
     let socket = serve::socket(&home, std::process::id());
@@ -917,6 +928,13 @@ mod tests {
         assert!(super::parse_args(args(&["serve", "--on", "studio"])).unwrap().serve);
         assert!(super::parse_args(args(&["--on", "studio", "-p", "hi"])).is_err());
         assert!(super::parse_args(args(&["--on"])).is_err());
+    }
+
+    #[test]
+    fn a_managed_session_takes_its_orchestrator_its_title_and_a_prompt_that_may_start_with_a_dash() {
+        let args = ["serve", "--started-by", "studio:abc", "--title", "api pagination", "--", "--help", "is", "broken"].map(String::from).to_vec();
+        let options = super::parse_args(args).unwrap();
+        assert_eq!((options.started_by.as_deref(), options.title.as_deref(), options.prompt.as_deref()), (Some("studio:abc"), Some("api pagination"), Some("--help is broken")));
     }
 
     #[test]

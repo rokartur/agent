@@ -48,6 +48,11 @@ pub struct Created {
 /// Claude Code's EnterWorktree: `.agents/worktrees/<name>` in the main checkout on a new branch `worktree-<name>`,
 /// from origin's default branch, or from HEAD in a repo without one.
 pub fn create(cwd: &Path, name: &str) -> Result<Created, String> {
+    // The name becomes a directory and a branch: no `/` to leave .agents/worktrees, no leading `-` for git to read as an option.
+    let valid = (1..=64).contains(&name.len()) && !name.starts_with(['-', '.']) && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'));
+    if !valid {
+        return Err("The worktree name must be 1-64 letters, digits, dots, underscores or dashes, not starting with a dot or dash.".into());
+    }
     let (worktrees, _) = list(cwd)?;
     let main = &worktrees.first().ok_or("No worktrees listed.")?.path;
     let path = main.join(".agents/worktrees").join(name);
@@ -170,6 +175,9 @@ mod tests {
         std::fs::write(main.join(".git/info/exclude"), "# kept").unwrap();
         let created = create(&main, "one").unwrap();
         create(&main, "two").unwrap();
+        for escaping in ["../out", "-b", "a/b", ""] {
+            assert!(create(&main, escaping).unwrap_err().starts_with("The worktree name must be"), "{escaping}");
+        }
         assert_eq!(git(&main, &["status", "--porcelain"]).unwrap(), "");
         assert_eq!(std::fs::read_to_string(main.join(".git/info/exclude")).unwrap(), "# kept\n/.agents/worktrees/\n");
         discard(&main, &created).unwrap();

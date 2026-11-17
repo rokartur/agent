@@ -198,6 +198,8 @@ impl Agent {
     /// Replaces the conversation state with a saved (or empty) session's.
     pub fn load(&mut self, saved: Saved) {
         self.grants = Grants::default();
+        // The title named the session before this one: an empty one lets the first prompt name this one.
+        self.title.clear();
         self.history = saved.history;
         self.next_ref = condense::next_ref(&self.history.condensed);
         crate::image::fit_history(&mut self.history.messages);

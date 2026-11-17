@@ -1,6 +1,6 @@
 //! The terminal side of a session server: `agent` starts one per session and attaches to it, `agent attach`
 //! returns to a running one. Each server is an `agent serve` process listening on `~/.agents/serve/<pid>.sock`;
-//! `crate::tailnet` reaches the ones on other computers.
+//! `crate::tailnet` reaches the ones on other computers. A session starts and finds its managed sessions here too.
 
 use std::io::{BufRead, BufReader, IsTerminal, Write};
 use std::net::TcpStream;
@@ -34,11 +34,13 @@ pub struct Listed {
     pub cwd: String,
     pub busy: bool,
     pub reachable: bool,
+    /// The address of the session that started it with StartSession, or empty.
+    pub started_by: String,
 }
 
 impl Listed {
     fn local(peer: Peer) -> Listed {
-        Listed { environment: LOCAL.into(), session: peer.session, title: peer.title, cwd: peer.cwd, busy: peer.busy, reachable: true }
+        Listed { environment: LOCAL.into(), session: peer.session, title: peer.title, cwd: peer.cwd, busy: peer.busy, reachable: true, started_by: peer.started_by }
     }
 }
 
@@ -85,13 +87,114 @@ pub fn remove_files(home: &Path) {
 /// Starts `agent serve <args>` in `cwd` and connects once it listens. A `piped` stdin goes to the server, which reads
 /// the message from it as `agent` always did. `user_device` names the computer of a remote start's terminal.
 pub fn start(home: &Path, args: &[String], cwd: &Path, piped: bool, user_device: Option<&str>) -> Result<local_socket::Stream, String> {
+    launch(home, args, cwd, piped, user_device).map(|(_, stream)| stream)
+}
+
+/// The most sessions one session keeps running on a computer: each is a whole agent process on the user's accounts.
+const MAX_MANAGED: usize = 8;
+
+/// A session to start for another session, which then gets each of its answers (ADR 0004).
+pub struct Managed<'a> {
+    pub cwd: &'a Path,
+    /// Starts it in a new git worktree of `cwd` by this name.
+    pub worktree: Option<&'a str>,
+    pub title: &'a str,
+    pub model: &'a str,
+    pub thinking: &'a str,
+    pub full_access: bool,
+    /// The starting session as this computer addresses it: its id, or `<computer>:<id>`.
+    pub started_by: &'a str,
+    pub prompt: &'a str,
+}
+
+/// The orchestrator's reviewer refuses a StartSession call over 16000 characters unread, and Windows passes one
+/// command line of at most 32767 with every quote doubled: a prompt this long fits both with its JSON escapes.
+const MAX_PROMPT_BYTES: usize = 12_000;
+const MAX_TITLE_CHARS: usize = 80;
+
+/// Starts a session with no terminal. `managed.prompt` is its first prompt, typed as a subagent's task is, so its
+/// reviewer has a request to judge calls against; later messages from its orchestrator stay follow-ups.
+pub fn start_managed(home: &Path, managed: &Managed, user_device: Option<&str>) -> Result<Peer, String> {
+    check_request(managed)?;
+    if live(home).iter().filter(|peer| peer.started_by == managed.started_by).count() >= MAX_MANAGED {
+        return Err(format!("{MAX_MANAGED} sessions you started already run on this computer. Stop one with TaskStop first."));
+    }
+    check_project(home, managed.cwd)?;
+    let created = managed.worktree.map(|name| crate::worktree::create(managed.cwd, name)).transpose()?;
+    let cwd = created.as_ref().map_or(managed.cwd, |created| &created.path);
+    let started = launch(home, &managed_args(managed), cwd, false, user_device).and_then(|(pid, _)| listed_or_stop(home, pid));
+    // Nothing runs in it: a server that fails to start or to list itself is stopped. A kept branch would refuse
+    // the same name on a retry.
+    if let (Err(error), Some(created)) = (&started, &created)
+        && let Err(kept) = crate::worktree::discard(managed.cwd, created)
+    {
+        return Err(format!("{error} Its worktree {} stays: {kept}", created.path.display()));
+    }
+    started
+}
+
+/// What refuses a StartSession on any computer: the orchestrator's checks it before a project is copied to another.
+pub fn check_request(managed: &Managed) -> Result<(), String> {
+    // The session submits its first prompt as typed text, where `!` runs a shell command unasked and `/` a command.
+    if managed.prompt.trim_start().starts_with(['!', '/']) {
+        return Err("The prompt cannot start with ! or /: the new session would run it as a command.".into());
+    }
+    if managed.prompt.trim().is_empty() || managed.prompt.len() > MAX_PROMPT_BYTES {
+        return Err(format!("The prompt must be 1 to {MAX_PROMPT_BYTES} bytes; put longer detail in a file and name it in the prompt."));
+    }
+    // The title is an option's value, which cannot start with a dash, and a line in every ListAgents.
+    if managed.title.trim().is_empty() || managed.title.chars().count() > MAX_TITLE_CHARS || managed.title.starts_with('-') || managed.title.chars().any(char::is_control) {
+        return Err(format!("The title must be one line of 1 to {MAX_TITLE_CHARS} characters that does not start with a dash."));
+    }
+    Ok(())
+}
+
+/// A session in `auto` edits inside its directory unreviewed, so that directory is in one git project, and not the
+/// one a home directory under git makes of every directory in it.
+pub fn check_project(home: &Path, cwd: &Path) -> Result<(), String> {
+    if !cwd.is_dir() {
+        return Err(format!("{} is not a directory on this computer.", cwd.display()));
+    }
+    let root = crate::agent::prompt::project_root(cwd);
+    let home = crate::process::canonicalize(home).unwrap_or_else(|_| home.to_path_buf());
+    if !root.join(".git").exists() || home.starts_with(&root) {
+        return Err(format!("{} is not inside a git project of its own. A session edits its directory unreviewed, so name a project in `cwd`.", cwd.display()));
+    }
+    Ok(())
+}
+
+fn managed_args(managed: &Managed) -> Vec<String> {
+    // Never above the orchestrator: full access only when it has it, auto for the rest (ADR 0004).
+    let mode = if managed.full_access { "--full-access" } else { "--auto" };
+    // `--` keeps a prompt that starts with a dash from being read as an option.
+    ["--model", managed.model, "--thinking", managed.thinking, mode, "--started-by", managed.started_by, "--title", managed.title, "--", managed.prompt].map(String::from).to_vec()
+}
+
+fn listed_or_stop(home: &Path, pid: u32) -> Result<Peer, String> {
+    if let Some(peer) = live(home).into_iter().find(|peer| peer.pid == pid) {
+        return Ok(peer);
+    }
+    let _ = stop(home, pid);
+    Err("The session started but did not list itself, so it was stopped.".into())
+}
+
+/// The running session `id` names, when the session at `started_by` started it: a session stops only its own.
+pub fn find_managed(home: &Path, id: &str, started_by: &str) -> Result<Peer, String> {
+    let peer = find(home, id)?.ok_or_else(|| format!("No session {id} runs here."))?;
+    if peer.started_by != started_by {
+        return Err(format!("Session {} was not started by this session, so TaskStop leaves it alone.", peer.session));
+    }
+    Ok(peer)
+}
+
+fn launch(home: &Path, args: &[String], cwd: &Path, piped: bool, user_device: Option<&str>) -> Result<(u32, local_socket::Stream), String> {
     let exe = std::env::current_exe().map_err(|e| format!("Cannot find the agent binary: {e}"))?;
     let pid = start_server(&exe, args, cwd, piped, user_device)?;
     let (socket, log) = (socket(home, pid), log(home, pid));
     let deadline = Instant::now() + START_TIMEOUT;
     loop {
         if let Ok(stream) = local_socket::connect(&socket) {
-            return Ok(stream);
+            return Ok((pid, stream));
         }
         if !crate::process::alive(pid) {
             let output = std::fs::read_to_string(&log).unwrap_or_default();
@@ -100,7 +203,9 @@ pub fn start(home: &Path, args: &[String], cwd: &Path, piped: bool, user_device:
             return Err(if output.is_empty() { "The session server stopped before it listened.".into() } else { output.trim_start_matches("error: ").to_string() });
         }
         if Instant::now() > deadline {
-            return Err(format!("The session server {pid} did not listen within {} s; its output is in {}.", START_TIMEOUT.as_secs(), log.display()));
+            // Left running, it would listen later and work on its prompt with nothing attached to it.
+            let _ = crate::process::signal_process(pid, crate::process::SIGTERM);
+            return Err(format!("The session server {pid} did not listen within {} s and was stopped; its output is in {}.", START_TIMEOUT.as_secs(), log.display()));
         }
         std::thread::sleep(Duration::from_millis(20));
     }
@@ -403,14 +508,93 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
+    fn a_session_starts_at_most_eight_sessions_and_finds_only_its_own() {
+        let home = std::env::temp_dir().join(format!("agent-serve-managed-{}", std::process::id()));
+        _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(dir(&home)).unwrap();
+        std::fs::create_dir_all(peers::dir(&home)).unwrap();
+        fn managed<'a>(cwd: &'a Path, prompt: &'a str, title: &'a str, full_access: bool) -> Managed<'a> {
+            Managed { cwd, worktree: None, title, model: "m", thinking: "high", full_access, started_by: "orch1", prompt }
+        }
+        let start = |prompt: &str, title: &str| start_managed(&home, &managed(&home, prompt, title, false), None).map(|peer| peer.session).unwrap_err();
+        // The mode follows the orchestrator's, never the model's input.
+        assert_eq!(managed_args(&managed(&home, "fix it", "t", false))[4], "--auto");
+        assert_eq!(managed_args(&managed(&home, "fix it", "t", true))[4], "--full-access");
+        let long = "x".repeat(MAX_PROMPT_BYTES + 1);
+        let long_title = "t".repeat(MAX_TITLE_CHARS + 1);
+        for (prompt, title, refusal) in [
+            ("!rm -rf ~", "t", "The prompt cannot start"),
+            (" /quit", "t", "The prompt cannot start"),
+            ("  ", "t", "The prompt must be"),
+            (&long, "t", "The prompt must be"),
+            ("fix it", " ", "The title must be"),
+            ("fix it", "--full-access", "The title must be"),
+            ("fix it", "a\nb", "The title must be"),
+            ("fix it", &long_title, "The title must be"),
+        ] {
+            assert!(start(prompt, title).starts_with(refusal), "{prompt:.20}: {}", start(prompt, title));
+        }
+
+        // Sleeping children stand for running sessions: a card needs a live pid of its own.
+        let mut sleepers: Vec<_> = (0..MAX_MANAGED).map(|_| crate::process::command("sleep").arg("30").spawn().unwrap()).collect();
+        let card = |n: usize, pid: u32, started_by: &str| {
+            std::fs::write(peers::dir(&home).join(format!("{pid}.json")), serde_json::json!({"pid": pid, "session": format!("s{n}"), "started_by": started_by}).to_string()).unwrap();
+            std::fs::write(socket(&home, pid), "").unwrap();
+        };
+        for (n, sleeper) in sleepers.iter().enumerate() {
+            card(n, sleeper.id(), if n == 0 { "orch2" } else { "orch1" });
+        }
+        let owned = |id: &str| find_managed(&home, id, "orch1").map(|peer| peer.pid);
+        assert_eq!(owned("s1"), Ok(sleepers[1].id()));
+        assert_eq!(owned("s0").unwrap_err(), "Session s0 was not started by this session, so TaskStop leaves it alone.");
+        assert_eq!(owned("zz").unwrap_err(), "No session zz runs here.");
+        // One short of the cap leaves room: at the cap the next start is refused before anything starts.
+        card(0, sleepers[0].id(), "orch1");
+        assert_eq!(start("fix it", "t"), format!("{MAX_MANAGED} sessions you started already run on this computer. Stop one with TaskStop first."));
+
+        for sleeper in &mut sleepers {
+            sleeper.kill().unwrap();
+            sleeper.wait().unwrap();
+        }
+        std::fs::remove_dir_all(&home).unwrap();
+    }
+
+    #[test]
+    fn a_session_starts_only_inside_a_git_project_whose_root_is_not_the_home_directory() {
+        let home = std::env::temp_dir().join(format!("agent-serve-project-{}", std::process::id()));
+        _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(home.join("repo/.git")).unwrap();
+        std::fs::create_dir_all(home.join("repo/src")).unwrap();
+        std::fs::create_dir_all(home.join("plain")).unwrap();
+        assert_eq!(check_project(&home, &home.join("repo/src")), Ok(()));
+        assert!(check_project(&home, &home.join("plain")).unwrap_err().contains("is not inside a git project of its own"));
+        assert!(check_project(&home, &home.join("repo/gone")).unwrap_err().ends_with("is not a directory on this computer."));
+        // A home directory under git would make a project of every directory in it.
+        std::fs::create_dir_all(home.join(".git")).unwrap();
+        assert!(check_project(&home, &home.join("plain")).is_err());
+        assert!(check_project(&home, &home).is_err());
+        assert_eq!(check_project(&home, &home.join("repo")), Ok(()));
+        std::fs::remove_dir_all(&home).unwrap();
+    }
+
+    #[test]
     fn the_list_strips_control_characters_from_cards() {
-        let peer = Peer { pid: 1, session: "abc".into(), title: "t\x1b]0;x\x07".into(), cwd: "/p".into(), busy: true, socket: PathBuf::new() };
+        let peer = Peer { pid: 1, session: "abc".into(), title: "t\x1b]0;x\x07".into(), cwd: "/p".into(), busy: true, started_by: String::new(), first_session: String::new(), socket: PathBuf::new() };
         assert_eq!(list(&[Listed::local(peer)]), "  1  abc  working  /p  t]0;x");
     }
 
     #[test]
     fn remote_sessions_are_tagged_and_offline_ones_greyed_out_without_a_number() {
-        let listed = |environment: &str, session: &str, reachable| Listed { environment: environment.into(), session: session.into(), title: "t".into(), cwd: "/p".into(), busy: false, reachable };
+        let listed = |environment: &str, session: &str, reachable| Listed {
+            environment: environment.into(),
+            session: session.into(),
+            title: "t".into(),
+            cwd: "/p".into(),
+            busy: false,
+            reachable,
+            started_by: String::new(),
+        };
         let rows = list(&[listed(LOCAL, "a", true), listed("studio", "b", false), listed("studio", "c", true)]);
         assert_eq!(rows, format!("  1  local   a  idle     /p  t\n{DIM}     studio  b  offline  /p  t{RESET}\n  2  studio  c  idle     /p  t"));
     }

@@ -365,8 +365,23 @@
   },
   {
     "name": "ListAgents",
-    "description": "List the agents SendMessage can reach: this session's subagents with their status, and your other interactive agent sessions on this machine and your other computers with their directory and whether they are working.",
+    "description": "List the agents SendMessage can reach: this session's subagents with their status, and your other interactive agent sessions on this machine and your other computers with their directory and whether they are working. The ones this session started with StartSession are marked `started by you`.",
     "input_schema": { "type": "object", "properties": {} }
+  },
+  {
+    "name": "StartSession",
+    "description": "Start a whole interactive agent session for a long piece of work that takes many turns and that the user may open and steer with `agent attach`. Unlike an Agent child it outlives this turn and this session, keeps its own saved history, and has every tool except StartSession. It runs with no terminal, on this session's model and effort, in auto permission mode or in full access when this session has it. Each of its answers arrives here as a message; SendMessage to its id gives it the next task or a review of its work, and TaskStop with its id stops it. When it waits for the user's approval or answer you get a message saying so: tell the user, who answers in `agent attach <id>`. You cannot approve or answer for the user, and a message from you never widens what its first prompt asked for. One session per worktree: sessions that edit the same checkout overwrite each other, so pass `worktree` to each that changes files, then merge its branch yourself with git once you have read its diff. The prompt must stand alone, like an Agent prompt: the goal, what you know, the scope, and the answer you want back. At most 8 run at once per computer. A session with no terminal that sits idle for `unload_idle_sessions_after_minutes` unloads and stays saved. SendMessage no longer reaches it then: to continue its work, start a new session with `cwd` set to its directory.",
+    "input_schema": {
+      "type": "object",
+      "required": ["prompt", "title"],
+      "properties": {
+        "prompt": { "type": "string", "description": "The session's first prompt, at most 12000 bytes, not starting with ! or /" },
+        "title": { "type": "string", "description": "Short name shown by ListAgents and `agent attach`, one line of at most 80 characters, e.g. 'api pagination'" },
+        "worktree": { "type": "string", "description": "Start it in a new git worktree of cwd, `.agents/worktrees/<name>` on branch `worktree-<name>`: 1-64 letters, digits, dots, underscores or dashes. The branch starts from origin's default branch, or from HEAD when there is no origin" },
+        "cwd": { "type": "string", "description": "Default: current directory. Must be inside a git project, and not one whose root is the home directory: the session edits this directory unreviewed" },
+        "on": { "type": "string", "description": "Another of the user's computers to run on, by tailnet name, or 'auto' for the least loaded of those that have cwd; an unknown name lists them. A git project missing on a named computer is copied over whole with rsync, without what .gitignore names and without its worktrees; a linked worktree is not copied. Needs this computer's listener (`agent service install`) for the answers to come back. Fetch its branch with `git fetch <computer>:<path> worktree-<name>:worktree-<name>`; never push it to a shared remote to move it" }
+      }
+    }
   },
   {
     "name": "TaskOutput",
@@ -378,11 +393,11 @@
   },
   {
     "name": "TaskStop",
-    "description": "Stop a background task: a Bash task (bt-N) gets SIGTERM to its process group and SIGKILL after 2s (on Windows, taskkill ends its process tree at once); a subagent (sa-N) stops and SendMessage can resume it later; a workflow (wf-N) stops with its agents. Returns its final state.",
+    "description": "Stop a background task: a Bash task (bt-N) gets SIGTERM to its process group and SIGKILL after 2s (on Windows, taskkill ends its process tree at once); a subagent (sa-N) stops and SendMessage can resume it later; a workflow (wf-N) stops with its agents; a session StartSession started stops by its id, or `<computer>:<id>`, and stays saved with its worktree. Returns its final state.",
     "input_schema": {
       "type": "object",
       "required": ["task_id"],
-      "properties": { "task_id": { "type": "string", "description": "Task id to stop, e.g. \"bt-1\"" } }
+      "properties": { "task_id": { "type": "string", "description": "Task id to stop, e.g. \"bt-1\", or the id of a session you started" } }
     }
   },
   {

@@ -30,6 +30,10 @@ pub struct Peer {
     pub title: String,
     pub cwd: String,
     pub busy: bool,
+    /// The address of the session that started this one with StartSession, or empty.
+    pub started_by: String,
+    /// The id its process began with, which the sessions it started keep reporting to after /clear gives it a new one.
+    pub first_session: String,
     pub socket: PathBuf,
 }
 
@@ -105,8 +109,8 @@ fn receive(stream: &Stream, follow_ups: &Mutex<Vec<FollowUp>>, subscribers: &Mut
 
 impl Inbox {
     /// Rewrites the card ListAgents reads; called when a turn starts and ends.
-    pub fn describe(&self, session: &str, title: &str, cwd: &Path, busy: bool) {
-        let card = json!({"pid": self.pid, "session": session, "title": title, "cwd": cwd, "busy": busy});
+    pub fn describe(&self, session: &str, first_session: &str, title: &str, cwd: &Path, busy: bool, started_by: Option<&str>) {
+        let card = json!({"pid": self.pid, "session": session, "first_session": first_session, "title": title, "cwd": cwd, "busy": busy, "started_by": started_by});
         let _ = std::fs::write(self.dir.join(format!("{}.json", self.pid)), card.to_string());
     }
 
@@ -151,16 +155,25 @@ pub fn list(home: &Path) -> Vec<Peer> {
         }
         let Some(card) = std::fs::read_to_string(&path).ok().and_then(|text| serde_json::from_str::<Value>(&text).ok()) else { continue };
         let text = |key: &str| card[key].as_str().unwrap_or_default().to_string();
-        peers.push(Peer { pid, session: text("session"), title: text("title"), cwd: text("cwd"), busy: card["busy"] == true, socket: dir.join(format!("{pid}.sock")) });
+        peers.push(Peer {
+            pid,
+            session: text("session"),
+            title: text("title"),
+            cwd: text("cwd"),
+            busy: card["busy"] == true,
+            started_by: text("started_by"),
+            first_session: text("first_session"),
+            socket: dir.join(format!("{pid}.sock")),
+        });
     }
     peers.sort_by_key(|peer| peer.pid);
     peers
 }
 
-/// The session `to` names: a session id or its prefix, a title, or a pid.
+/// The session `to` names: a session id or its prefix, the id its process began with, a title, or a pid.
 pub fn find(home: &Path, to: &str) -> Result<Option<Peer>, String> {
     let to = to.trim_start_matches('@').trim_matches('"');
-    let mut matches: Vec<Peer> = list(home).into_iter().filter(|p| p.session.starts_with(to) || p.title == to || p.pid.to_string() == to).collect();
+    let mut matches: Vec<Peer> = list(home).into_iter().filter(|p| p.session.starts_with(to) || p.first_session == to || p.title == to || p.pid.to_string() == to).collect();
     match matches.len() {
         0 => Ok(None),
         1 => Ok(matches.pop()),
@@ -198,9 +211,10 @@ mod tests {
         let home = std::env::temp_dir().join(format!("agent-peers-{}", std::process::id()));
         let follow_ups = Arc::new(Mutex::new(Vec::new()));
         let inbox = open(&home, &follow_ups).unwrap();
-        inbox.describe("abc123", "api", Path::new("/repo"), true);
+        inbox.describe("abc123", "abc123", "api", Path::new("/repo"), true, None);
         // list() skips this process, so build the peer as find would.
-        let peer = Peer { pid: inbox.pid, session: "abc123".into(), title: "api".into(), cwd: "/repo".into(), busy: true, socket: inbox.socket() };
+        let peer =
+            Peer { pid: inbox.pid, session: "abc123".into(), title: "api".into(), cwd: "/repo".into(), busy: true, started_by: String::new(), first_session: String::new(), socket: inbox.socket() };
         let sent = send(&peer, "other", Path::new("/elsewhere"), "the schema changed", Some(&inbox.socket())).unwrap();
         assert!(sent.starts_with("Sent to session abc123 in /repo."), "{sent}");
         let text = follow_ups.lock().unwrap()[0].text.clone();

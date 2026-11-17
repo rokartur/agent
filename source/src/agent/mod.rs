@@ -259,6 +259,10 @@ pub struct Agent {
     pub parent: Option<String>,
     /// Interactive sessions listen for cross-session messages here.
     pub inbox: Option<peers::Inbox>,
+    /// The address of the session that started this one with StartSession: it gets each answer and each wait for the user.
+    pub started_by: Option<String>,
+    /// The id this process began with. The sessions it starts report to it, so /clear and /handoff do not lose them.
+    pub first_session: String,
     /// The session's `project｜topic` name, shown to other sessions by ListAgents.
     pub title: String,
     /// The run each subagent label reached in SendMessage, so a newer run reusing the label is not messaged by mistake.
@@ -499,6 +503,8 @@ impl Agent {
             workflows: Arc::default(),
             parent,
             inbox: None,
+            started_by: None,
+            first_session: session.id.clone(),
             title: String::new(),
             addressed: HashMap::new(),
             subagent_concurrency: settings.subagent_concurrency,
@@ -550,7 +556,30 @@ impl Agent {
 
     /// `typed` is false for a prompt the agent wrote itself, as a goal continuation is.
     fn turn(&mut self, text: &str, typed: bool, emit: &mut dyn FnMut(Event)) -> Result<String, String> {
-        let text = &self.plugin_input(text, emit)?;
+        let text = &self.plugin_input(text, emit).inspect_err(|error| self.report_to_orchestrator(&format!("The turn failed: {error}"), emit))?;
+        let result = self.answer_prompt(text, typed, emit);
+        // A title is cosmetic: on failure /resume falls back to the first prompt line, and one still naming waits for the next prompt.
+        if let Some(naming) = self.pending_title.take_if(|naming| naming.is_finished())
+            && let Ok(Ok(title)) = naming.join()
+        {
+            self.title = title.clone();
+            emit(Event::Titled(title));
+        }
+        self.describe_to_peers(false);
+        if let Some(inbox) = &self.inbox {
+            inbox.went_idle(&self.session.id, &self.cwd);
+        }
+        match &result {
+            Ok(answer) if answer.trim().is_empty() => self.report_to_orchestrator("The turn ended without a text answer.", emit),
+            Ok(answer) => self.report_to_orchestrator(answer, emit),
+            Err(error) => self.report_to_orchestrator(&format!("The turn failed: {error}"), emit),
+        }
+        self.plugins.event(json!({"type": "prompt_end", "error": result.as_ref().err(), "context": self.plugin_context()}));
+        result
+    }
+
+    /// Every exit returns to `turn`, which marks the session idle and reports to its orchestrator.
+    fn answer_prompt(&mut self, text: &str, typed: bool, emit: &mut dyn FnMut(Event)) -> Result<String, String> {
         // The reviewer judges calls against this, so only the user's own words may set it.
         if typed && self.follow_up.is_none() {
             self.user_requests.push(text.to_string());
@@ -558,7 +587,8 @@ impl Agent {
             self.user_requests.drain(..extra);
         }
         self.describe_to_peers(true);
-        if self.interactive && self.history.messages.is_empty() {
+        // A session started with --title keeps that name; `load` empties it for the sessions after it.
+        if self.interactive && self.history.messages.is_empty() && self.title.is_empty() {
             self.start_naming(text);
         }
         let mut content: Vec<Value> = self.shell_context.drain(..).map(|text| json!({"type": "text", "text": text})).collect();
@@ -583,18 +613,6 @@ impl Agent {
                 self.answer_unpaired_calls(error).map_err(|e| format!("{error}; {e}"))?;
             }
         }
-        // A title is cosmetic: on failure /resume falls back to the first prompt line, and one still naming waits for the next prompt.
-        if let Some(naming) = self.pending_title.take_if(|naming| naming.is_finished())
-            && let Ok(Ok(title)) = naming.join()
-        {
-            self.title = title.clone();
-            emit(Event::Titled(title));
-        }
-        self.describe_to_peers(false);
-        if let Some(inbox) = &self.inbox {
-            inbox.went_idle(&self.session.id, &self.cwd);
-        }
-        self.plugins.event(json!({"type": "prompt_end", "error": result.as_ref().err(), "context": self.plugin_context()}));
         result
     }
 
@@ -815,7 +833,7 @@ impl Agent {
 
     pub fn describe_to_peers(&self, busy: bool) {
         if let Some(inbox) = &self.inbox {
-            inbox.describe(&self.session.id, &self.title, &self.cwd, busy);
+            inbox.describe(&self.session.id, &self.first_session, &self.title, &self.cwd, busy, self.started_by.as_deref());
         }
     }
 
@@ -903,6 +921,10 @@ impl Agent {
         }
         if !self.asks {
             list.retain(|tool| tool["name"] != "AskUserQuestion" && tool["name"] != "EnterPlanMode");
+        }
+        // One generation: a session that StartSession started starts none itself.
+        if self.started_by.is_some() {
+            list.retain(|tool| tool["name"] != "StartSession");
         }
         // prompt::system_prompt lists the skills under this tag; with none, Skill has nothing to load.
         if !self.system.contains("<skills>\n") {
