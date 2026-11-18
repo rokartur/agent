@@ -68,6 +68,7 @@ Run a session on another of your computers over Tailscale: its files, its shell,
 /caveman    answers without the fluff
 /ponytail   writes less code
 /fast       standard, fast, ultrafast: quicker output, higher price
+/code-mode  one script for many tool calls, on or off
 ```
 
 ## Scripts and CI

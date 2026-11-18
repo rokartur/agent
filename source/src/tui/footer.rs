@@ -55,6 +55,9 @@ impl App {
             Plan::Drafting => left.extend([span(FOOTER_SEPARATOR, DIM), span("plan", WARN)]),
             Plan::Ready(_) => left.extend([span(FOOTER_SEPARATOR, DIM), span("plan ready", WARN)]),
         }
+        if self.settings.code_mode {
+            left.extend([span(FOOTER_SEPARATOR, DIM), span("code mode", MUTED)]);
+        }
         let profiles: Vec<&str> = self.settings.active_profiles.iter().filter(|profile| self.settings.skill_profiles.contains_key(*profile)).map(String::as_str).collect();
         if !profiles.is_empty() {
             left.push(span(FOOTER_SEPARATOR, DIM));
