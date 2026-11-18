@@ -55,7 +55,7 @@ pub struct Run {
     /// One JSON string per line: the task, then what the user types to the run.
     stdin: Mutex<Option<Box<dyn Write + Send>>>,
     pub state: Mutex<RunState>,
-    launch: Launch,
+    pub launch: Launch,
     /// SendMessage resumed the finished run, so its next answer arrives as a message.
     resumed: AtomicBool,
     /// The subagent whose SendMessage resumed this run; the answer goes to it instead of to main.
@@ -180,6 +180,8 @@ pub struct Launch {
     pub client_mcp: Value,
     /// The other computer the child runs on, with the settings that reach it; None runs it here.
     pub on: Option<(String, Settings)>,
+    /// `task` is a Code script the child runs with no model: `Code` with `run_in_background`.
+    pub script: bool,
 }
 
 #[derive(Default)]
@@ -249,7 +251,7 @@ pub fn spawn(runs: &Arc<Mutex<Runs>>, launch: Launch, background: bool, workflow
         runs.list.push(run.clone());
         (run, roster)
     };
-    let message = format!("{CHILD_BRIEF}\n\n{roster}<task>\n{}\n</task>", run.task);
+    let message = if run.launch.script { run.task.clone() } else { format!("{CHILD_BRIEF}\n\n{roster}<task>\n{}\n</task>", run.task) };
     if let Err(error) = start(&run, &message, None, runs, follow_ups) {
         runs.lock().unwrap().list.retain(|listed| !Arc::ptr_eq(listed, &run));
         return Err(error);
@@ -267,6 +269,9 @@ pub fn send(runs: &Arc<Mutex<Runs>>, to: &str, text: &str, from: Option<&str>, f
             target.id,
             target.workflow.as_deref().unwrap_or_default()
         ));
+    }
+    if target.launch.script {
+        return Err(format!("{} is a background script: it reads no messages and cannot be resumed.", target.id));
     }
     let signed = format!("Message from {}, another agent, not the user:\n\n{text}", from.unwrap_or("main"));
     if target.is_running() && target.message(&signed).is_ok() {
@@ -315,6 +320,9 @@ fn start(run: &Arc<Run>, message: &str, resume: Option<&str>, runs: &Arc<Mutex<R
     }
     if launch.web {
         args.push("--web");
+    }
+    if launch.script {
+        args.push("--script");
     }
     if let Some(session) = resume {
         args.extend(["--resume", session]);
@@ -548,6 +556,7 @@ pub fn test_launch() -> Launch {
         web: false,
         client_mcp: Value::Null,
         on: None,
+        script: false,
     }
 }
 
@@ -665,13 +674,15 @@ mod tests {
         let older = Run { id: "sa-1".into(), started: start, ..scan_run() };
         let newer = Run { id: "sa-2".into(), started: start + Duration::from_secs(1), ..scan_run() };
         let owned = Run { id: "sa-3".into(), label: "step".into(), workflow: Some("wf-1".into()), ..scan_run() };
+        let script = Run { id: "sa-4".into(), label: "script".into(), launch: Launch { script: true, ..test_launch() }, ..scan_run() };
         for run in [&older, &newer] {
             run.state.lock().unwrap().result = Some(Ok("done".into()));
         }
-        let runs = Arc::new(Mutex::new(Runs { list: vec![Arc::new(older), Arc::new(newer), Arc::new(owned)], ..Default::default() }));
+        let runs = Arc::new(Mutex::new(Runs { list: vec![Arc::new(older), Arc::new(newer), Arc::new(owned), Arc::new(script)], ..Default::default() }));
         let follow_ups = Arc::default();
         assert!(send(&runs, "step", "hi", None, &follow_ups).unwrap_err().starts_with("sa-3 belongs to workflow wf-1"));
         assert_eq!(send(&runs, "scan", "hi", None, &follow_ups).unwrap_err(), "sa-2 kept no session, so it cannot be resumed.");
+        assert_eq!(send(&runs, "sa-4", "hi", None, &follow_ups).unwrap_err(), "sa-4 is a background script: it reads no messages and cannot be resumed.");
         assert!(send(&runs, "nobody", "hi", None, &follow_ups).unwrap_err().starts_with("No agent named nobody."));
     }
 }

@@ -74,6 +74,7 @@ Flags:
                               with --headless, stdin takes the task and later messages as JSON string lines
   --explore                   With --parent: only read and rg, no modes prompt
   --web                       With --parent: keep WebSearch, WebFetch and GetSearchContent
+  --script                    With --headless --parent: the task is a Code script, run with no model
   --trust                     Trust this project for this run: load its .agents files and run its edit hooks
   --tools <a,b,...>           With acp, -p, --json or --headless: offer only these tools
   --account <p>=<name>        Use that saved account first for provider p, like a pin in /account
@@ -109,6 +110,8 @@ struct Options {
     headless: bool,
     parent: Option<String>,
     explore: bool,
+    /// With --headless --parent: the task on stdin is a Code script the parent allowed, run with no model.
+    script: bool,
     /// With --parent: keep the web tools, which Workflow agents get.
     web: bool,
     /// --trust: load this project's `.agents` files and run its edit hooks for this run only.
@@ -400,6 +403,7 @@ fn parse_args(args: Vec<String>) -> Result<Options, String> {
             "--on" => options.on = Some(value("--on")?),
             "--explore" => options.explore = true,
             "--web" => options.web = true,
+            "--script" => options.script = true,
             "--trust" => options.trust = true,
             "--account" => {
                 let account = value("--account")?;
@@ -431,6 +435,9 @@ fn parse_args(args: Vec<String>) -> Result<Options, String> {
     }
     if options.headless && options.print {
         return Err("--headless cannot be combined with --print.".into());
+    }
+    if options.script && !(options.headless && options.parent.is_some()) {
+        return Err("--script needs --headless and --parent.".into());
     }
     if options.tools.is_some() && !(options.print || options.json || options.headless || options.acp) {
         return Err("--tools needs acp, -p, --json or --headless; /settings would reset the tool list.".into());
@@ -716,7 +723,8 @@ fn run(options: Options) -> Result<(), String> {
             let keep = |name: &str| if options.explore { matches!(name, "Read" | "Grep") } else { !root_only(name) || web(name) };
             if let Some(tools) = agent.tools.as_array_mut() {
                 tools.retain(|tool| keep(tool["name"].as_str().unwrap_or_default()));
-                for tool in tools.iter_mut().filter(|tool| tool["name"] == "Bash") {
+                // Only the root starts background work: a terminal, or a script, which runs in a child of its own.
+                for tool in tools.iter_mut().filter(|tool| tool["name"] == "Bash" || tool["name"] == "Code") {
                     if let Some(properties) = tool["input_schema"]["properties"].as_object_mut() {
                         properties.remove("run_in_background");
                     }
@@ -733,7 +741,7 @@ fn run(options: Options) -> Result<(), String> {
         let result = if options.acp {
             acp::serve(&mut agent)
         } else if options.headless {
-            headless_mode(&mut agent, prompt.as_deref().unwrap_or_default())
+            headless_mode(&mut agent, prompt.as_deref().unwrap_or_default(), options.script)
         } else {
             print_mode(&mut agent, &prompt.ok_or("A message is needed with --print, --json or a piped stdout.")?, options.json)
         };
@@ -833,7 +841,8 @@ fn print_mode(agent: &mut Agent, prompt: &str, json: bool) -> Result<(), String>
 }
 
 /// Child-process mode: one JSON object per line on stdout, which the parent's subagent tool reads.
-fn headless_mode(agent: &mut Agent, prompt: &str) -> Result<(), String> {
+/// `script`: `prompt` is a Code script to run, not a message for the model.
+fn headless_mode(agent: &mut Agent, prompt: &str, script: bool) -> Result<(), String> {
     let line = |event: Value| {
         println!("{event}");
         let _ = std::io::stdout().flush();
@@ -843,15 +852,17 @@ fn headless_mode(agent: &mut Agent, prompt: &str) -> Result<(), String> {
         line(serde_json::json!({"type": "error", "message": message}));
         return Err(message.into());
     }
-    if let Some(path) = &agent.session.path {
+    // A script's session holds no conversation to view or resume, so its parent shows the script instead.
+    if let Some(path) = agent.session.path.as_ref().filter(|_| !script) {
         line(serde_json::json!({"type": "session", "path": path}));
     }
-    let result = agent.prompt(prompt, &mut |event| match event {
+    let mut on_event = |event| match event {
         Event::ToolStart { name, .. } => line(serde_json::json!({"type": "tool", "name": name})),
         Event::Outbox { to, text } => line(serde_json::json!({"type": "message", "to": to, "text": text})),
         Event::Permission { reply, .. } => _ = reply.send(Decision::Deny),
         _ => {}
-    });
+    };
+    let result = if script { agent.background_script(prompt, &mut on_event) } else { agent.prompt(prompt, &mut on_event) };
     line(usage::entry(&agent.model, agent.usage, process::now_ms()));
     match &result {
         Ok(answer) => line(serde_json::json!({"type": "done", "answer": answer})),
@@ -955,6 +966,8 @@ mod tests {
         assert!(super::parse_args(vec!["-c".into(), "--resume".into(), "abc".into()]).is_err());
         assert!(super::parse_args(vec!["--model".into(), "--print".into(), "hi".into()]).is_err());
         assert!(super::parse_args(vec!["--headless".into(), "--print".into(), "hi".into()]).is_err());
+        assert!(super::parse_args(vec!["--headless".into(), "--script".into()]).is_err());
+        assert!(super::parse_args(vec!["--headless".into(), "--parent".into(), "ab12".into(), "--script".into()]).is_ok());
     }
 
     #[test]
