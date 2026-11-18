@@ -777,10 +777,31 @@ fn run(options: Options) -> Result<(), String> {
         model_lists,
         &socket,
     );
-    if result.is_ok() {
-        serve::remove_log(&home);
+    match result {
+        #[cfg(unix)]
+        Ok(Some(reload)) => reload_server(reload),
+        Ok(_) => {
+            serve::remove_log(&home);
+            Ok(())
+        }
+        Err(error) => Err(error),
     }
-    result
+}
+
+/// /reload: the same pid becomes the binary on disk, so its socket path, cross-session card and log stay, and exec
+/// closes the session file's lock with every other descriptor before the new server takes it.
+#[cfg(unix)]
+fn reload_server(mut command: std::process::Command) -> Result<(), String> {
+    use std::os::unix::process::CommandExt;
+    // MCP servers, plugins and language servers run in sessions of their own, so closed pipes alone may not end them.
+    process::hang_up_children();
+    // The new server knows none of them, so a child left unreaped would stay a zombie for the rest of the session.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+    // SAFETY: waitpid with a null status pointer only reaps; -1 means no child is left.
+    while std::time::Instant::now() < deadline && unsafe { libc::waitpid(-1, std::ptr::null_mut(), libc::WNOHANG) } != -1 {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    Err(format!("Cannot restart the session server: {}", command.exec()))
 }
 
 /// The panic hook's terminal restore does not run when a signal ends the process, so a `kill` would leave the shell in raw mode.

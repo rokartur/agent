@@ -26,6 +26,16 @@ impl App {
             Msg::Place(id, place) => self.replace_place(id, place),
             Msg::Agent(event) => self.agent_event(event),
             Msg::Done(result) => self.done(result),
+            Msg::Reload(command) => {
+                // Typed or delivered while the update downloaded, they live only in this process.
+                let waiting = !self.queued_commands.is_empty() || !self.deferred_commands.is_empty() || !self.steering.lock().unwrap().is_empty() || !self.follow_ups.lock().unwrap().is_empty();
+                if waiting {
+                    self.push(Item::Error("Not restarted: messages that arrived during /reload would be lost. /reload again once they ran.".into()));
+                } else {
+                    self.reload = Some(command);
+                    self.quit = true;
+                }
+            }
             Msg::ModelSettled { model, failures } => {
                 for failure in failures {
                     self.push(Item::System { source: "models".into(), text: failure, tone: Tone::Error });

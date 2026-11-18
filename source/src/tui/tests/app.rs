@@ -449,3 +449,32 @@ fn esc_with_queued_messages_aborts_but_keeps_the_prompt() {
     assert!(app.abort.load(Ordering::Relaxed));
     assert!(!app.retract, "the prompt the steering builds on would go back to the editor");
 }
+
+#[test]
+fn reload_restarts_the_same_session_with_its_model_effort_mode_trust_and_starter() {
+    let home = std::env::temp_dir().join(format!("agent-tui-reload-{}", std::process::id()));
+    let cwd = Path::new("/repo");
+    let mut settings = crate::settings::load(&home).unwrap();
+    (settings.model, settings.thinking, settings.permission_mode) = ("claude-opus-5-5".into(), "high".into(), Mode::FullAccess);
+    settings.trusted_projects.push(crate::agent::prompt::trust_root(cwd).display().to_string());
+
+    let options = crate::parse_args(worker::reload_args("abc123", &settings, cwd, Some("studio:def456"), "Reloaded v1.2.3")).unwrap();
+
+    assert!(options.serve && options.trust);
+    assert!(matches!(&options.resume, Some(crate::Resume::Id(id)) if id == "abc123"));
+    assert_eq!((options.model.as_deref(), options.thinking.as_deref(), options.permission_mode), (Some("claude-opus-5-5"), Some("high"), Some(Mode::FullAccess)));
+    assert_eq!((options.started_by.as_deref(), options.placed.as_deref()), (Some("studio:def456"), Some("Reloaded v1.2.3")));
+}
+
+#[test]
+fn reload_keeps_the_server_while_a_message_typed_during_the_update_waits() {
+    let home = std::env::temp_dir().join(format!("agent-tui-reload-waiting-{}", std::process::id()));
+    let mut app = test_app(&home);
+    app.steering.lock().unwrap().push(("typed during the download".into(), Vec::new()));
+    app.handle(Msg::Reload(crate::process::command("true")));
+    assert!(!app.quit && app.reload.is_none());
+    app.steering.lock().unwrap().clear();
+    app.handle(Msg::Reload(crate::process::command("true")));
+    let _ = std::fs::remove_dir_all(&home);
+    assert!(app.quit && app.reload.is_some());
+}
