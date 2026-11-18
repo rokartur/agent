@@ -25,6 +25,7 @@ pub(super) const BUILTIN_COMMANDS: &[(&str, MidTurn, &str)] = &[
     ("permissions", MidTurn::Runs, "<mode>: ask, auto or full access"),
     ("thinking", MidTurn::Runs, "<level>: Set thinking level"),
     ("effort", MidTurn::Runs, "<level>: Alias for /thinking"),
+    ("code-mode", MidTurn::Runs, "Turn Code mode on or off: the model writes one script for many tool calls"),
     ("fast", MidTurn::Runs, "Step speed: standard, fast, ultrafast; quicker output, billed higher, on models that offer it"),
     ("ponytail", MidTurn::Runs, "<off | lite | full | ultra>: Set the ponytail level"),
     ("caveman", MidTurn::Runs, "<off | full | ultra | wenyan>: Set the caveman level"),
@@ -176,6 +177,10 @@ impl App {
             "fast" => {
                 self.update_settings(|s| s.speed = step(&SPEEDS, &s.speed.as_str(), true).to_string());
                 self.system("fast", format!("Speed: {}", self.settings.speed));
+            }
+            "code-mode" => {
+                self.update_settings(|s| s.code_mode = !s.code_mode);
+                self.system("code-mode", if self.settings.code_mode { "Code mode on" } else { "Code mode off" });
             }
             "ponytail" | "caveman" if args.is_empty() => {
                 let (level, levels) = if name == "ponytail" { (&self.settings.ponytail, PONYTAIL_LEVELS) } else { (&self.settings.caveman, CAVEMAN_LEVELS) };

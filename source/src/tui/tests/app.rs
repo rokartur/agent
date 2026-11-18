@@ -46,6 +46,23 @@ fn export_and_import_expand_a_leading_tilde_to_home() {
 }
 
 #[test]
+fn code_mode_toggles_with_its_command_and_shows_in_the_footer() {
+    let home = std::env::temp_dir().join(format!("agent-tui-code-mode-{}", std::process::id()));
+    let mut app = test_app(&home);
+    let footer = |app: &App| app.footer(200).iter().map(text).collect::<String>();
+    assert!(!footer(&app).contains("code mode"));
+
+    app.submit("/code-mode".into(), false);
+    assert!(app.settings.code_mode);
+    assert!(footer(&app).contains("code mode"));
+
+    app.submit("/code-mode".into(), false);
+    std::fs::remove_dir_all(&home).ok();
+    assert!(!app.settings.code_mode);
+    assert!(!footer(&app).contains("code mode"));
+}
+
+#[test]
 fn the_mouse_over_a_full_screen_view_leaves_the_hidden_transcript_alone() {
     let home = std::env::temp_dir().join(format!("agent-tui-hidden-mouse-{}", std::process::id()));
     std::fs::create_dir_all(&home).unwrap();
