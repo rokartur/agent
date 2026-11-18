@@ -67,9 +67,9 @@ pub fn attach(reader: impl Read, sender: impl Write + Send + 'static, place: &wi
                 if !event::poll(INPUT_POLL).unwrap_or(false) {
                     continue;
                 }
-                let Ok(input) = event::read() else { return };
-                let Some(message) = input_message(&input) else { continue };
-                if writeln!(sender.lock().unwrap(), "{message}").is_err() {
+                let Ok(burst) = read_burst() else { return };
+                let lines: String = typed_paste(burst).iter().filter_map(input_message).map(|message| format!("{message}\n")).collect();
+                if sender.lock().unwrap().write_all(lines.as_bytes()).is_err() {
                     return;
                 }
             }
@@ -89,6 +89,38 @@ pub fn attach(reader: impl Read, sender: impl Write + Send + 'static, place: &wi
     stop.store(true, Ordering::Relaxed);
     let _ = keys.join();
     ending
+}
+
+/// The next event and, while the last one is a typed character, the events already queued behind it, through the
+/// first that is not one.
+fn read_burst() -> std::io::Result<Vec<event::Event>> {
+    let mut burst = vec![event::read()?];
+    while burst.last().and_then(typed_char).is_some() && event::poll(Duration::ZERO).unwrap_or(false) {
+        match event::read()? {
+            // Windows reports each key's release too; the session ignores releases.
+            event::Event::Key(key) if key.kind == event::KeyEventKind::Release => {}
+            input => burst.push(input),
+        }
+    }
+    Ok(burst)
+}
+
+/// VS Code's terminal types a dropped file's path as keys instead of pasting it (`sendPath` sends no bracketed paste),
+/// so typed characters that name an image file become the paste they stand for; any other burst passes unchanged.
+fn typed_paste(mut burst: Vec<event::Event>) -> Vec<event::Event> {
+    let text: String = burst.iter().map_while(typed_char).collect();
+    if image::pasted_path(&text).is_none() {
+        return burst;
+    }
+    burst.splice(..text.chars().count(), [event::Event::Paste(text)]);
+    burst
+}
+
+fn typed_char(input: &event::Event) -> Option<char> {
+    match input {
+        event::Event::Key(event::KeyEvent { code: event::KeyCode::Char(ch), modifiers: event::KeyModifiers::NONE | event::KeyModifiers::SHIFT, kind: event::KeyEventKind::Press, .. }) => Some(*ch),
+        _ => None,
+    }
 }
 
 /// A terminal event as the line that carries it. A dropped image file is read here, since the path names a file on
@@ -279,6 +311,25 @@ mod tests {
         assert_eq!(dropped["image"]["path"], json!(path.display().to_string()));
         assert!(dropped["image"]["data"].as_str().is_some_and(|data| !data.is_empty()), "{dropped}");
         assert!(input_message(&event::Event::Paste("just text".into())).unwrap().get("image").is_none());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_typed_burst_naming_an_image_becomes_its_paste() {
+        let dir = std::env::temp_dir().join(format!("agent-typed-drop-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("CleanShot 2026-11-14 at 8.23.47 PM@2x.png");
+        std::fs::write(&path, crate::image::tests::PIXEL).unwrap();
+        // crossterm marks an uppercase character with SHIFT.
+        let shifted = |ch: char| if ch.is_uppercase() { event::KeyModifiers::SHIFT } else { event::KeyModifiers::NONE };
+        let keys = |text: &str| text.chars().map(|ch| event::Event::Key(event::KeyEvent::new(event::KeyCode::Char(ch), shifted(ch)))).collect::<Vec<_>>();
+        let quoted = format!("'{}'", path.display());
+        let mut burst = keys(&quoted);
+        burst.push(event::Event::Key(event::KeyCode::Enter.into()));
+        assert_eq!(typed_paste(burst), [event::Event::Paste(quoted), event::Event::Key(event::KeyCode::Enter.into())]);
+        let missing = format!("'{}'", dir.join("gone.png").display());
+        assert_eq!(typed_paste(keys(&missing)), keys(&missing));
+        assert_eq!(typed_paste(keys("hello")), keys("hello"));
         std::fs::remove_dir_all(dir).unwrap();
     }
 
