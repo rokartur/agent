@@ -1,14 +1,16 @@
 //! Environments on the other computers of one tailnet (ADR 0002). `agent serve --tailnet` accepts this user's other
 //! devices on this computer's Tailscale addresses, then lists, attaches to or starts the session servers here, or
 //! delivers a message to one, and relays the wire between the TCP connection and the session's socket. `--on`, /env,
-//! `agent attach`, SendMessage, ListAgents and Agent's `on` are its clients.
+//! `agent attach`, SendMessage, ListAgents, TaskStop and the `on` of Agent and StartSession are its clients.
 //!
 //! Each connection sends one request line, `{"list": true}` (with `"cwd"` for `--on auto`), `{"attach": id}`,
 //! `{"start": {"cwd", "args"}}`, `{"reattach": pid}` for the session server a dropped connection showed,
-//! `{"message": {"to", "from", "from_cwd", "text"}}` for a SendMessage, or `{"subagent": {"cwd", "args"}}`, with
-//! `protocol` and `version`. It gets one reply line carrying the listener's own `protocol` and `version`: the
-//! sessions with this computer's `load` (and `has_cwd` when asked), `{"ok": true}`, `{"ok": true, "sent": ..}` for a
-//! message, or `{"error": ..}`. After a bare ok the connection carries the session's wire unchanged, or for a
+//! `{"message": {"to", "from", "from_cwd", "text"}}` for a SendMessage, `{"subagent": {"cwd", "args"}}`,
+//! `{"session": {"cwd", "worktree", "title", "model", "thinking", "full_access", "by", "prompt"}}` for a StartSession
+//! or `{"stop": {"session", "by"}}` for its TaskStop, with `protocol` and `version`. It gets one reply line carrying
+//! the listener's own `protocol` and `version`: the sessions with this computer's `load` (and `has_cwd` when asked),
+//! `{"ok": true}`, `{"ok": true, "sent": ..}` for a message, `{"ok": true, "session", "cwd"}` for a started session, or
+//! `{"error": ..}`. After a bare ok the connection carries the session's wire unchanged, or for a
 //! subagent its stdin and stdout.
 
 use std::io::{BufRead, BufReader, Read, Write};
@@ -36,6 +38,8 @@ const LIST_TIMEOUT: Duration = Duration::from_secs(5);
 const MESSAGE_REPLY_TIMEOUT: Duration = Duration::from_secs(15);
 /// A start waits up to `serve::START_TIMEOUT` on the host for the session server to listen.
 const START_REPLY_TIMEOUT: Duration = Duration::from_secs(75);
+/// Opens the error for a request the host got and did not answer.
+const NO_ANSWER: &str = "did not answer";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_REQUEST_BYTES: u64 = 1 << 20;
 /// The answer to a request this listener does not know; a release older than remote subagents sends it for `subagent`.
@@ -99,14 +103,15 @@ pub fn start(settings: &Settings, environment: &str, cwd: &Path, args: &[String]
     Ok(Stream::Remote(reader, writer))
 }
 
-/// Copies `dir` to the same path on `environment` over ssh, `.git` included and what `.gitignore` names left out.
+/// Copies `dir` to the same path on `environment` over ssh, `.git` included; what `.gitignore` names and this
+/// agent's worktrees, each a checkout of its own, stay behind.
 fn copy_to(environment: &str, dir: &Path) -> Result<(), String> {
     let remote = crate::agent::edit_hooks::shell_quote(&dir.display().to_string());
     // BatchMode: a password prompt would draw over the full-screen terminal and wait unseen. accept-new: the
     // tailnet already vouched for the host, which ssh may not know by its Tailscale name yet.
     let options = ["-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new"];
     run("ssh", &[&options[..], &[environment, &format!("mkdir -p {remote}")]].concat())?;
-    run("rsync", &["-az", "-e", &format!("ssh {}", options.join(" ")), "--filter=:- .gitignore", &format!("{}/", dir.display()), &format!("{environment}:{remote}/")])
+    run("rsync", &["-az", "-e", &format!("ssh {}", options.join(" ")), "--filter=:- .gitignore", "--exclude=/.agents/worktrees/", &format!("{}/", dir.display()), &format!("{environment}:{remote}/")])
 }
 
 fn run(program: &str, args: &[&str]) -> Result<(), String> {
@@ -129,19 +134,66 @@ pub fn message(settings: &Settings, environment: &str, to: &str, from: &str, fro
 /// as an interactive start's copy does, except from Windows; any other missing `cwd` leaves the child in that
 /// computer's home. The connection carries the child's stdin and stdout; closing it stops the child.
 pub fn subagent(settings: &Settings, environment: &str, cwd: &Path, args: &[&str]) -> Result<(BufReader<TcpStream>, TcpStream), String> {
-    let (_, _, listed) = request(settings, environment, json!({"list": true, "cwd": cwd}), LIST_TIMEOUT)?;
-    // Only a project: its .gitignore leaves build output behind, where a plain directory such as Downloads goes whole.
-    if !cfg!(windows) && listed["has_cwd"] == false && crate::agent::prompt::project_root(cwd).join(".git").exists() {
-        copy_to(environment, cwd).map_err(|e| format!("{} is not on {environment}, and copying it there failed: {e}", cwd.display()))?;
-    }
+    copy_missing_project(settings, environment, cwd)?;
     let body = json!({"subagent": {"cwd": cwd, "args": args}});
-    let (reader, stream, _) = request(settings, environment, body, LIST_TIMEOUT).map_err(|refusal| match refusal.as_str() {
-        UNKNOWN_REQUEST => format!("{environment} runs an agent too old for subagents from other computers; run `agent update` there."),
-        _ => refusal,
-    })?;
+    let (reader, stream, _) = request(settings, environment, body, LIST_TIMEOUT).map_err(|refusal| too_old(environment, refusal, "subagents from other computers"))?;
     // A child can think or run one tool for minutes without a line; keepalive still notices a host that vanished.
     stream.set_read_timeout(None).map_err(|e| format!("Cannot reach {environment}: {e}"))?;
     Ok((reader, stream))
+}
+
+/// StartSession on `environment`: a session there that reports to `managed.started_by`, a session on this computer
+/// (ADR 0004). Returns the new session's id and directory.
+pub fn session(settings: &Settings, environment: &str, managed: &serve::Managed) -> Result<(String, String), String> {
+    // The host starts a session only inside a git project, so the whole one goes. A linked worktree's `.git` is a
+    // file naming its main checkout, which stays here: its copy would be no repository.
+    let root = crate::agent::prompt::project_root(managed.cwd);
+    if root.join(".git").is_dir() {
+        copy_missing_project(settings, environment, &root)?;
+    }
+    let body = json!({"session": {
+        "cwd": managed.cwd,
+        "worktree": managed.worktree,
+        "title": managed.title,
+        "model": managed.model,
+        "thinking": managed.thinking,
+        "full_access": managed.full_access,
+        "by": managed.started_by,
+        "prompt": managed.prompt,
+    }});
+    let (_, _, reply) = request(settings, environment, body, START_REPLY_TIMEOUT).map_err(|refusal| start_failure(environment, refusal))?;
+    let text = |key: &str| reply[key].as_str().map(str::to_string).ok_or_else(|| format!("{environment} did not name the session it started."));
+    Ok((text("session")?, text("cwd")?))
+}
+
+/// Why StartSession on `environment` failed. A host that is slow or loses its listener still starts the session,
+/// with nobody left to give its id to, and a second start would put two sessions on the same work.
+fn start_failure(environment: &str, refusal: String) -> String {
+    if refusal.starts_with(&format!("{environment} {NO_ANSWER}")) {
+        return format!("{refusal}. The session may have started there all the same: look for it in ListAgents before you start it again.");
+    }
+    too_old(environment, refusal, "sessions another session starts")
+}
+
+/// TaskStop for a session on `environment` that session `by` here started.
+pub fn stop(settings: &Settings, environment: &str, session: &str, by: &str) -> Result<(), String> {
+    let body = json!({"stop": {"session": session, "by": by}});
+    request(settings, environment, body, REQUEST_TIMEOUT).map(|_| ()).map_err(|refusal| too_old(environment, refusal, "sessions another session starts"))
+}
+
+/// Copies `dir` to `environment` when it is missing there and lies in a git project, except from Windows.
+fn copy_missing_project(settings: &Settings, environment: &str, dir: &Path) -> Result<(), String> {
+    let (_, _, listed) = request(settings, environment, json!({"list": true, "cwd": dir}), LIST_TIMEOUT)?;
+    // Only a project: its .gitignore leaves build output behind, where a plain directory such as Downloads goes whole.
+    if !cfg!(windows) && listed["has_cwd"] == false && crate::agent::prompt::project_root(dir).join(".git").exists() {
+        copy_to(environment, dir).map_err(|e| format!("{} is not on {environment}, and copying it there failed: {e}", dir.display()))?;
+    }
+    Ok(())
+}
+
+/// A host from before `feature` answers its request with `UNKNOWN_REQUEST`.
+fn too_old(environment: &str, refusal: String, feature: &str) -> String {
+    if refusal == UNKNOWN_REQUEST { format!("{environment} runs an agent too old for {feature}; run `agent update` there.") } else { refusal }
 }
 
 /// Where `--on auto` starts a session in `cwd`, and why: of `local` and the environments that answer and have `cwd`,
@@ -276,7 +328,15 @@ fn sessions(settings: &Settings, environment: &str) -> Result<Vec<Value>, String
 
 fn entry(environment: &str, session: &Value, reachable: bool) -> Option<Listed> {
     let text = |key: &str| session[key].as_str().unwrap_or_default().to_string();
-    Some(Listed { environment: environment.into(), session: session["session"].as_str()?.into(), title: text("title"), cwd: text("cwd"), busy: session["busy"].as_bool().unwrap_or(false), reachable })
+    Some(Listed {
+        environment: environment.into(),
+        session: session["session"].as_str()?.into(),
+        title: text("title"),
+        cwd: text("cwd"),
+        busy: session["busy"].as_bool().unwrap_or(false),
+        reachable,
+        started_by: text("started_by"),
+    })
 }
 
 /// Asks `environment` for `body` and returns the connection and the reply, or why it refused.
@@ -318,9 +378,9 @@ fn exchange(stream: TcpStream, environment: &str, mut body: Value, timeout: Dura
     stream.set_read_timeout(Some(timeout)).map_err(|e| format!("Cannot reach {environment}: {e}"))?;
     let mut reader = BufReader::new(stream.try_clone().map_err(|e| format!("Cannot reach {environment}: {e}"))?);
     let mut line = String::new();
-    reader.read_line(&mut line).map_err(|e| format!("{environment} did not answer: {e}"))?;
+    reader.read_line(&mut line).map_err(|e| format!("{environment} {NO_ANSWER}: {e}"))?;
     if line.is_empty() {
-        return Err(format!("{environment} closed the connection without an answer; its `agent serve --tailnet` may have just stopped."));
+        return Err(format!("{environment} {NO_ANSWER}: it closed the connection, so its `agent serve --tailnet` may have just stopped"));
     }
     // After a reply a session sends at least a ping every `PING_EVERY`, so a read that waits longer finds the link gone.
     stream.set_read_timeout(Some(SILENCE)).map_err(|e| format!("Cannot reach {environment}: {e}"))?;
@@ -444,7 +504,8 @@ fn answer(home: &Path, device: &str, request: &Value) -> Result<Answer, String> 
         return Err(format!("This computer runs agent v{VERSION}, which cannot talk to agent v{}.", request["version"].as_str().unwrap_or("unknown")));
     }
     if request["list"] == true {
-        let sessions: Vec<Value> = serve::live(home).into_iter().map(|peer| json!({"session": peer.session, "title": peer.title, "cwd": peer.cwd, "busy": peer.busy})).collect();
+        let sessions: Vec<Value> =
+            serve::live(home).into_iter().map(|peer| json!({"session": peer.session, "title": peer.title, "cwd": peer.cwd, "busy": peer.busy, "started_by": peer.started_by})).collect();
         let mut listed = json!({"sessions": sessions, "load": load()});
         if let Some(cwd) = request["cwd"].as_str() {
             listed["has_cwd"] = json!(usable_cwd(Path::new(cwd)));
@@ -469,7 +530,47 @@ fn answer(home: &Path, device: &str, request: &Value) -> Result<Answer, String> 
     if request["subagent"].is_object() {
         return subagent_here(home, device, &request["subagent"]).map(Answer::Subagent);
     }
+    if request["session"].is_object() {
+        return session_here(home, device, &request["session"]).map(Answer::Reply);
+    }
+    if request["stop"].is_object() {
+        return stop_here(home, device, &request["stop"]).map(Answer::Reply);
+    }
     Err(UNKNOWN_REQUEST.into())
+}
+
+/// A StartSession from session `by` on `device`: a session here that reports to `<device>:<by>`.
+fn session_here(home: &Path, device: &str, session: &Value) -> Result<Value, String> {
+    let text = |key: &str| session[key].as_str().filter(|value| !value.is_empty()).ok_or_else(|| format!("The session request names no {key}."));
+    let cwd = PathBuf::from(text("cwd")?);
+    // Unlike a subagent, never home instead: a session there would edit whatever it finds.
+    if !usable_cwd(&cwd) {
+        return Err(format!("{} is not a directory on this computer.", cwd.display()));
+    }
+    let started_by = format!("{device}:{}", text("by")?);
+    let managed = serve::Managed {
+        cwd: &cwd,
+        worktree: session["worktree"].as_str(),
+        title: text("title")?,
+        model: text("model")?,
+        thinking: text("thinking")?,
+        full_access: session["full_access"] == true,
+        started_by: &started_by,
+        prompt: text("prompt")?,
+    };
+    // shortcut: takes the orchestrator's computer for the user's, wrong when the orchestrator is itself a remote
+    // session; send its own AGENT_USER_DEVICE in the request once that case matters.
+    let peer = serve::start_managed(home, &managed, Some(device))?;
+    Ok(json!({"ok": true, "session": peer.session, "cwd": peer.cwd}))
+}
+
+/// A TaskStop from session `by` on `device`, for a session here that it started.
+fn stop_here(home: &Path, device: &str, stop: &Value) -> Result<Value, String> {
+    let session = stop["session"].as_str().filter(|session| !session.is_empty()).ok_or("The stop names no session.")?;
+    let by = stop["by"].as_str().filter(|by| !by.is_empty()).ok_or("The stop names no starting session.")?;
+    let peer = serve::find_managed(home, session, &format!("{device}:{by}"))?;
+    serve::stop(home, peer.pid)?;
+    Ok(json!({"ok": true}))
 }
 
 /// A SendMessage from a session on `device` to a session here. The sender is named `<device>:<session>`, the address
@@ -746,7 +847,7 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn a_message_from_another_computer_reaches_a_session_here_named_by_that_computer() {
+    fn a_message_a_stop_and_a_session_start_from_another_computer_name_their_sender_by_that_computer() {
         let home = std::env::temp_dir().join(format!("agent-tailnet-message-{}", std::process::id()));
         let follow_ups = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let inbox = peers::open(&home, &follow_ups).unwrap();
@@ -754,14 +855,41 @@ mod tests {
         let parent = std::os::unix::process::parent_id();
         let dir = peers::dir(&home);
         std::fs::rename(inbox.socket(), dir.join(format!("{parent}.sock"))).unwrap();
-        std::fs::write(dir.join(format!("{parent}.json")), json!({"pid": parent, "session": "abc123", "title": "api", "cwd": "/repo", "busy": false}).to_string()).unwrap();
+        std::fs::write(dir.join(format!("{parent}.json")), json!({"pid": parent, "session": "abc123", "first_session": "fff999", "title": "api", "cwd": "/repo", "busy": false}).to_string()).unwrap();
         let ask = |message: Value| answer(&home, "laptop", &json!({"protocol": PROTOCOL, "message": message}));
         let Ok(Answer::Reply(sent)) = ask(json!({"to": "abc", "from": "def456", "from_cwd": "/src", "text": "hi"})) else { panic!("the message was not sent") };
         assert_eq!(sent["sent"], "Sent to session abc123 in /repo.");
         let text = follow_ups.lock().unwrap()[0].text.clone();
         assert!(text.starts_with("Message from another agent session laptop:def456 in /src, not from the user.") && text.ends_with("hi"), "{text}");
+        // After /clear a session has a new id, and the sessions it started still report to the one it began with.
+        assert!(ask(json!({"to": "fff999", "from": "def456", "text": "report"})).is_ok());
         assert_eq!(ask(json!({"to": "zzz", "text": "hi"})).err(), Some("No session zzz runs here.".into()));
         assert_eq!(ask(json!({"to": "abc", "text": ""})).err(), Some("The message is empty.".into()));
+
+        // The same session, as one that session def456 on laptop started: only that session stops it.
+        let card = json!({"pid": parent, "session": "abc123", "title": "api", "cwd": "/repo", "busy": false, "started_by": "laptop:def456"});
+        std::fs::write(dir.join(format!("{parent}.json")), card.to_string()).unwrap();
+        std::fs::create_dir_all(home.join(".agents/serve")).unwrap();
+        std::fs::write(serve::socket(&home, parent), "").unwrap();
+        let stop = |device: &str, by: &str| answer(&home, device, &json!({"protocol": PROTOCOL, "stop": {"session": "abc", "by": by}})).err().unwrap();
+        assert_eq!(stop("laptop", ""), "The stop names no starting session.");
+        for (device, by) in [("laptop", "other"), ("desktop", "def456")] {
+            assert_eq!(stop(device, by), "Session abc123 was not started by this session, so TaskStop leaves it alone.", "{device}:{by}");
+        }
+        // Its orchestrator gets as far as the socket, which here is a plain file, so nothing is signalled.
+        assert!(stop("laptop", "def456").starts_with("Cannot reach session server"), "{}", stop("laptop", "def456"));
+
+        let session = |cwd: &Path, prompt: &str| {
+            let session = json!({"cwd": cwd, "title": "t", "model": "m", "thinking": "high", "by": "def456", "prompt": prompt});
+            answer(&home, "laptop", &json!({"protocol": PROTOCOL, "session": session})).err().unwrap()
+        };
+        assert!(session(&home.join("missing"), "fix it").ends_with("is not a directory on this computer."));
+        assert!(session(&home, "!rm -rf ~").starts_with("The prompt cannot start"));
+        assert_eq!(too_old("studio", UNKNOWN_REQUEST.into(), "x"), "studio runs an agent too old for x; run `agent update` there.");
+        assert!(start_failure("studio", "studio did not answer: timed out".into()).ends_with("look for it in ListAgents before you start it again."));
+        assert!(start_failure("studio", format!("studio {NO_ANSWER}: it closed the connection")).ends_with("before you start it again."));
+        assert_eq!(start_failure("studio", "No room.".into()), "No room.");
+        assert_eq!(start_failure("studio", "The prompt did not answer: no.".into()), "The prompt did not answer: no.");
         drop(inbox);
         std::fs::remove_dir_all(&home).unwrap();
     }
@@ -901,7 +1029,7 @@ mod tests {
         settings.tailnet_port = 1;
         std::fs::write(home.join(".agents/environments.json"), json!({"127.0.0.1": [{"session": "abc", "title": "t", "cwd": "/p", "busy": true}]}).to_string()).unwrap();
         let (listed, failures) = listing_of(&home, &settings, &settings.environments);
-        assert_eq!(listed, [Listed { environment: "127.0.0.1".into(), session: "abc".into(), title: "t".into(), cwd: "/p".into(), busy: true, reachable: false }]);
+        assert_eq!(listed, [Listed { environment: "127.0.0.1".into(), session: "abc".into(), title: "t".into(), cwd: "/p".into(), busy: true, reachable: false, started_by: String::new() }]);
         assert_eq!(failures.len(), 1);
         std::fs::remove_dir_all(&home).unwrap();
     }

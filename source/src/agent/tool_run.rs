@@ -156,6 +156,7 @@ impl Agent {
             "TaskStop" => self.task_stop(input),
             "SendMessage" => self.send_message(input, emit),
             "ListAgents" => self.list_agents(),
+            "StartSession" => self.start_session(input),
             "Agent" => self.subagent(input, emit),
             "Workflow" => self.workflow(input),
             "Code" => self.code(id, input, emit),
@@ -306,6 +307,7 @@ impl Agent {
         let (reply, answer) = mpsc::channel();
         let asked = Instant::now();
         emit(Event::Permission { call: call.map(String::from), request: request.clone(), reply });
+        self.report_wait("approve a tool call", &request.detail, emit);
         let decision = answer.recv().unwrap_or(Decision::Deny);
         self.waited_on_user += asked.elapsed();
         match decision {

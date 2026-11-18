@@ -1112,3 +1112,78 @@ fn steering_typed_before_an_abort_stays_queued_for_the_next_turn() {
     assert_eq!(agent.steering.lock().unwrap().len(), 1, "the abort swallowed the steering");
     assert_eq!(last.unwrap()["content"].as_array().unwrap().len(), 1, "only the tool result goes into history");
 }
+
+#[test]
+#[cfg(unix)]
+fn a_managed_session_reports_its_answers_and_waits_to_its_orchestrator_and_starts_no_sessions() {
+    let home = std::env::temp_dir().join(format!("agent-started-by-{}", std::process::id()));
+    let cwd = home.join("project");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let answer = [
+        r#"{"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg_1"}}"#,
+        r#"{"type":"response.output_text.delta","output_index":0,"delta":"Done: 3 files."}"#,
+        r#"{"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":1,"output_tokens":1}}}"#,
+    ];
+    let body: String = answer.iter().map(|event| format!("event: x\ndata: {event}\n\n")).collect();
+    let (client, _) = crate::api::images::tests::fake_codex_client(&home, &[(200, &body)]);
+    let model = Model { provider: "openai-codex".into(), id: "openai-codex/gpt-5.5".into(), ..Default::default() };
+    std::fs::create_dir_all(home.join(".agents/cache")).unwrap();
+    std::fs::write(home.join(".agents/cache/models.json"), crate::api::models::to_cache(&[model])).unwrap();
+    assert!(client.load_cached_catalog("openai-codex/gpt-5.5"));
+    // The orchestrator's inbox poses as the parent process, which is alive: peers::list skips this one.
+    let follow_ups = Arc::new(Mutex::new(Vec::new()));
+    let inbox = peers::open(&home, &follow_ups).unwrap();
+    let parent = std::os::unix::process::parent_id();
+    std::fs::rename(inbox.socket(), peers::dir(&home).join(format!("{parent}.sock"))).unwrap();
+    std::fs::write(peers::dir(&home).join(format!("{parent}.json")), json!({"pid": parent, "session": "orch1"}).to_string()).unwrap();
+
+    let settings = crate::settings::load(&home).unwrap();
+    let session = Session::start(&home.join("sessions"), false, &cwd, "m").unwrap();
+    let mut agent = Agent::new(client, &settings, home.clone(), cwd, session, home.join("sessions"), None);
+    agent.model = "openai-codex/gpt-5.5".into();
+    agent.tools = agent.tool_schemas();
+    agent.interactive = true;
+    agent.title = "count".into();
+    let offers_sessions = |agent: &Agent| agent.system_and_tools().1.as_array().unwrap().iter().any(|tool| tool["name"] == "StartSession");
+    let offered_before = offers_sessions(&agent);
+    let start = json!({"title": "t", "prompt": "p"});
+    let refused_before = agent.start_session(&start).unwrap_err();
+    agent.started_by = Some("orch1".into());
+    let offered_after = offers_sessions(&agent);
+    let refused_after = agent.start_session(&start).unwrap_err();
+    let stops = [agent.task_stop(&json!({"task_id": "local:zz"})).unwrap_err(), agent.task_stop(&json!({"task_id": ""})).unwrap_err(), agent.task_stop(&json!({"task_id": "local:"})).unwrap_err()];
+    let result = agent.prompt("count the files", &mut |_| {});
+    agent.report_wait("approve a tool call", "rm -rf build", &mut |_| {});
+    // An orchestrator that is gone shows as a notice in the managed session, where the user reads it on attach.
+    agent.started_by = Some("gone1".into());
+    let mut notices = Vec::new();
+    agent.report_to_orchestrator("lost", &mut |event| {
+        if let Event::Notice(text) = event {
+            notices.push(text);
+        }
+    });
+    let id = agent.session.id.clone();
+    let title = agent.title.clone();
+    agent.new_session().unwrap();
+    let title_after_clear = agent.title.clone();
+    // The parent's card now poses as a session this one started.
+    std::fs::write(peers::dir(&home).join(format!("{parent}.json")), json!({"pid": parent, "session": "kid1", "started_by": agent.first_session}).to_string()).unwrap();
+    let listed = agent.list_agents().unwrap();
+    drop(inbox);
+    std::fs::remove_dir_all(&home).ok();
+
+    result.unwrap();
+    assert_eq!((offered_before, offered_after), (true, false), "a managed session starts none itself");
+    assert_eq!(refused_before, "Only an interactive session can start sessions: their answers arrive as messages.");
+    // A model that calls the tool it is not offered starts nothing either.
+    assert_eq!(refused_after, "A session that StartSession started starts no sessions itself.");
+    assert_eq!(stops, ["No session zz runs here.", "TaskStop needs `task_id`.", "TaskStop needs `task_id`."]);
+    assert!(listed.contains("kid1") && listed.contains(", started by you"), "{listed}");
+    assert_eq!(title, "count", "a session started with a title keeps it");
+    assert_eq!(title_after_clear, "", "the session /clear opens gets a name from its own first prompt");
+    assert!(notices.len() == 1 && notices[0].starts_with("The session that started this one, gone1, did not get this report:"), "{notices:?}");
+    let reports: Vec<String> = follow_ups.lock().unwrap().iter().map(|follow_up| follow_up.text.clone()).collect();
+    assert_eq!(reports.len(), 2, "{reports:?}");
+    assert!(reports[0].starts_with(&format!("Message from another agent session {id} in ")) && reports[0].ends_with("Done: 3 files."), "{}", reports[0]);
+    assert!(reports[1].contains(&format!("Waiting for the user to approve a tool call. Only the user can, in `agent attach {id}`")) && reports[1].ends_with("rm -rf build"), "{}", reports[1]);
+}

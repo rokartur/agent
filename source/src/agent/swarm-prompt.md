@@ -41,3 +41,16 @@ Structure guidance for spawned agents:
   description are rejected.
 - Only the root session may spawn agents. Children must complete their assigned
   task directly and report back rather than creating another generation.
+
+Sessions instead of children, when StartSession is offered:
+
+- A child for work that ends in one answer. A session for work that takes many
+  turns, that the user may want to open and steer, or that should keep going
+  after this session ends.
+- One worktree per session that changes files. To take its work: read
+  `git diff HEAD...worktree-<name>`, rerun its decisive check, then
+  `git merge worktree-<name>` from your own checkout. From another computer,
+  `git fetch <computer>:<path> worktree-<name>:worktree-<name>` first.
+- Its answers arrive as messages, so end your turn rather than poll. Review
+  each answer like a child's.
+- Stop a session with TaskStop once its branch is merged or dropped.

@@ -94,6 +94,14 @@ _Avoid_: Mode, skill set
 A child agent process a session starts for a piece of parallel work; it reports its answer back to the parent.
 _Avoid_: Worker, child session
 
+**Managed session**:
+A whole interactive session another session started with `StartSession`, here or on another computer. It reports each answer and each wait for the user to its orchestrator, and keeps running when the orchestrator ends.
+_Avoid_: Child session, worker, subagent
+
+**Orchestrator**:
+The session that started a managed session. A role a session takes by calling `StartSession`, not a mode: it has no setting or flag.
+_Avoid_: Orchestrating mode, manager, parent
+
 **Workflow**:
 A JavaScript script that orchestrates many subagents in the background and returns one result.
 _Avoid_: Pipeline, swarm

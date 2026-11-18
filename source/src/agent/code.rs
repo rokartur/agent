@@ -168,9 +168,10 @@ impl Agent {
     }
 
     /// A script calls only what the model may call directly, so --tools and a subagent's narrower list hold inside it.
+    /// Never StartSession: auto mode runs a reviewed script's calls unreviewed, and its prompt is the new session's user request.
     fn offers_to_script(&self, name: &str) -> bool {
         let (_, offered) = self.system_and_tools();
-        name != "Code" && offered.as_array().is_some_and(|tools| tools.iter().any(|tool| tool["name"] == name))
+        !["Code", "StartSession"].contains(&name) && offered.as_array().is_some_and(|tools| tools.iter().any(|tool| tool["name"] == name))
     }
 }
 
@@ -272,8 +273,11 @@ mod tests {
     #[test]
     fn a_script_calls_only_the_tools_offered_to_the_model() {
         let (mut agent, home) = agent("offered");
-        agent.only_tools = Some(vec!["Read".into(), "Code".into()]);
+        agent.only_tools = Some(vec!["Read".into(), "Code".into(), "StartSession".into()]);
+        agent.interactive = true;
+        let model_starts_sessions = agent.system_and_tools().1.as_array().unwrap().iter().any(|tool| tool["name"] == "StartSession");
         let bash = run(&mut agent, "return await tool('Bash', { command: 'touch made' }).nothrow();");
+        let session = run(&mut agent, "return await tool('StartSession', { title: 't', prompt: 'p' }).nothrow();");
         let nested = run(&mut agent, "return await tool('Code', { code: 'return 1' }).nothrow();");
         agent.code_mode = false;
         let off = run(&mut agent, "return 1;");
@@ -282,6 +286,8 @@ mod tests {
         assert_eq!(off.unwrap_err(), "Code mode is off. Make the tool calls directly.");
         assert_eq!(bash.unwrap(), "No tool named Bash is offered to this script.");
         assert_eq!(nested.unwrap(), "No tool named Code is offered to this script.");
+        assert!(model_starts_sessions);
+        assert_eq!(session.unwrap(), "No tool named StartSession is offered to this script.", "auto mode would run it unreviewed");
         assert!(!made);
     }
 

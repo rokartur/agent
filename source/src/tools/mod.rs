@@ -52,7 +52,7 @@ pub struct Facts {
 }
 
 #[rustfmt::skip]
-const FACTS: [Facts; 35] = [
+const FACTS: [Facts; 36] = [
     Facts { name: "Read",             asks: false, plan_blocked: false, changes_files: false, root_only: false, needs_ui: false },
     Facts { name: "Bash",             asks: true,  plan_blocked: false, changes_files: true,  root_only: false, needs_ui: false },
     Facts { name: "Write",            asks: true,  plan_blocked: true,  changes_files: true,  root_only: false, needs_ui: false },
@@ -69,6 +69,8 @@ const FACTS: [Facts; 35] = [
     Facts { name: "WaitForAgents",    asks: false, plan_blocked: false, changes_files: false, root_only: true,  needs_ui: false },
     Facts { name: "SendMessage",      asks: false, plan_blocked: false, changes_files: false, root_only: false, needs_ui: false },
     Facts { name: "ListAgents",       asks: false, plan_blocked: false, changes_files: false, root_only: true,  needs_ui: false },
+    // Not snapshotted: the session it starts edits after the call returns.
+    Facts { name: "StartSession",     asks: true,  plan_blocked: true,  changes_files: false, root_only: true,  needs_ui: true  },
     Facts { name: "TaskOutput",       asks: false, plan_blocked: false, changes_files: false, root_only: true,  needs_ui: false },
     Facts { name: "TaskStop",         asks: false, plan_blocked: false, changes_files: false, root_only: true,  needs_ui: false },
     Facts { name: "CronCreate",       asks: false, plan_blocked: false, changes_files: false, root_only: true,  needs_ui: true  },

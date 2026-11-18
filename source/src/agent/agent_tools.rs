@@ -11,9 +11,9 @@ impl Agent {
         Ok(text)
     }
 
-    /// TaskStop: `sa-N` stops a subagent, `wf-N` a workflow, anything else names a background terminal.
+    /// TaskStop: `sa-N` stops a subagent, `wf-N` a workflow, `bt-N` a background terminal, anything else a session this one started.
     pub(super) fn task_stop(&self, input: &Value) -> Result<String, String> {
-        let id = input["task_id"].as_str().ok_or("TaskStop needs `task_id`.")?;
+        let id = input["task_id"].as_str().filter(|id| !id.is_empty()).ok_or("TaskStop needs `task_id`.")?;
         if id.starts_with("wf-") {
             let run = self.workflows.lock().unwrap().iter().find(|run| run.id == id).cloned().ok_or_else(|| format!("No workflow {id}."))?;
             run.stop();
@@ -24,9 +24,109 @@ impl Agent {
             run.stop();
             return Ok(format!("Stopped {} ({}). SendMessage resumes it once it has exited.", run.id, run.label));
         }
-        // Stopping can take seconds, so the terminals lock is released before the kill.
-        let terminal = self.terminals.lock().unwrap().find(id)?;
-        Ok(bg::kill(&[terminal], &self.follow_ups, &self.abort))
+        if id.starts_with("bt-") {
+            // Stopping can take seconds, so the terminals lock is released before the kill.
+            let terminal = self.terminals.lock().unwrap().find(id)?;
+            return Ok(bg::kill(&[terminal], &self.follow_ups, &self.abort));
+        }
+        self.stop_session(id)
+    }
+
+    fn stop_session(&self, id: &str) -> Result<String, String> {
+        // `local` names this computer in `on` and in the `agent attach` list, so `local:<id>` is a session here.
+        let id = id.strip_prefix("local:").unwrap_or(id);
+        if id.is_empty() {
+            return Err("TaskStop needs `task_id`.".into());
+        }
+        if let Some((environment, session)) = id.split_once(':') {
+            let settings = crate::settings::load(&self.home)?;
+            tailnet::check(&settings, environment)?;
+            tailnet::stop(&settings, environment, session, &self.first_session)?;
+            return Ok(format!("Stopped session {id}. It stays saved on {environment}, with its worktree and branch."));
+        }
+        let peer = crate::serve::find_managed(&self.home, id, &self.first_session)?;
+        crate::serve::stop(&self.home, peer.pid)?;
+        Ok(format!("Stopped session {}. It stays saved, with its worktree and branch; `agent attach {}` opens it again.", peer.session, peer.session))
+    }
+
+    /// StartSession: a whole interactive session, here or on another computer, that reports each answer back (ADR 0004).
+    pub(super) fn start_session(&mut self, input: &Value) -> Result<String, String> {
+        // The tool is not offered to a managed session; a model that names it anyway starts nothing (ADR 0004).
+        if self.started_by.is_some() {
+            return Err("A session that StartSession started starts no sessions itself.".into());
+        }
+        if self.inbox.is_none() {
+            return Err("Only an interactive session can start sessions: their answers arrive as messages.".into());
+        }
+        let text = |key: &str| input[key].as_str().map(str::trim).filter(|value| !value.is_empty());
+        let title = text("title").ok_or("StartSession needs `title`.")?;
+        let cwd = match input["cwd"].as_str() {
+            Some(dir) => tools::hashline::resolve(&self.cwd, dir),
+            None => self.cwd.clone(),
+        };
+        // One path for the copy and the request: a project is copied to its real path.
+        let cwd = crate::process::canonicalize(&cwd).unwrap_or(cwd);
+        let managed = crate::serve::Managed {
+            cwd: &cwd,
+            worktree: text("worktree"),
+            title,
+            model: &self.model,
+            thinking: &self.effort,
+            // The model does not pick it.
+            full_access: *self.permission_mode.lock().unwrap() == Mode::FullAccess,
+            started_by: &self.first_session,
+            prompt: text("prompt").ok_or("StartSession needs `prompt`.")?,
+        };
+        crate::serve::check_request(&managed)?;
+        let (address, started_in) = match self.placed_on(input, &cwd)? {
+            Some((environment, settings)) => {
+                // What is copied there is judged here: the host knows only its own home directory.
+                if cwd.is_dir() {
+                    crate::serve::check_project(&self.home, &cwd)?;
+                }
+                if !settings.serve_tailnet {
+                    return Err(format!("A session on {environment} reports back through this computer's listener, which is off. Run `agent service install` here first."));
+                }
+                let (session, started_in) = tailnet::session(&settings, &environment, &managed)?;
+                (format!("{environment}:{session}"), format!("{started_in} on {environment}"))
+            }
+            None => {
+                let peer = crate::serve::start_managed(&self.home, &managed, self.user_device.as_deref())?;
+                (peer.session, peer.cwd)
+            }
+        };
+        Ok(format!(
+            "Started session {address} \"{title}\" in {started_in}. Its answers and its waits for the user arrive as messages. SendMessage to `{address}` continues it; TaskStop with `{address}` stops it."
+        ))
+    }
+
+    /// The computer `on` names for a subagent or a session in `cwd`, with the settings to reach it; None for this one.
+    fn placed_on(&self, input: &Value, cwd: &Path) -> Result<Option<(String, Settings)>, String> {
+        let Some(on) = input["on"].as_str().filter(|on| *on != tailnet::LOCAL) else { return Ok(None) };
+        let settings = crate::settings::load(&self.home)?;
+        tailnet::check(&settings, on)?;
+        let on = if on == tailnet::AUTO { tailnet::place(&settings, cwd).0 } else { on.to_string() };
+        if on == tailnet::LOCAL {
+            return Ok(None);
+        }
+        Ok(Some((on, settings)))
+    }
+
+    /// Tells the orchestrator of this managed session how a turn ended or what it waits for.
+    pub(super) fn report_to_orchestrator(&mut self, report: &str, emit: &mut dyn FnMut(Event)) {
+        let Some(orchestrator) = self.started_by.clone() else { return };
+        // An orchestrator that exited or sleeps misses this; ListAgents lists this session once it is back.
+        if let Err(error) = self.send_message(&json!({"to": orchestrator, "message": report}), emit) {
+            emit(Event::Notice(format!("The session that started this one, {orchestrator}, did not get this report: {error}")));
+        }
+    }
+
+    /// A managed session waits for the user, who alone can answer: its orchestrator can only pass that on. Call it
+    /// after the prompt is shown, since an orchestrator on a computer that is off takes seconds to give up on.
+    pub(super) fn report_wait(&mut self, what: &str, detail: &str, emit: &mut dyn FnMut(Event)) {
+        const MAX_DETAIL_CHARS: usize = 2000;
+        let detail: String = detail.chars().take(MAX_DETAIL_CHARS).collect();
+        self.report_to_orchestrator(&format!("Waiting for the user to {what}. Only the user can, in `agent attach {}`: tell them, do not answer for them.\n\n{detail}", self.session.id), emit);
     }
 
     pub(super) fn send_message(&mut self, input: &Value, emit: &mut dyn FnMut(Event)) -> Result<String, String> {
@@ -82,7 +182,8 @@ impl Agent {
         if !subagents.is_empty() {
             sections.push(format!("Subagents (`to`: id or label; a finished one resumes in the background):\n{}", subagents.join("\n")));
         }
-        let sessions: Vec<String> = peers::list(&self.home).iter().map(peers::Peer::line).collect();
+        let started = |peer: &peers::Peer| if peer.started_by == self.first_session { ", started by you" } else { "" };
+        let sessions: Vec<String> = peers::list(&self.home).iter().map(|peer| format!("{}{}", peer.line(), started(peer))).collect();
         if !sessions.is_empty() {
             sections.push(format!("Other sessions on this machine (`to`: session id or its prefix, title, or pid):\n{}", sessions.join("\n")));
         }
@@ -93,7 +194,9 @@ impl Agent {
             .map(|listed| {
                 let state = if listed.busy { "working" } else { "idle" };
                 let title = if listed.title.is_empty() { String::new() } else { format!(" \"{}\"", listed.title) };
-                format!("- session {}:{}{title}, {state}, in {}", listed.environment, listed.session, listed.cwd)
+                // The host names this session `<this computer>:<id>`, and only the host knows that computer's name.
+                let started = if listed.started_by.ends_with(&format!(":{}", self.first_session)) { ", started by you" } else { "" };
+                format!("- session {}:{}{title}, {state}, in {}{started}", listed.environment, listed.session, listed.cwd)
             })
             .collect();
         if !remote.is_empty() {
@@ -137,15 +240,7 @@ impl Agent {
             Some(dir) => tools::hashline::resolve(&self.cwd, dir),
             None => self.cwd.clone(),
         };
-        let on = match input["on"].as_str().filter(|on| *on != tailnet::LOCAL) {
-            None => None,
-            Some(on) => {
-                let settings = crate::settings::load(&self.home)?;
-                tailnet::check(&settings, on)?;
-                let on = if on == tailnet::AUTO { tailnet::place(&settings, &cwd).0 } else { on.to_string() };
-                Some((on, settings)).filter(|(on, _)| on != tailnet::LOCAL)
-            }
-        };
+        let on = self.placed_on(input, &cwd)?;
         let background = input["run_in_background"].as_bool() == Some(true);
         let batch = if background { tasks.len() } else { self.subagent_concurrency.max(1) };
         let mode = *self.permission_mode.lock().unwrap();
@@ -310,6 +405,7 @@ impl Agent {
         }]}))?;
         let (reply, answers) = mpsc::channel();
         emit(Event::Ask { questions, reply });
+        self.report_wait("answer a question", "Enter plan mode?", emit);
         match answers.recv().unwrap_or_default().0.first() {
             Some(Some(ask::Answer::Picked(0))) => {}
             Some(Some(ask::Answer::Typed(text))) => return Err(format!("User declined to enter plan mode and said: {text}")),
@@ -345,11 +441,6 @@ impl Agent {
             return Err("Already in a worktree session. Use ExitWorktree first, or pass path to switch into another existing worktree.".into());
         }
         let name = name.map_or_else(|| format!("wt-{:x}", now_ms()), str::to_string);
-        // The name becomes a directory and a branch: no `/` to leave .agents/worktrees, no leading `-` for git to read as an option.
-        let valid = (1..=64).contains(&name.len()) && !name.starts_with(['-', '.']) && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'));
-        if !valid {
-            return Err("name must be 1-64 letters, digits, dots, underscores or dashes, not starting with a dot or dash.".into());
-        }
         let created = crate::worktree::create(&self.cwd, &name)?;
         let original_cwd = self.cwd.clone();
         self.move_to(created.path.clone(), emit)?;
@@ -502,7 +593,8 @@ impl Agent {
             return Ok(shown);
         }
         emit(Event::ToolProgress { id: id.into(), text: format!("waiting for {}, Esc cancels", published.url) });
-        let submitted = pages.wait(published.number, &self.abort).ok_or(ABORTED)?;
+        self.report_wait("submit a page", &published.url, emit);
+        let submitted = self.pages.as_ref().expect("started above").wait(published.number, &self.abort).ok_or(ABORTED)?;
         Ok(format!("{shown}\n{}", tools::truncate_head(tools::page::answer(input, &submitted), "page")))
     }
 
@@ -514,6 +606,7 @@ impl Agent {
         let (reply, answers) = mpsc::channel();
         let asked = std::time::Instant::now();
         emit(Event::Ask { questions: questions.clone(), reply });
+        self.report_wait("answer a question", &input["questions"].to_string(), emit);
         let (answers, images) = answers.recv().unwrap_or_default();
         self.waited_on_user += asked.elapsed();
         self.result_blocks = images;
