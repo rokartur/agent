@@ -136,4 +136,21 @@ Does the model pick `run_in_background` by itself? Run by hand on 2026-11-18 wit
 - `Bash` in the background costs more when the model polls. One `claude-haiku-5-5` run called `TaskOutput` 14 times: 20 requests and 134,966 input tokens for the same result.
 - Print mode ends with the turn unless a subagent, workflow or background script still runs, so the runs with `Bash` in the background ended before the files existed. In the TUI the terminal's exit wakes the model, which then makes the remaining calls itself.
 
-Conclusion: the mode stays experimental and off by default. It is worth turning on for sessions that repeat one edit across many files. Elsewhere it costs about 700 tokens a request, and on a smaller model with a task that needs reading first it can cost more than direct calls.
+### Shorter description
+
+The tables above were measured with a `Code` description of 809 tokens (`/v1/messages/count_tokens`, the tool alone less a one-word tool). On 2026-11-18 it was cut to 660 tokens and given three instructions: skip the tool for one or two calls, find and read inside the script what it needs, and `$` resolves to a plain string. The last one came from a `claude-haiku-5-5` script that read `.stdout` on `$`'s result, threw, and cost a request. Three runs of the same test for each model; each range spans the three runs:
+
+| Task | Model | Off: requests, tokens in, tokens out, seconds | On: requests, tokens in, tokens out, seconds |
+| :- | :- | :- | :- |
+| edit 12 files | `claude-opus-5-5` | 4-5, 64,904-80,388, 1,915-1,959, 20-24 | 3, 47,218-48,089, 425-532, 7-8 |
+| edit 12 files | `claude-haiku-5-5` | 3-4, 47,061-64,999, 1,754-1,950, 9-12 | 3, 47,191-49,196, 623-1,754, 6-9 |
+| filter 24 manifests | `claude-opus-5-5` | 3, 43,983-44,041, 271-286, 5 | 3, 46,085-46,131, 303-326, 5-8 |
+| filter 24 manifests | `claude-haiku-5-5` | 2, 29,097-29,152, 283-338, 4 | 2, 30,479-30,556, 277-423, 4 |
+| run 6 commands | `claude-opus-5-5` | 3, 43,801-43,817, 244-270, 7-8 | 3, 45,896-45,981, 232-267, 8-10 |
+| run 6 commands | `claude-haiku-5-5` | 3-4, 44,021-59,709, 378-518, 19-20 | 3, 46,120-46,632, 395-421, 17-18 |
+| annotate 30 files | `claude-opus-5-5` | 4-5, 72,060-89,924, 4,203-4,339, 34-36 | 5, 83,165-83,719, 727-865, 16-19 |
+| annotate 30 files | `claude-haiku-5-5` | 6-8, 111,603-156,466, 5,355-5,923, 26-30 | 6-7, 98,257-122,047, 1,920-2,641, 14-26 |
+
+Every reply was correct. With the setting on, `claude-haiku-5-5` no longer costs more on the tasks it scripts: before, it spent 12% to 38% more input tokens on `annotate 30 files`; now one run in three spent 9% more and the other two 6% to 37% less, and `edit 12 files` cost 130 tokens more in one run and 24% to 27% less in the other two. `claude-opus-5-5` on `annotate 30 files` spent 12% to 15% more input tokens in two runs of three, one request more, but 3,500 fewer output tokens, which at five times the input price outweigh them. Output tokens fell by half or more wherever a script ran, and wall time fell in every run but one, where it was equal. What is left is the definition itself: about 2,100 input tokens over three requests on the tasks no script helps, which in a cached prefix bill at a tenth of the input price.
+
+Conclusion: the mode stays experimental and off by default. It is worth turning on for sessions that repeat one change across many files or run long checks with steps after them. Elsewhere it costs about 660 input tokens a request, mostly read from the cache.
