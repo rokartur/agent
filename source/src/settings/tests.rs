@@ -325,6 +325,7 @@ fn settings_schema_matches_what_save_writes() {
     assert_eq!(properties["prune_sessions"]["enum"], json!(PRUNE_SESSIONS));
     assert_eq!(properties["mid_turn"]["enum"], json!(MID_TURN));
     assert_eq!(properties["working_animation"]["enum"], json!(WORKING_ANIMATIONS));
+    assert_eq!(properties["indicators"]["enum"], json!(INDICATORS));
     assert_eq!(properties["provider_sort"]["enum"], json!(PROVIDER_SORTS));
     assert_eq!(properties["conflict_priority"]["enum"], json!(CONFLICT_PRIORITIES));
 }

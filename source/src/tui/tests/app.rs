@@ -46,20 +46,27 @@ fn export_and_import_expand_a_leading_tilde_to_home() {
 }
 
 #[test]
-fn code_mode_toggles_with_its_command_and_shows_in_the_footer() {
+fn code_mode_toggles_with_its_command_and_floats_over_the_transcript() {
     let home = std::env::temp_dir().join(format!("agent-tui-code-mode-{}", std::process::id()));
     let mut app = test_app(&home);
-    let footer = |app: &App| app.footer(200).iter().map(text).collect::<String>();
-    assert!(!footer(&app).contains("code mode"));
+    let screen = |app: &mut App| app.frame(80, 20).0.iter().map(text).collect::<Vec<_>>();
+    assert!(!screen(&mut app).concat().contains("code mode"));
 
     app.submit("/code-mode".into(), false);
     assert!(app.settings.code_mode);
-    assert!(footer(&app).contains("code mode"));
+    assert!(!app.footer(200).iter().map(text).collect::<String>().contains("code mode"));
+    let rows = screen(&mut app);
+    let editor = rows.iter().position(|row| row.contains("Ask, /command")).unwrap();
+    assert!(rows[editor - 2].trim_end().ends_with("code mode"), "{rows:#?}");
+
+    app.settings.indicators = "box".into();
+    let rows = screen(&mut app);
+    assert!(rows[0].trim_end().ends_with("╮") && rows[1].contains("│ mode      code │"), "{rows:#?}");
 
     app.submit("/code-mode".into(), false);
     std::fs::remove_dir_all(&home).ok();
     assert!(!app.settings.code_mode);
-    assert!(!footer(&app).contains("code mode"));
+    assert!(!screen(&mut app).concat().contains("mode      code"));
 }
 
 #[test]

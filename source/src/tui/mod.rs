@@ -66,7 +66,7 @@ use crate::api::models::{self, Model};
 use crate::api::oauth::Tokens;
 use crate::api::{AccountStatus, AccountView, Client, Usage};
 use crate::settings::THINKING_LEVELS;
-use crate::settings::{self, CACHE_TTLS, CONFLICT_PRIORITIES, MID_TURN, PROVIDER_SORTS, PRUNE_SESSIONS, SPEEDS, Settings, WORKING_ANIMATIONS, model_key};
+use crate::settings::{self, CACHE_TTLS, CONFLICT_PRIORITIES, INDICATORS, MID_TURN, PROVIDER_SORTS, PRUNE_SESSIONS, SPEEDS, Settings, WORKING_ANIMATIONS, model_key};
 use crate::tools::bg::{Status as TerminalStatus, Terminal, Terminals};
 use crate::tools::goal::{Goal, Status as GoalStatus};
 use crate::tools::plan::Plan;

@@ -130,6 +130,8 @@ pub struct Settings {
     pub mid_turn: String,
     /// One of `WORKING_ANIMATIONS`: the glyph beside the working label and on a turn's done row.
     pub working_animation: String,
+    /// One of `INDICATORS`: code mode, profiles and worktree float as a pill row over the transcript bottom or a framed box in its top right.
+    pub indicators: String,
     /// Shell commands the TUI runs in the background at start, e.g. a global tool update.
     pub on_start: Vec<String>,
     /// Commands that run before a matching tool call; one that fails refuses the call.
@@ -182,6 +184,7 @@ pub const PROVIDER_SORTS: [&str; 3] = ["default", "alphabetical", "manual"];
 pub const CONFLICT_PRIORITIES: [&str; 2] = ["project", "global"];
 pub const MID_TURN: [&str; 2] = ["steering", "queued"];
 pub const WORKING_ANIMATIONS: [&str; 5] = ["star", "fill", "radar", "arc", "diamond"];
+pub const INDICATORS: [&str; 2] = ["bar", "box"];
 /// Below this a condensed batch costs more in cache rewrites than its summary saves on later cache reads.
 pub const CONDENSE_MIN_BATCH_CHARS: u64 = 10_000;
 /// "agent" on a phone keypad.
@@ -562,6 +565,7 @@ fn from_json(own: &Value) -> Settings {
         default_environment: own["default_environment"].as_str().filter(|name| !name.is_empty()).unwrap_or(crate::tailnet::LOCAL).to_string(),
         mid_turn: level(&own["mid_turn"], &MID_TURN, "steering"),
         working_animation: level(&own["working_animation"], &WORKING_ANIMATIONS, "star"),
+        indicators: level(&own["indicators"], &INDICATORS, "bar"),
         on_start: string_list(&own["on_start"]),
         // An entry without its strings is kept empty, so load refuses it.
         before_tool: own["before_tool"]
@@ -705,6 +709,7 @@ fn to_json(settings: &Settings) -> Value {
         "default_environment": settings.default_environment,
         "mid_turn": settings.mid_turn,
         "working_animation": settings.working_animation,
+        "indicators": settings.indicators,
         "on_start": settings.on_start,
         "before_tool": settings.before_tool.iter().map(|hook| json!({"match": hook.matches, "command": hook.command})).collect::<Vec<_>>(),
         "custom_providers": settings.custom_providers.iter().map(|p| json!({
