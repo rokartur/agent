@@ -268,6 +268,7 @@ impl Agent {
                     web: false,
                     client_mcp: self.mcp.client_list(),
                     on: on.clone(),
+                    script: false,
                 };
                 // The tool reports failure, so this chunk's runs must not keep going; earlier chunks have finished.
                 match subagent::spawn(&self.subagents, launch, background, None, &self.follow_ups) {
@@ -336,6 +337,7 @@ impl Agent {
             web: true,
             client_mcp: self.mcp.client_list(),
             on: None,
+            script: false,
         };
         let host = workflow::Host { runs: self.subagents.clone(), follow_ups: self.follow_ups.clone(), base, models };
         let runs_dir = self.workflow_runs_dir();

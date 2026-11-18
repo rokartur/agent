@@ -497,7 +497,8 @@ pub(super) fn tasks_panel(terminals: &[Arc<Terminal>], runs: &[Arc<Run>], catalo
             };
             let mut row = vec![mark];
             row.extend(name(&run.label, index, state.result.is_none()));
-            row.push(span(format!("{status} · {} tools · {} {}", state.tool_calls, model_name(catalog, &run.model), run.thinking), DIM));
+            let model = if run.launch.script { String::new() } else { format!(" · {} {}", model_name(catalog, &run.model), run.thinking) };
+            row.push(span(format!("{status} · {} tools{model}", state.tool_calls), DIM));
             rows.push(row);
         }
     }

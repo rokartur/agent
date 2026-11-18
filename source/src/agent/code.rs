@@ -9,11 +9,14 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use super::permissions::{self, Mode};
-use super::{ABORTED, Agent, Event};
+use super::subagent::{self, Launch};
+use super::{ABORTED, Agent, Event, Plan, prompt};
 use crate::tools::{self, conflicts, rtk::Rtk};
 
 const HARNESS: &str = include_str!("code-harness.js");
 const TIME_LIMIT: Duration = Duration::from_secs(600);
+/// For a script in the background, as in Claude Code.
+const BACKGROUND_LIMIT: Duration = Duration::from_secs(2 * 60 * 60);
 /// How many of a script's Bash calls run at the same time.
 const BASH_AT_ONCE: usize = 8;
 
@@ -36,10 +39,58 @@ impl Agent {
             return Err("Code mode is off. Make the tool calls directly.".into());
         }
         let code = input["code"].as_str().ok_or("Code needs `code`.")?;
+        if input["run_in_background"] == true {
+            return self.script_in_background(code, emit);
+        }
         self.script_reviewed = self.review_script(code, emit)?;
         let result = self.run_script(id, code, TIME_LIMIT, emit);
         self.script_reviewed = false;
         result
+    }
+
+    /// `run_in_background`: the script runs in a child process, as a background subagent does, so this session answers the user meanwhile.
+    /// The child has nobody to ask and none of the user's requests to review calls against, so the whole script must be allowed here.
+    fn script_in_background(&mut self, code: &str, emit: &mut dyn FnMut(Event)) -> Result<String, String> {
+        if *self.plan.lock().unwrap() != Plan::Off {
+            return Err("Plan mode checks each call of a script, so run it without `run_in_background`.".into());
+        }
+        // A child takes the default tool list, which would let the script past --tools.
+        if self.only_tools.is_some() {
+            return Err("With --tools a script runs only without `run_in_background`.".into());
+        }
+        let mode = *self.permission_mode.lock().unwrap();
+        if mode != Mode::FullAccess && !self.review_script(code, emit)? {
+            return Err("A background script has nobody to ask: it needs full-access mode, or auto mode and a script short enough to review. Run it without `run_in_background`.".into());
+        }
+        let provider = self.client.catalog().iter().find(|model| model.id == self.model).map(|model| model.provider.clone());
+        let launch = Launch {
+            label: "script".into(),
+            task: code.into(),
+            cwd: self.cwd.clone(),
+            model: self.model.clone(),
+            thinking: self.effort.clone(),
+            mode,
+            parent_session: self.session.id.clone(),
+            explore: false,
+            account: provider.and_then(|provider| Some(format!("{provider}={}", self.client.account(&provider)?.0))),
+            extra_dirs: self.extra_dirs.clone(),
+            trusted: prompt::is_trusted(&self.trusted_projects, &self.cwd),
+            web: true,
+            client_mcp: self.mcp.client_list(),
+            on: None,
+            script: true,
+        };
+        let run = subagent::spawn(&self.subagents, launch, true, None, &self.follow_ups)?;
+        Ok(format!("Started the script in the background as {}. Its value arrives as a message when it ends, or WaitForAgents waits for it; TaskStop stops it.", run.id))
+    }
+
+    /// The child process of `script_in_background`: runs `code` to its end, then the edit hooks for the files it changed.
+    /// The parent allowed the whole script, so its calls skip the reviewer; rules and hooks still see each one.
+    pub fn background_script(&mut self, code: &str, emit: &mut dyn FnMut(Event)) -> Result<String, String> {
+        self.script_reviewed = true;
+        let value = self.run_script("script", code, BACKGROUND_LIMIT, emit)?;
+        let failures = self.run_edit_hooks(self.edited.clone(), emit);
+        Ok(if failures.is_empty() { value } else { format!("{value}\n\n{}", failures.join("\n\n")) })
     }
 
     /// Auto mode: the reviewer judges the script once, and its calls then skip the reviewer.
@@ -77,7 +128,8 @@ impl Agent {
                 return Err(ABORTED.into());
             }
             if Instant::now() > *deadline.lock().unwrap() {
-                return Err(format!("The script ran past {} minutes and was stopped after {ran} tool calls.", limit.as_secs() / 60));
+                let hint = if limit == TIME_LIMIT { " `run_in_background` gives a script 2 hours." } else { "" };
+                return Err(format!("The script ran past {} minutes and was stopped after {ran} tool calls.{hint}", limit.as_secs() / 60));
             }
             if let Some(outcome) = inbox.borrow_mut().outcome.take() {
                 // Images and frames the script's calls returned go to the model with the script's value.
@@ -428,6 +480,45 @@ mod tests {
         assert_eq!(serde_json::from_str::<Value>(&kept.unwrap()).unwrap(), json!(["a\n", "Denied by the permission rule \"Bash(rm *)\" in settings.json.", "c\n"]));
         assert_eq!(denied.unwrap_err(), ABORTED);
         assert_eq!((asked, made), (2, [false, false]), "the call allowed first must not run once the user denies the next");
+    }
+
+    #[test]
+    fn a_background_script_starts_only_where_the_whole_script_is_allowed_first() {
+        let (mut agent, home) = agent("background");
+        let refused = |agent: &mut Agent| agent.code("c1", &json!({"code": "await $`touch made`;", "run_in_background": true}), &mut |_| {}).unwrap_err();
+        *agent.permission_mode.lock().unwrap() = Mode::Ask;
+        let ask = refused(&mut agent);
+        // This home has no account, so the review fails, and a failed review denies.
+        *agent.permission_mode.lock().unwrap() = Mode::Auto;
+        let auto = refused(&mut agent);
+        *agent.permission_mode.lock().unwrap() = Mode::FullAccess;
+        *agent.plan.lock().unwrap() = Plan::Drafting;
+        let plan = refused(&mut agent);
+        *agent.plan.lock().unwrap() = Plan::Off;
+        agent.only_tools = Some(vec!["Code".into(), "Bash".into()]);
+        let limited = refused(&mut agent);
+        let started = agent.subagents.lock().unwrap().list.len();
+        let made = agent.cwd.join("made").exists();
+        std::fs::remove_dir_all(&home).unwrap();
+        assert!(ask.starts_with("A background script has nobody to ask"), "{ask}");
+        assert!(auto.starts_with("Denied by the auto-mode reviewer: review failed"), "{auto}");
+        assert!(plan.starts_with("Plan mode checks each call"), "{plan}");
+        assert!(limited.starts_with("With --tools"), "{limited}");
+        assert_eq!((started, made), (0, false));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_child_of_a_background_script_runs_its_calls_unreviewed() {
+        let (mut agent, home) = agent("child");
+        // No account here: a call sent to the reviewer would be denied.
+        *agent.permission_mode.lock().unwrap() = Mode::Auto;
+        agent.permission_rules.deny = vec!["Bash(rm *)".into()];
+        let value = agent.background_script("await $`touch made`; return await $`rm made`.nothrow();", &mut |_| {});
+        let made = agent.cwd.join("made").exists();
+        std::fs::remove_dir_all(&home).unwrap();
+        assert_eq!(value.unwrap(), "Denied by the permission rule \"Bash(rm *)\" in settings.json.");
+        assert!(made);
     }
 
     #[cfg(unix)]

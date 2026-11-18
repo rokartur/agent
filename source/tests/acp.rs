@@ -724,6 +724,38 @@ fn a_code_script_is_reviewed_once_in_auto_mode_and_its_bash_calls_run_together()
 }
 
 #[test]
+fn a_background_code_script_runs_in_a_child_while_the_turn_goes_on() {
+    let home = Home::new("code-background");
+    std::fs::create_dir_all(home.dir.join(".agents")).unwrap();
+    std::fs::write(home.dir.join(".agents/settings.json"), r#"{"code_mode": true}"#).unwrap();
+    let script = "await $`touch made`; return 'the build passed';";
+    let api = fake_api(vec![
+        reply(&[tool_use("toolu_code", "Code", json!({"code": script, "run_in_background": true}))], "tool_use"),
+        reply(&[tool_use("toolu_wait", "WaitForAgents", json!({"task_ids": ["sa-1"]}))], "tool_use"),
+        reply(&[text("Done.")], "end_turn"),
+    ]);
+    let mut editor = Editor::start(&home, &api);
+    let session_id = editor.new_session(&home.project());
+    editor.request("session/set_mode", json!({"sessionId": session_id, "modeId": "auto"})).unwrap();
+
+    editor.prompt(&session_id, "Build in the background.").unwrap();
+
+    let requests: Vec<Value> = api.requests.try_iter().collect();
+    let result = |request: &Value| request["messages"].as_array().unwrap().last().unwrap()["content"].as_array().unwrap().iter().find(|block| block["type"] == "tool_result").unwrap().to_string();
+    assert!(result(&requests[1]).contains("Started the script in the background as sa-1."), "the Code call returns before the script ends: {}", result(&requests[1]));
+    assert!(result(&requests[2]).contains("the build passed"), "{}", result(&requests[2]));
+    assert!(home.project().join("made").exists());
+    let reviewed: Vec<Value> = files_under(&home.dir.join(".agents"))
+        .iter()
+        .filter(|path| path.extension().is_some_and(|extension| extension == "jsonl"))
+        .flat_map(|path| std::fs::read_to_string(path).unwrap().lines().map(|line| serde_json::from_str::<Value>(line).unwrap()).collect::<Vec<_>>())
+        .filter(|entry| entry["type"] == "review")
+        .map(|entry| entry["kind"].clone())
+        .collect();
+    assert_eq!(reviewed, [json!("Script")], "the parent reviews the script, and the child none of its calls");
+}
+
+#[test]
 fn closing_a_session_cancels_its_running_turn() {
     let home = Home::new("close-running");
     let api = fake_api(vec![reply(&[tool_use("toolu_sleep", "Bash", json!({"command": "sleep 120"}))], "tool_use")]);

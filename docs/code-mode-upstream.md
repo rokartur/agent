@@ -2,7 +2,7 @@
 
 Question: what is known about Claude Code's Code Mode, and what separates the agent's `code_mode` from a feature that is no longer experimental?
 
-Answer: Claude Code shipped Code Mode on 2026-11-12 (v2.1.323) and still calls it experimental, off by default, and removable in any release. The agent's design already matched it on the permission model and is stricter or wider in six places. Five gaps separated it from daily use, the largest found only by measuring: on Anthropic the model could not read the tool's description, so it never wrote a script. Branch `code-mode-real` closes four in code and measures the fifth. The numbers keep the label "experimental": see [Gaps](#gaps) and [Measurement](#measurement).
+Answer: Claude Code shipped Code Mode on 2026-11-12 (v2.1.323) and still calls it experimental, off by default, and removable in any release. The agent's design already matched it on the permission model and is stricter or wider in six places. Six gaps separated it from daily use, the largest found only by measuring: on Anthropic the model could not read the tool's description, so it never wrote a script. Branch `code-mode-real` closes four in code and measures the fifth; branch `feat/code-background-scripts` closes the sixth. The numbers keep the label "experimental": see [Gaps](#gaps) and [Measurement](#measurement).
 
 Checked 2026-11-17. Anthropic's pages were fetched directly. X was read through a logged-in browser search; no post by Anthropic staff came up, so every X item below is a third party's claim.
 
@@ -59,7 +59,7 @@ Read from `source/src/agent/code.rs`, `source/src/agent/code-harness.js`, `sourc
 | Providers and models | Anthropic API, fixed model list | any |
 | Subagents, `--tools` | agent teams since 2.1.326 | the narrower tool list holds inside the script |
 | Calls in parallel | yes | `Bash` calls made together, 8 at once; other tools one at a time. Was: none |
-| Background scripts | up to 2 hours in auto | no; a script can start `Bash` with `run_in_background` |
+| Background scripts | up to 2 hours in auto | `run_in_background`: up to 2 hours in auto or full access, in a child process, as a background subagent runs. Was: no |
 | `$` with a bad value | error, nothing runs | `TypeError`, nothing runs. Was: ran with the text `undefined`, `null` or `[object Object]` quoted |
 
 ## Gaps
@@ -69,6 +69,7 @@ Read from `source/src/agent/code.rs`, `source/src/agent/code-harness.js`, `sourc
 3. No measurement. Neither Anthropic nor the agent had a number for this mode. The honest test for dropping "experimental" is the same task with the setting off and on: model turns, tokens, wall time. Closed by the test in [Measurement](#measurement).
 4. Review cost in `Auto`. A script with 50 calls cost 50 reviewer requests. Closed the way Claude Code does it: one review of the script, whose prompt tells the reviewer that the calls run unreviewed and to deny a script whose commands cannot be told from its text. What this gives up: the reviewer no longer sees run-time values. Deny rules, ask rules and `before_tool` hooks still see each call's real input. `reviewer-cases.json` holds 17 scripts, 8 harmless and 9 dangerous (commands taken from a fetched page or an issue body, an upload of `~/.ssh` or of the keys in the environment, `rm -rf` on directories outside the project or on paths a fetched list names, a force push to `main`, a line added to `~/.zshrc`, `curl | sh`). On 2026-11-17 `claude-haiku-5-5` denied every dangerous script in all seven runs. It denied one harmless script in the first run, a build looped over the workspaces named in `package.json`, because the command held a value read at run time. The reviewer's note now says that `$` quotes such a value as one argument; the six runs after that allowed all 8 harmless scripts, and the `rm -rf` on fetched paths, added to check that the note opened nothing, was denied in its three.
 5. The model never saw the tool. Found by the first measurement run: on Anthropic, `defer_rare_tools` put `Code` behind tool search with every other rare tool, so the model got its name and no description, and wrote no script in any of three tasks. With the setting on, Code mode did nothing. Closed: `Code` is in `CORE_TOOLS` (`source/src/api/request.rs`), which costs about 700 input tokens a request while the setting is on.
+6. Background scripts. Claude Code runs a script in the background for up to 2 hours in auto or `bypassPermissions` while the user keeps talking; the agent's script held the turn for its 10 minutes. Closed with `run_in_background`: the script runs in a child process as a background subagent does (`Agent::script_in_background`), so `TaskStop`, `WaitForAgents` and `/tasks` work on it. Nobody answers a prompt in the child, so it starts only where the whole script is allowed first: full access, or auto with the reviewer's one verdict. Still open: a script already running in the foreground cannot move to the background.
 
 Not gaps: `.text()`, `edit()` and the last-expression result. The agent's tool description teaches its own shape (`return`, `tool("Edit", ...)`), and a wrong call fails with a message the model can act on.
 
@@ -119,5 +120,20 @@ What the numbers say:
 - What the scripts look like: all but one that changed files were a loop of 3 to 10 lines that reads with `$` or `tool("Read")` and changes with `tool("Edit")` or `tool("Write")`. In two runs `claude-haiku-5-5` read files with `tool("Read")` and cut the line anchors off with a regular expression; `` $`cat` `` returns the plain text.
 
 What they do not say: three runs per cell, two models of one provider, fixtures of 12 to 30 small files. A task where direct calls take dozens of model requests, the case the X comparison describes, was not measured. In one run before the fixture was a git repository, `claude-opus-5-5` with the setting off changed all 12 files in 2 tool calls and 3 requests, as cheap as the script, so the gain on the first task depends on the model choosing `Edit` over one shell command.
+
+### Background scripts
+
+Does the model pick `run_in_background` by itself? Run by hand on 2026-11-18 with `agent --json --full-access` on a home that holds only the setting, three runs for each cell. The fixture has a `test-all.sh` that takes 25 seconds and reports two of four packages as failed. Prompt "plain": run it, it takes about 15 minutes, and write a `FAILED.md` in each failed package. Prompt "wait" adds that the user does not want to wait and asks what the README says about releases. Each cell counts the runs by the call that ran the script: `Code` in the background, `Bash` in the background, `Bash` in the foreground. "Before" is the tool description without its sentence that prefers a background script to `Bash` with `run_in_background` when steps follow the long command.
+
+| Prompt | Model | Before | After |
+| :- | :- | :- | :- |
+| wait | `claude-opus-5-5` | 1, 2, 0 | 3, 0, 0 |
+| wait | `claude-haiku-5-5` | 0, 3, 0 | 0, 2, 1 |
+| plain | `claude-opus-5-5` | 0, 0, 3 | 1, 0, 2 |
+| plain | `claude-haiku-5-5` | 0, 0, 3 | 0, 1, 2 |
+
+- With the sentence `claude-opus-5-5` wrote a background script each time the user asked not to wait: one script of 7 to 9 lines that runs the tests and writes the files, 4 to 5 model requests and 19,076 to 24,781 input tokens, every result correct. `claude-haiku-5-5` never wrote one.
+- `Bash` in the background costs more when the model polls. One `claude-haiku-5-5` run called `TaskOutput` 14 times: 20 requests and 134,966 input tokens for the same result.
+- Print mode ends with the turn unless a subagent, workflow or background script still runs, so the runs with `Bash` in the background ended before the files existed. In the TUI the terminal's exit wakes the model, which then makes the remaining calls itself.
 
 Conclusion: the mode stays experimental and off by default. It is worth turning on for sessions that repeat one edit across many files. Elsewhere it costs about 700 tokens a request, and on a smaller model with a task that needs reading first it can cost more than direct calls.
