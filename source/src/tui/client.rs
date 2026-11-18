@@ -111,7 +111,7 @@ fn serve_request(request: &Value) -> Option<Value> {
             Err(error) => json!({"failed": error}),
         });
     } else if let Some(url) = request["open"].as_str() {
-        open_in_browser(url)
+        open_in_browser(url, std::env::var_os("SSH_CONNECTION").is_some() || std::env::var_os("SSH_TTY").is_some())
     } else if request["paste_image"] == true {
         return Some(json!({"image": wire::image(image::from_clipboard(), None)}));
     } else {
@@ -226,9 +226,13 @@ fn copy_to_clipboard(text: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn open_in_browser(url: &str) -> Result<(), String> {
+/// Over ssh the opener would start a browser on the ssh host, not on the computer of the terminal.
+fn open_in_browser(url: &str, over_ssh: bool) -> Result<(), String> {
     if !crate::api::oauth::is_web_link(url) {
         return Err(format!("Not a web link: {url}"));
+    }
+    if over_ssh {
+        return Err(format!("Over ssh, Cmd+click or Ctrl+click the link to open it: {url}"));
     }
     if !cfg!(target_os = "macos") {
         return crate::api::oauth::spawn_browser(url);
@@ -298,6 +302,7 @@ mod tests {
         assert_eq!(serve_request(&json!({"open": "file:///etc/passwd"})), Some(json!({"failed": "Not a web link: file:///etc/passwd"})));
         assert_eq!(serve_request(&json!({"open": "https://a.test/\" C:\\x.exe"})), Some(json!({"failed": "Not a web link: https://a.test/\" C:\\x.exe"})));
         assert_eq!(serve_request(&json!({"unknown": 1})), None);
+        assert!(open_in_browser("https://a.test/", true).is_err_and(|error| error.starts_with("Over ssh")));
     }
 
     #[test]

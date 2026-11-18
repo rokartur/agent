@@ -323,21 +323,36 @@ pub fn overlay_center(line: &Line, overlay: Line, width: usize) -> Line {
     out
 }
 
-/// ANSI for `line`; http(s) URLs are underlined wherever they appear.
+/// ANSI for `line`; http(s) URLs are underlined wherever they appear and carry an OSC 8 hyperlink, so the terminal
+/// opens them on Cmd+click where this computer cannot open a browser, as over ssh.
 fn to_ansi(line: &Line) -> String {
     let mut out = String::new();
     for s in line {
         let text: String = s.text.chars().filter(|c| !c.is_control()).collect();
+        if let Some(url) = &s.link {
+            push_link(&mut out, s.style, &text, url);
+            continue;
+        }
         let mut rest = text.as_str();
         while let Some((before, url, after)) = split_link(rest) {
             push_styled(&mut out, s.style, before);
-            push_styled(&mut out, s.style.underline(), url);
+            push_link(&mut out, s.style.underline(), url, url);
             rest = after;
         }
         push_styled(&mut out, s.style, rest);
     }
     out.push_str("\x1b[0m");
     out
+}
+
+fn push_link(out: &mut String, style: Style, text: &str, url: &str) {
+    // is_web_link rejects control characters, so the URL cannot end the sequence early.
+    if text.is_empty() || !crate::api::oauth::is_web_link(url) {
+        return push_styled(out, style, text);
+    }
+    out.push_str(&format!("\x1b]8;;{url}\x1b\\"));
+    push_styled(out, style, text);
+    out.push_str("\x1b]8;;\x1b\\");
 }
 
 fn push_styled(out: &mut String, style: Style, text: &str) {
@@ -476,7 +491,7 @@ mod tests {
         assert_eq!(split_link("see https://x.dev/a_(b)). ok"), Some(("see ", "https://x.dev/a_(b)", "). ok")));
         assert_eq!(split_link("plain text"), None);
         let ansi = to_ansi(&vec![span("go http://a.b, now", PLAIN)]);
-        assert_eq!(ansi, "\x1b[0mgo \x1b[0;4mhttp://a.b\x1b[0m, now\x1b[0m");
+        assert_eq!(ansi, "\x1b[0mgo \x1b]8;;http://a.b\x1b\\\x1b[0;4mhttp://a.b\x1b]8;;\x1b\\\x1b[0m, now\x1b[0m");
     }
 
     #[test]
@@ -503,7 +518,7 @@ mod tests {
     fn a_wrapped_url_is_underlined_and_opens_whole_on_every_row() {
         let rows = wrap(&[span("go https://a.dev/long", PLAIN)], 10, &vec![]);
         assert_eq!(text(&rows), ["go ", "https://a.", "dev/long"]);
-        assert!(to_ansi(&rows[2]).starts_with("\x1b[0;4mdev/long"));
+        assert!(to_ansi(&rows[2]).starts_with("\x1b]8;;https://a.dev/long\x1b\\\x1b[0;4mdev/long\x1b]8;;\x1b\\"));
         assert_eq!(link_at(&rows[2], 0).as_deref(), Some("https://a.dev/long"));
     }
 
