@@ -201,11 +201,23 @@ impl App {
         if let (true, Some(last)) = (self.scroll > 0, rows.last_mut()) {
             *last = overlay_center(last, vec![span(jump_pill(), BRIGHT.on(240))], content_width);
         }
+        // Padded first so a short transcript still puts the pill row right above the editor.
+        rows.resize(room, Vec::new());
+        let indicators = self.indicators();
+        if !indicators.is_empty() {
+            if self.settings.indicators == "box" {
+                let below_hint = usize::from(self.hint.is_some());
+                for (line, framed) in rows.iter_mut().skip(below_hint).zip(indicator_box(&indicators)) {
+                    *line = overlay_right(line, framed, content_width);
+                }
+            } else if let Some(last) = rows.last_mut() {
+                *last = overlay_right(last, indicator_pills(&indicators), content_width);
+            }
+        }
         for (row, glyph) in scrollbar(total, visible, self.scroll).into_iter().enumerate() {
             let pad = content_width.saturating_sub(line_width(&rows[row]));
             rows[row].push(span(format!("{} {glyph}", " ".repeat(pad)), MUTED));
         }
-        rows.resize(room, Vec::new());
         let (panel_top, panel_lines) = panel_view;
         self.layout = Layout {
             width,

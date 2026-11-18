@@ -31,9 +31,6 @@ impl App {
         if self.git.behind > 0 {
             left.push(span(format!(" ↓{} to pull", self.git.behind), WARN));
         }
-        if let Some(main) = &self.git.main {
-            left.push(span(format!(" → {} {}", main.branch, tilde(&main.path)), WARN));
-        }
         if self.git.others > 0 {
             left.push(span(format!(" +{} wt", self.git.others), MUTED));
         }
@@ -54,14 +51,6 @@ impl App {
             Plan::Off => {}
             Plan::Drafting => left.extend([span(FOOTER_SEPARATOR, DIM), span("plan", WARN)]),
             Plan::Ready(_) => left.extend([span(FOOTER_SEPARATOR, DIM), span("plan ready", WARN)]),
-        }
-        if self.settings.code_mode {
-            left.extend([span(FOOTER_SEPARATOR, DIM), span("code mode", MUTED)]);
-        }
-        let profiles: Vec<&str> = self.settings.active_profiles.iter().filter(|profile| self.settings.skill_profiles.contains_key(*profile)).map(String::as_str).collect();
-        if !profiles.is_empty() {
-            left.push(span(FOOTER_SEPARATOR, DIM));
-            left.push(span(format!("profile {}", profiles.join(",")), MUTED));
         }
         let percent = (self.context_tokens * 100).checked_div(self.context_window()).unwrap_or(0);
         let mut right = Line::default();
@@ -99,6 +88,48 @@ impl App {
         }
         footer_rows(left, right, width)
     }
+
+    /// Label, value and 256-color tint of each mode the view floats over the transcript, per the `indicators` setting.
+    pub(super) fn indicators(&self) -> Vec<(&'static str, String, u8)> {
+        let mut shown = Vec::new();
+        if self.settings.code_mode {
+            shown.push(("mode", "code".to_string(), 183));
+        }
+        let profiles: Vec<&str> = self.settings.active_profiles.iter().filter(|profile| self.settings.skill_profiles.contains_key(*profile)).map(String::as_str).collect();
+        if !profiles.is_empty() {
+            shown.push(("profile", profiles.join(", "), 153));
+        }
+        if let Some(main) = &self.git.main {
+            let branch = self.git.branch.as_deref().unwrap_or("detached");
+            shown.push(("worktree", format!("{branch} → {}", main.branch), 222));
+        }
+        shown
+    }
+}
+
+/// The indicators as one row of pills, `code mode` rather than `mode code`.
+pub(super) fn indicator_pills(indicators: &[(&str, String, u8)]) -> Line {
+    let mut row = Vec::new();
+    for (index, (label, value, tint)) in indicators.iter().enumerate() {
+        if index > 0 {
+            row.push(span(" ", PLAIN));
+        }
+        let text = if *label == "mode" { format!(" {value} mode ") } else { format!(" {label} {value} ") };
+        row.push(span(text, Style::fg(*tint).on(236)));
+    }
+    row
+}
+
+/// The indicators framed as a box of `label value` rows.
+pub(super) fn indicator_box(indicators: &[(&str, String, u8)]) -> Vec<Line> {
+    let inner = indicators.iter().map(|(_, value, _)| 10 + line_width(&vec![span(value, PLAIN)])).max().unwrap_or(0);
+    let mut rows = vec![vec![span(format!("╭{}╮", "─".repeat(inner + 2)), DIM)]];
+    for (label, value, tint) in indicators {
+        let pad = inner - 10 - line_width(&vec![span(value, PLAIN)]);
+        rows.push(vec![span("│ ", DIM), span(format!("{label:<10}"), MUTED), span(format!("{value}{}", " ".repeat(pad)), Style::fg(*tint)), span(" │", DIM)]);
+    }
+    rows.push(vec![span(format!("╰{}╯", "─".repeat(inner + 2)), DIM)]);
+    rows
 }
 
 /// `left` word-wrapped to `width`, with `right` at the end of its last row, or on a row of its own when that one is full.
