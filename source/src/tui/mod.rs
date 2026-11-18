@@ -200,6 +200,8 @@ enum Msg {
         instructions: Vec<(String, u64)>,
         session: Usage,
     },
+    /// The `agent serve` this process execs once the event loop ends.
+    Reload(std::process::Command),
 }
 
 enum Command {
@@ -255,6 +257,8 @@ enum Command {
     },
     Changes,
     Context,
+    /// /reload with the UI's settings: installs a newer release, then answers with Msg::Reload.
+    Reload(Box<Settings>),
 }
 
 const MENU_ROWS: [usize; 5] = [4, 6, 8, 10, 12];
@@ -438,6 +442,8 @@ struct App {
     /// Image blocks pasted into the editor; `[Image #n]` in the text refers to `images[n - 1]`.
     images: Vec<Value>,
     quit: bool,
+    /// Set by Msg::Reload together with `quit`.
+    reload: Option<std::process::Command>,
     skills: Vec<Skill>,
     templates: Vec<Template>,
     /// Saved and bundled workflows, each run as `/<name>`.
@@ -488,14 +494,14 @@ pub struct Setup {
     pub plugin_updates: Vec<String>,
     /// The directory a remote start asked for, which is not on this computer, so the session started in home.
     pub missing_cwd: Option<PathBuf>,
-    /// Why `--on auto` started the session on this computer.
+    /// A line shown at start: why `--on auto` started the session on this computer, or what /reload installed.
     pub placed: Option<String>,
 }
 
 /// Runs the session for the terminals that attach on `socket`, until one quits or it idles unattached past
 /// `unload_idle_sessions_after_minutes`. `model_lists` is the startup load of the account model lists; the worker
-/// settles the model on it before its first command.
-pub fn run(agent: Agent, setup: Setup, model_lists: JoinHandle<Vec<String>>, socket: &Path) -> Result<(), String> {
+/// settles the model on it before its first command. Returns the server to exec after /reload.
+pub fn run(agent: Agent, setup: Setup, model_lists: JoinHandle<Vec<String>>, socket: &Path) -> Result<Option<std::process::Command>, String> {
     let prompt = setup.prompt.clone();
     let pick_session = setup.pick_session;
     let (events, inbox) = mpsc::channel();
@@ -544,6 +550,11 @@ pub fn run(agent: Agent, setup: Setup, model_lists: JoinHandle<Vec<String>>, soc
     if let Some(recording) = app.recording.take() {
         recording.cancel();
     }
+    let _ = std::fs::remove_file(socket);
+    // No goodbye: the terminals see the connection drop and reconnect to the same pid once the new server listens.
+    if app.reload.is_some() {
+        return result.map(|()| app.reload.take());
+    }
     let summary = match &app.session_path {
         Some(path) if std::fs::read_to_string(path).is_ok_and(|text| text.contains(r#""type":"message""#)) => exit_summary(&app, Path::new(path)),
         _ => String::new(),
@@ -551,8 +562,7 @@ pub fn run(agent: Agent, setup: Setup, model_lists: JoinHandle<Vec<String>>, soc
     for client in std::mem::take(&mut app.clients) {
         client.finish(&summary);
     }
-    let _ = std::fs::remove_file(socket);
-    result
+    result.map(|()| None)
 }
 
 /// Printed to the normal screen after the TUI leaves, so it stays in the scrollback; mirrors `banner`.
@@ -736,6 +746,7 @@ impl App {
             pending_copy: None,
             images: Vec::new(),
             quit: false,
+            reload: None,
             skills: Vec::new(),
             templates: Vec::new(),
             saved_workflows: Vec::new(),

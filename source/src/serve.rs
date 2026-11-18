@@ -294,7 +294,7 @@ pub fn show(home: &Path, environment: &str, connect: impl FnOnce() -> Result<Str
             }
             // The server drops a terminal that stops reading for 5 s, e.g. behind a locked screen, and runs on.
             Ending::Lost(Some(server)) if environment == LOCAL => {
-                stream = Stream::Local(self::connect(home, server).map_err(|_| "The session server stopped.")?);
+                stream = Stream::Local(listening_again(home, server)?);
                 continue;
             }
             Ending::Lost(None) if environment == LOCAL => return Err("The session server stopped.".into()),
@@ -313,6 +313,20 @@ pub fn show(home: &Path, environment: &str, connect: impl FnOnce() -> Result<Str
         let cwd = std::env::current_dir().map_err(|e| format!("Cannot read the working directory: {e}"))?;
         stream = if next == LOCAL { Stream::Local(start(home, &[], &cwd, false, None)?) } else { tailnet::start(settings, &next, &cwd, &[])? };
         environment = next;
+    }
+}
+
+/// /reload execs the server on the same pid, which listens again once the new binary has started.
+pub fn listening_again(home: &Path, server: u32) -> Result<local_socket::Stream, String> {
+    let deadline = Instant::now() + START_TIMEOUT;
+    loop {
+        if let Ok(stream) = connect(home, server) {
+            return Ok(stream);
+        }
+        if !crate::process::alive(server) || Instant::now() > deadline {
+            return Err(format!("The session server stopped; its output is in {}.", log(home, server).display()));
+        }
+        std::thread::sleep(Duration::from_millis(20));
     }
 }
 
@@ -492,6 +506,22 @@ mod tests {
         std::fs::write(spills.join("out.txt"), "tool output").unwrap();
         sweep(&home);
         assert_eq!([socket.exists(), log.exists(), live_socket.exists(), old_log.exists(), spills.exists()], [false, true, true, false, false]);
+        std::fs::remove_dir_all(&home).unwrap();
+    }
+
+    #[test]
+    fn a_lost_terminal_waits_for_its_reloaded_server_to_listen_again() {
+        let home = std::env::temp_dir().join(format!("agent-serve-reload-{}", std::process::id()));
+        std::fs::create_dir_all(dir(&home)).unwrap();
+        let path = socket(&home, std::process::id());
+        let listener = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            local_socket::bind(&path).unwrap()
+        });
+        let reconnected = listening_again(&home, std::process::id());
+        let _listener = listener.join().unwrap();
+        assert!(reconnected.is_ok(), "{:?}", reconnected.err());
+        assert!(listening_again(&home, 999_999_999).unwrap_err().starts_with("The session server stopped"));
         std::fs::remove_dir_all(&home).unwrap();
     }
 

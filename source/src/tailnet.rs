@@ -519,7 +519,8 @@ fn answer(home: &Path, device: &str, request: &Value) -> Result<Answer, String> 
     if let Some(server) = request["reattach"].as_u64() {
         let ended = || format!("The session ended: its server {server} no longer runs.");
         let pid = u32::try_from(server).map_err(|_| ended())?;
-        return serve::connect(home, pid).map(Answer::Session).map_err(|_| ended());
+        // A server /reload execs listens again on the same pid a moment after the terminal lost it.
+        return serve::listening_again(home, pid).map(Answer::Session).map_err(|_| ended());
     }
     if request["start"].is_object() {
         return start_here(home, device, &request["start"]).map(Answer::Session);
@@ -901,8 +902,15 @@ mod tests {
         std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
         let _server = crate::local_socket::bind(&socket).unwrap();
         assert!(matches!(answer(&home, "laptop", &json!({"protocol": PROTOCOL, "reattach": 4242})), Ok(Answer::Session(_))));
+        let reloading = serve::socket(&home, std::process::id());
+        let listener = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            crate::local_socket::bind(&reloading).unwrap()
+        });
+        assert!(matches!(answer(&home, "laptop", &json!({"protocol": PROTOCOL, "reattach": std::process::id()})), Ok(Answer::Session(_))));
+        let _reloaded = listener.join().unwrap();
         let ended = |server: u64| answer(&home, "laptop", &json!({"protocol": PROTOCOL, "reattach": server})).err();
-        assert_eq!(ended(4243), Some("The session ended: its server 4243 no longer runs.".into()));
+        assert_eq!(ended(999_999_999), Some("The session ended: its server 999999999 no longer runs.".into()));
         assert_eq!(ended(1 << 40), Some(format!("The session ended: its server {} no longer runs.", 1u64 << 40)));
         std::fs::remove_dir_all(home).unwrap();
     }

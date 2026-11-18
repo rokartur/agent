@@ -171,6 +171,14 @@ pub(super) fn spawn_worker(mut agent: Agent, mut settings: Settings, model_lists
                     }
                     continue;
                 }
+                Command::Reload(settings) => {
+                    let notice = update_for_reload(&agent.home, &settings.update_channel);
+                    match reload_command(&agent, &settings, &notice) {
+                        Ok(command) => _ = events.send(Msg::Reload(command)),
+                        Err(error) => _ = events.send(Msg::Agent(Event::Notice(error))),
+                    }
+                    Ok(String::new())
+                }
                 Command::SavePlan => {
                     if let Err(error) = agent.save_plan() {
                         let _ = events.send(Msg::Agent(Event::Notice(error)));
@@ -228,6 +236,50 @@ pub(super) fn spawn_update(home: PathBuf, channel: String, events: Sender<Msg>) 
         };
         let _ = events.send(Msg::Agent(Event::Notice(notice)));
     });
+}
+
+/// /reload installs a newer release first, so the server it execs runs it. The new server shows the result.
+fn update_for_reload(home: &Path, channel: &str) -> String {
+    let current = env!("CARGO_PKG_VERSION");
+    if !crate::update::enabled() {
+        return format!("Reloaded v{current}, a local build that does not update itself.");
+    }
+    match crate::update::install_now(channel, &|_| ()) {
+        Ok(None) => format!("Reloaded v{current}, the newest release."),
+        Ok(Some(version)) => match crate::service::restart_if_installed(home) {
+            Ok(_) => format!("Reloaded on v{version}, updated from v{current}."),
+            Err(error) => format!("Reloaded on v{version}, updated from v{current}. The listener still runs the old release: {error}"),
+        },
+        Err(error) => format!("Reloaded v{current}; the update failed: {error}"),
+    }
+}
+
+fn reload_command(agent: &Agent, settings: &Settings, notice: &str) -> Result<std::process::Command, String> {
+    let exe = std::env::current_exe().map_err(|e| format!("Cannot find the agent binary: {e}"))?;
+    // Linux names a binary replaced since start `<path> (deleted)`; the path itself holds the new release.
+    let exe = exe.to_str().and_then(|path| path.strip_suffix(" (deleted)")).map_or(exe.clone(), PathBuf::from);
+    #[allow(clippy::disallowed_methods, reason = "exec replaces this server, which keeps its session and stdio, where process::command would setsid it")]
+    let mut command = std::process::Command::new(exe);
+    command.current_dir(&agent.cwd).args(reload_args(&agent.session.id, settings, &agent.cwd, agent.started_by.as_deref(), notice));
+    Ok(command)
+}
+
+/// The same session, model, effort and mode; the rest a resume restores from the session file.
+pub(super) fn reload_args(session: &str, settings: &Settings, cwd: &Path, started_by: Option<&str>, notice: &str) -> Vec<String> {
+    let mode = match settings.permission_mode {
+        Mode::Ask => "--ask",
+        Mode::Auto => "--auto",
+        Mode::FullAccess => "--full-access",
+    };
+    let mut args: Vec<String> = ["serve", "--resume", session, "--model", &settings.model, "--thinking", &settings.thinking, mode, "--placed", notice].map(String::from).to_vec();
+    // A --trust run keeps its trust only in memory.
+    if settings.trusts(cwd) {
+        args.push("--trust".into());
+    }
+    if let Some(started_by) = started_by {
+        args.extend(["--started-by".into(), started_by.into()]);
+    }
+    args
 }
 
 /// One thread per command, so a long-running entry such as a dev server does not hold back the rest.

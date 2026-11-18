@@ -44,6 +44,7 @@ pub(super) const BUILTIN_COMMANDS: &[(&str, MidTurn, &str)] = &[
     ("skills", MidTurn::Runs, "Enable and disable skills"),
     ("trust", MidTurn::Runs, "Load this project's .agents files and run its edit hooks"),
     ("untrust", MidTurn::Runs, "Stop loading this project's .agents files and running its edit hooks"),
+    ("reload", MidTurn::Waits, "Install a newer release if there is one and restart this session in place: skills, settings, plugins, MCP servers and AGENTS.md load again"),
     ("mcp", MidTurn::Waits, "Show MCP servers: reconnect, log in, enable and disable"),
     ("usage", MidTurn::Runs, "Show token usage, cost and subscription limits"),
     ("history", MidTurn::Runs, "Search previous prompts"),
@@ -213,6 +214,7 @@ impl App {
             "skills" => self.panel = Some(Panel::Skills { query: Editor::new(), index: 0 }),
             "trust" => self.set_trust(true),
             "untrust" => self.set_trust(false),
+            "reload" => self.reload(),
             "mcp" => self.panel = Some(Panel::Mcp { index: 0, confirm: false }),
             "changes" => _ = self.commands.send(Command::Changes),
             "context" => _ = self.commands.send(Command::Context),
@@ -331,6 +333,25 @@ impl App {
                 self.start(Command::Prompt(prompt, images));
             }
         }
+    }
+
+    /// /reload execs this server again on the same pid (`reload_server` in main.rs), which ends its background work.
+    fn reload(&mut self) {
+        if cfg!(windows) {
+            self.push(Item::Error(format!("/reload needs Unix exec. Quit and run `agent --resume {}`.", self.session_id)));
+            return;
+        }
+        if self.session_path.is_none() {
+            self.push(Item::Error("This session is not saved, so a restart could not reopen it.".into()));
+            return;
+        }
+        let running = self.terminals.lock().unwrap().running() + self.subagents.lock().unwrap().running() + self.workflows.lock().unwrap().iter().filter(|run| run.is_running()).count();
+        if running > 0 {
+            self.push(Item::Error(format!("{running} background tasks still run and a restart would end them. Stop them in /tasks or /workflows, or wait, then /reload.")));
+            return;
+        }
+        self.system("reload", if crate::update::enabled() { "Checking for a newer release..." } else { "Restarting..." });
+        self.start(Command::Reload(Box::new(self.settings.clone())));
     }
 
     /// /goal: no argument shows the goal, a keyword manages it, anything else sets a new goal and starts on it.
