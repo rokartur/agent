@@ -154,3 +154,18 @@ The tables above were measured with a `Code` description of 809 tokens (`/v1/mes
 Every reply was correct. With the setting on, `claude-haiku-5-5` no longer costs more on the tasks it scripts: before, it spent 12% to 38% more input tokens on `annotate 30 files`; now one run in three spent 9% more and the other two 6% to 37% less, and `edit 12 files` cost 130 tokens more in one run and 24% to 27% less in the other two. `claude-opus-5-5` on `annotate 30 files` spent 12% to 15% more input tokens in two runs of three, one request more, but 3,500 fewer output tokens, which at five times the input price outweigh them. Output tokens fell by half or more wherever a script ran, and wall time fell in every run but one, where it was equal. What is left is the definition itself: about 2,100 input tokens over three requests on the tasks no script helps, which in a cached prefix bill at a tenth of the input price.
 
 Conclusion: the mode stays experimental and off by default. It is worth turning on for sessions that repeat one change across many files or run long checks with steps after them. Elsewhere it costs about 660 input tokens a request, mostly read from the cache.
+
+On 2026-11-20 the threshold went from three calls to two, so a pair of calls runs as one script. One run of the same test for each model, setting on, every reply correct:
+
+| Task | Model | Requests, tokens in, tokens out, seconds | Scripts |
+| :- | :- | :- | -: |
+| edit 12 files | `claude-opus-5-5` | 3, 47,472, 491, 8 | 2 |
+| edit 12 files | `claude-haiku-5-5` | 3, 49,124, 1,784, 11 | 0 |
+| filter 24 manifests | `claude-opus-5-5` | 3, 46,092, 300, 7 | 0 |
+| filter 24 manifests | `claude-haiku-5-5` | 2, 30,494, 462, 5 | 0 |
+| run 6 commands | `claude-opus-5-5` | 2, 30,340, 185, 18 | 0 |
+| run 6 commands | `claude-haiku-5-5` | 3, 46,311, 427, 19 | 0 |
+| annotate 30 files | `claude-opus-5-5` | 4, 67,266, 889, 19 | 1 |
+| annotate 30 files | `claude-haiku-5-5` | 5, 83,415, 1,349, 15 | 1 |
+
+Tokens in are within or below the ranges of the table above in every cell; output tokens or seconds came out above them in five: `claude-haiku-5-5` on the first three tasks, `claude-opus-5-5` on `run 6 commands` and `annotate 30 files`. The one new script is `claude-opus-5-5` reading three things at once before its edit script on `edit 12 files`; the same tokens in as before. "filter 24 manifests" and "run 6 commands" still take one or two direct calls: `claude-opus-5-5` chained the six commands into one `Bash` call. `claude-haiku-5-5` made 12 direct edits instead of a script, as it did in one of three runs before.
