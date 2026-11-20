@@ -213,20 +213,31 @@ impl App {
                 self.push(Item::System { source: source.into(), text: text.into(), tone });
             }
             Event::SubagentDone(run) => self.push(Item::Subagent(run)),
-            Event::ToolStart { id, name, input } => self.push(Item::Tool { id, name, input, result: None, progress: None, started: Some(Instant::now()) }),
+            Event::ToolStart { id, name, input } => {
+                let call = Item::Tool { id, name, input, result: None, progress: None, started: Some(Instant::now()), calls: Vec::new() };
+                match self.entries.iter_mut().rev().find(|e| makes_call(&e.item, &call)) {
+                    Some(script) => {
+                        let Item::Tool { calls, .. } = &mut script.item else { return };
+                        calls.push(call);
+                        script.cache = None;
+                    }
+                    None => self.push(call),
+                }
+            }
             Event::ToolProgress { id, text } => {
-                let Some(entry) = self.entries.iter_mut().rev().find(|e| matches!(&e.item, Item::Tool { id: tool_id, .. } if *tool_id == id)) else { return };
-                let Item::Tool { progress, .. } = &mut entry.item else { return };
-                *progress = Some(text);
+                let Some(entry) = self.entries.iter_mut().rev().find(|e| has_call(&e.item, &id)) else { return };
                 entry.cache = None;
+                let Some(Item::Tool { progress, .. }) = call_mut(&mut entry.item, &id) else { return };
+                *progress = Some(text);
             }
             Event::ToolEnd { id, output, is_error } => {
-                let Some(index) = self.entries.iter().rposition(|e| matches!(&e.item, Item::Tool { id: tool_id, .. } if *tool_id == id)) else { return };
+                let Some(index) = self.entries.iter().rposition(|e| has_call(&e.item, &id)) else { return };
                 let entry = &mut self.entries[index];
-                let Item::Tool { name, input, result, .. } = &mut entry.item else { return };
-                let edits_todos = !is_error && edits_todos(name, input);
-                *result = Some((output, is_error));
                 entry.cache = None;
+                let own_row = matches!(&entry.item, Item::Tool { id: own, .. } if *own == id);
+                let Some(Item::Tool { name, input, result, .. }) = call_mut(&mut entry.item, &id) else { return };
+                let edits_todos = own_row && !is_error && edits_todos(name, input);
+                *result = Some((output, is_error));
                 if edits_todos {
                     self.show_todos(index);
                 }
@@ -362,4 +373,24 @@ impl App {
         }
         self.git_due = Some(Instant::now());
     }
+}
+
+/// A running Code call and one its script made: the agent names a script's calls `{code id}-{n}`.
+fn makes_call(script: &Item, call: &Item) -> bool {
+    let (Item::Tool { id: script_id, name, result: None, .. }, Item::Tool { id, .. }) = (script, call) else { return false };
+    name == "Code" && id.strip_prefix(script_id.as_str()).is_some_and(|n| n.starts_with('-'))
+}
+
+fn has_call(item: &Item, id: &str) -> bool {
+    let Item::Tool { id: own, calls, .. } = item else { return false };
+    own == id || calls.iter().any(|call| has_call(call, id))
+}
+
+/// The tool call `id`: `item` itself or one of the calls its script made.
+fn call_mut<'a>(item: &'a mut Item, id: &str) -> Option<&'a mut Item> {
+    if matches!(item, Item::Tool { id: own, .. } if own == id) {
+        return Some(item);
+    }
+    let Item::Tool { calls, .. } = item else { return None };
+    calls.iter_mut().find_map(|call| call_mut(call, id))
 }

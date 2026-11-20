@@ -333,6 +333,8 @@ enum Item {
         progress: Option<String>,
         /// When the call began, for the seconds on its running row; None for a call replayed from history.
         started: Option<Instant>,
+        /// The calls a Code script made while it ran, drawn under its row; a resumed session has none.
+        calls: Vec<Item>,
     },
     /// Claude Code's `Update Todos`: the whole list after a Todo call.
     Todos(Vec<Task>),
