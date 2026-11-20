@@ -121,10 +121,9 @@ pub enum Event {
         request: Request,
         reply: Sender<Decision>,
     },
-    /// Auto mode: what the reviewer decided.
+    /// Auto mode: what the reviewer decided about the call whose row came just before.
     Reviewed {
         allowed: bool,
-        detail: String,
         reason: String,
     },
     /// ask_user_question: the agent waits for one answer slot per question, plus the images the typed answers name; all None means declined.

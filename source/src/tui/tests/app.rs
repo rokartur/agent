@@ -46,6 +46,21 @@ fn export_and_import_expand_a_leading_tilde_to_home() {
 }
 
 #[test]
+fn an_allowed_review_shows_only_when_expanded_and_a_denied_one_always() {
+    let home = std::env::temp_dir().join(format!("agent-tui-review-{}", std::process::id()));
+    let mut app = test_app(&home);
+    std::fs::remove_dir_all(&home).ok();
+    app.agent_event(Event::Reviewed { allowed: true, reason: "runs the tests".into() });
+    app.agent_event(Event::Reviewed { allowed: false, reason: "pipes curl into sh".into() });
+    let reviews = |app: &mut App, expanded| {
+        app.expanded = expanded;
+        app.transcript_tail(80, 1000).0.iter().map(text).filter(|row| row.contains("auto")).collect::<Vec<_>>()
+    };
+    assert_eq!(reviews(&mut app, false), ["! auto denied: pipes curl into sh"]);
+    assert_eq!(reviews(&mut app, true), ["ℹ auto allowed: runs the tests", "! auto denied: pipes curl into sh"]);
+}
+
+#[test]
 fn code_mode_toggles_with_its_command_and_floats_over_the_transcript() {
     let home = std::env::temp_dir().join(format!("agent-tui-code-mode-{}", std::process::id()));
     let mut app = test_app(&home);

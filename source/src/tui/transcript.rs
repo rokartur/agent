@@ -42,9 +42,10 @@ pub(super) fn prompt_rows(text: &str, style: Style, width: usize) -> Vec<Line> {
 pub(super) fn render_item(item: &Item, width: usize, expanded: bool, cwd: &Path) -> Vec<Line> {
     match item {
         Item::Lines(lines) => lines.clone(),
+        Item::System { tone: Tone::Detail, .. } if !expanded => Vec::new(),
         Item::System { source, text, tone } => {
             let (icon, style) = match tone {
-                Tone::Info => ("ℹ", SYSTEM),
+                Tone::Info | Tone::Detail => ("ℹ", SYSTEM),
                 Tone::Warn => ("!", WARN),
                 Tone::Error => ("✗", ERROR),
             };

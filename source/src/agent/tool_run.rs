@@ -329,9 +329,7 @@ impl Agent {
             Some(prompt) => self.ask_reviewer(&prompt),
             None => (false, format!("the call is over {} characters, too long to review", permissions::REVIEW_DETAIL_CHARS)),
         };
-        // The Code row already shows the script.
-        let detail = if request.kind == permissions::Kind::Script { "the script".into() } else { request.detail.clone() };
-        emit(Event::Reviewed { allowed, detail, reason: reason.clone() });
+        emit(Event::Reviewed { allowed, reason: reason.clone() });
         let entry = json!({"type": "review", "kind": request.kind.label(), "detail": request.detail, "allowed": allowed, "reason": reason});
         if let Err(error) = self.session.append(&entry) {
             return Some(format!("Denied: the review could not be saved: {error}."));
