@@ -220,6 +220,13 @@ fn history_shows_agent_added_texts_as_notices() {
 }
 
 #[test]
+fn history_shows_an_edit_hook_report_as_its_live_notice() {
+    let messages = [json!({"role": "user", "content": [{"type": "text", "text": "[edit-hooks] tsc failed:\nerror TS2322"}]})];
+    let items = history_items(&messages);
+    assert!(matches!(&items[0], Item::System { source, text, tone: Tone::Error } if source == "edit-hooks" && text == "tsc failed:\nerror TS2322"), "{:?}", items.len());
+}
+
+#[test]
 fn image_tags_sit_right_under_their_prompt() {
     let prompt = Item::User("see [Image #1]".into());
     let images = Item::Images(vec!["[Image #1]".into()]);

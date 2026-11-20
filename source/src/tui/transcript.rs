@@ -353,7 +353,11 @@ pub(super) fn history_items(messages: &[Value]) -> Vec<Item> {
                 (Some("user"), Some("text")) => {
                     let text = block["text"].as_str().unwrap_or_default();
                     items.push(match crate::agent::harness_source(text) {
-                        // The live transcript shows these as a one-line notice too, not as a prompt.
+                        // Live, the hook report was a whole Event::Notice; the rest were one-line follow-ups.
+                        Some("edit-hooks") => {
+                            let (source, text) = notice_source(text);
+                            Item::System { source: source.into(), text: text.into(), tone: notice_tone(text) }
+                        }
                         Some(source) => Item::System { source: source.into(), text: text.lines().next().unwrap_or_default().into(), tone: Tone::Info },
                         None => Item::User(text.to_string()),
                     });

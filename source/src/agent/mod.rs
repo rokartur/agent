@@ -1033,8 +1033,10 @@ fn keep_finished_text(message: &mut Value) {
 /// The source of a text the agent added to a user message itself (finished background work, `!cmd` output, a move),
 /// matched by the openings their producers write. shortcut: a new producer counts as a typed prompt until it is listed here.
 pub fn harness_source(text: &str) -> Option<&'static str> {
-    const OPENINGS: [(&str, &str); 11] = [
+    const OPENINGS: [(&str, &str); 13] = [
         ("Background terminal ", "terminal"),
+        ("[edit-hooks] ", "edit-hooks"),
+        ("Edit hooks still fail ", "edit-hooks"),
         ("Subagent ", "subagent"),
         ("Answer from ", "subagent"),
         ("Message from subagent ", "subagent"),
