@@ -348,6 +348,8 @@ enum Item {
 #[derive(Clone, Copy)]
 enum Tone {
     Info,
+    /// Info only the expanded view (ctrl+o) shows.
+    Detail,
     Warn,
     Error,
 }

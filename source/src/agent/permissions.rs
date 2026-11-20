@@ -547,6 +547,8 @@ pub fn parse_review(answer: &str) -> (bool, String) {
     let verdict = first.split(|c: char| !c.is_ascii_alphabetic()).next().unwrap_or_default().to_uppercase();
     let rest_of_first = first.trim_start_matches(|c: char| c.is_ascii_alphabetic()).trim_start_matches(['*', '_', '`', ':', '.', '-', ' ']);
     let reason = std::iter::once(rest_of_first).chain(lines).collect::<Vec<_>>().join(" ").trim().to_string();
+    // An empty reason would leave the transcript's denial row with no text, and the row draws nothing.
+    let reason = if reason.is_empty() { "the reviewer gave no reason".into() } else { reason };
     (verdict == "ALLOW", reason)
 }
 
@@ -875,6 +877,7 @@ mod tests {
         assert_eq!(parse_review("ALLOW\nruns tests"), (true, "runs tests".to_string()));
         assert_eq!(parse_review("DENY: touches ~/.aws/credentials"), (false, "touches ~/.aws/credentials".to_string()));
         assert!(parse_review("ALLOW.").0);
+        assert_eq!(parse_review("DENY"), (false, "the reviewer gave no reason".to_string()));
         assert_eq!(parse_review("**ALLOW** runs tests"), (true, "runs tests".to_string()));
         assert!(!parse_review("Allowing this would delete ~/.ssh, DENY.").0);
         assert!(!parse_review("I think ALLOW").0);

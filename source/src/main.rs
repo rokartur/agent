@@ -833,7 +833,7 @@ fn print_mode(agent: &mut Agent, prompt: &str, json: bool) -> Result<(), String>
             eprintln!("Denied {}: {} (print mode cannot ask; use --auto or --full-access)", request.kind.label(), terminal_safe(&request.detail));
             let _ = reply.send(Decision::Deny);
         }
-        Event::Reviewed { allowed, detail, reason } => eprintln!("auto: {} {}: {}", if allowed { "allowed" } else { "denied" }, terminal_safe(&detail), terminal_safe(&reason)),
+        Event::Reviewed { allowed, reason } => eprintln!("auto {}: {}", if allowed { "allowed" } else { "denied" }, terminal_safe(&reason)),
         Event::TurnEnd { .. } if !json => println!(),
         _ => {}
     };

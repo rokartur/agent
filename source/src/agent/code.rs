@@ -529,7 +529,7 @@ mod tests {
         // This home has no account, so every review fails, and a failed review denies.
         let mut reviewed = Vec::new();
         let script = agent.code("c1", &json!({"code": "await $`touch made`; return 'done';"}), &mut |event| match event {
-            Event::Reviewed { detail, allowed, .. } => reviewed.push(format!("reviewed {detail} {allowed}")),
+            Event::Reviewed { allowed, .. } => reviewed.push(format!("reviewed {allowed}")),
             Event::ToolStart { .. } => reviewed.push("a call started".into()),
             _ => {}
         });
@@ -548,7 +548,7 @@ mod tests {
         let made_after = agent.cwd.join("made").exists();
         std::fs::remove_dir_all(&home).unwrap();
         assert!(script.unwrap_err().starts_with("Denied by the auto-mode reviewer: review failed"));
-        assert_eq!(reviewed, ["reviewed the script false"]);
+        assert_eq!(reviewed, ["reviewed false"]);
         assert!(!made_before);
         assert!(each_call.unwrap().starts_with("Denied by the auto-mode reviewer: review failed"), "a script nobody reviewed keeps the review of each call");
         assert_eq!((unreviewed.unwrap().as_str(), made_after), ("done", true));

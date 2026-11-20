@@ -280,10 +280,8 @@ impl App {
                 self.notify("Waiting", &questions.first().map_or(String::new(), |question| question.question.clone()));
                 self.open_agent_panel(Panel::Ask(ask::AskPanel::new(questions, reply)));
             }
-            Event::Reviewed { allowed, detail, reason } => {
-                let verdict = if allowed { "allowed" } else { "denied" };
-                self.system("auto", format!("{verdict} {detail}: {reason}"));
-            }
+            Event::Reviewed { allowed: true, reason } => self.push(Item::System { source: "auto allowed".into(), text: reason, tone: Tone::Detail }),
+            Event::Reviewed { allowed: false, reason } => self.warn("auto denied", reason),
             Event::Compacted { summary } => {
                 self.context_tokens = 0;
                 let lines = summary.lines().count();
