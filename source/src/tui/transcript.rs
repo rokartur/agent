@@ -71,8 +71,12 @@ pub(super) fn render_item(item: &Item, width: usize, expanded: bool, cwd: &Path)
             }
             lines
         }
-        Item::Tool { name, input, result, progress, .. } => {
+        Item::Tool { name, input, result, progress, calls, .. } => {
             let mut lines = render_tool(name, input, result.as_ref(), width, expanded, cwd);
+            // A script's calls go between its code and its result.
+            let at = lines.iter().position(|line| line.first().is_some_and(|lead| lead.text == "└ ")).unwrap_or(lines.len());
+            let rows = calls.iter().flat_map(|call| render_item(call, width.saturating_sub(2), expanded, cwd)).map(|row| [vec![span("  ", PLAIN)], row].concat());
+            lines.splice(at..at, rows);
             if let Some(progress) = progress.as_ref().filter(|_| result.is_none()) {
                 lines.push(truncate(&vec![span("└ ", MUTED), span(progress, MUTED)], width));
             }
@@ -184,7 +188,6 @@ pub(super) fn render_tool(name: &str, input: &Value, result: Option<&(String, bo
         return vec![truncate(&header, width)];
     }
     let mut lines = vec![header];
-    // A script's calls are rows of their own only while it runs; in a resumed session the script is what says what ran.
     if name == "Code" {
         let rest: Vec<&str> = input["code"].as_str().unwrap_or_default().lines().skip_while(|line| line.trim().is_empty()).skip(1).collect();
         for line in rest.iter().take(TOOL_OUTPUT_LINES) {
@@ -370,6 +373,7 @@ pub(super) fn history_items(messages: &[Value]) -> Vec<Item> {
                     result: None,
                     progress: None,
                     started: None,
+                    calls: Vec::new(),
                 }),
                 (Some("user"), Some("tool_result")) => {
                     let id = block["tool_use_id"].as_str().unwrap_or_default();

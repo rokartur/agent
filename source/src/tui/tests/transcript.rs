@@ -89,6 +89,23 @@ fn a_code_call_is_headed_by_its_first_line_and_shows_the_script_when_expanded() 
 }
 
 #[test]
+fn a_scripts_calls_show_under_its_code_row_between_its_code_and_its_result() {
+    let home = std::env::temp_dir().join(format!("agent-tui-script-{}", std::process::id()));
+    let mut app = test_app(&home);
+    std::fs::remove_dir_all(&home).ok();
+    let start = |id: &str, name: &str, input| Event::ToolStart { id: id.into(), name: name.into(), input };
+    let end = |id: &str, output: &str| Event::ToolEnd { id: id.into(), output: output.into(), is_error: false };
+    app.agent_event(start("c1", "Code", json!({"code": "await $`ls`;\nreturn 1;"})));
+    app.agent_event(start("c1-1", "Bash", json!({"command": "ls"})));
+    app.agent_event(end("c1-1", "a.txt"));
+    app.agent_event(start("c10-1", "Read", json!({"file_path": "x"})));
+    app.agent_event(end("c1", "1"));
+    let rows = |expanded| app.entries[app.header_len..].iter().flat_map(|entry| render_item(&entry.item, 60, expanded, Path::new("/repo"))).map(|row| text(&row)).collect::<Vec<_>>();
+    assert_eq!(rows(false), ["✓ Code await $`ls`; · 1", "  ✓ Bash ls · a.txt", "• Read x"]);
+    assert_eq!(rows(true), ["✓ Code await $`ls`;", "  return 1;", "  ✓ Bash ls", "  └ a.txt", "└ 1", "• Read x"]);
+}
+
+#[test]
 fn answered_question_shows_its_answer_under_a_hook() {
     let input = json!({"questions": [{"question": "Which db?", "header": "DB", "options": []}]});
     let result = ("User has answered your questions: \"Which db?\"=\"sqlite\". You can now continue.".to_string(), false);
@@ -117,6 +134,7 @@ fn a_running_tool_shows_its_progress_under_its_row_until_it_ends() {
         result,
         progress: Some("transcribing 0:10 / 1:00".into()),
         started: None,
+        calls: Vec::new(),
     };
     let rows = |item: &Item| render_item(item, 80, false, Path::new("/repo")).iter().map(text).collect::<Vec<_>>();
     assert_eq!(rows(&tool(None)), ["• Video source: a.mp4", "└ transcribing 0:10 / 1:00"]);
@@ -129,7 +147,7 @@ fn the_collapsed_transcript_shows_each_tool_call_on_its_own_row() {
     let mut app = test_app(&home);
     std::fs::remove_dir_all(&home).ok();
     for path in ["a.rs", "b.rs"] {
-        app.push(Item::Tool { id: path.into(), name: "Read".into(), input: json!({"file_path": path}), result: Some(("ok".into(), false)), progress: None, started: None });
+        app.push(Item::Tool { id: path.into(), name: "Read".into(), input: json!({"file_path": path}), result: Some(("ok".into(), false)), progress: None, started: None, calls: Vec::new() });
     }
     let tail = app.transcript_tail(80, 2).0.iter().map(text).collect::<Vec<_>>();
     assert_eq!(tail, ["✓ Read a.rs · ok", "✓ Read b.rs · ok"]);
