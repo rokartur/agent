@@ -927,7 +927,16 @@ fn rewind_points_are_typed_prompts_not_tool_results() {
     let tool_result = json!({"role": "user", "content": [{"type": "tool_result", "tool_use_id": "1", "content": "x"}, {"type": "text", "text": "steer"}]});
     let image = json!({"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AA"}});
     let with_context = json!({"role": "user", "content": [{"type": "text", "text": "$ ls"}, image, {"type": "text", "text": "fix [Image #1]"}]});
-    let messages = [user("hi"), assistant("b"), tool_result, with_context, assistant("c"), user("Background terminal bt-1 \"x\" exited (exit 0) after 1s.")];
+    let messages = [
+        user("hi"),
+        assistant("b"),
+        tool_result,
+        with_context,
+        assistant("c"),
+        user("Background terminal bt-1 \"x\" exited (exit 0) after 1s."),
+        assistant("d"),
+        user("[edit-hooks] tsc failed:\nerror TS2322"),
+    ];
     let hi = RewindPoint { at: 0, text: "hi".into(), images: Vec::new() };
     let fix = RewindPoint { at: 3, text: "fix [Image #1]".into(), images: vec![image] };
     assert_eq!(rewind_points(&messages), [hi, fix]);
