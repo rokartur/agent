@@ -44,7 +44,7 @@ pub(super) const BUILTIN_COMMANDS: &[(&str, MidTurn, &str)] = &[
     ("skills", MidTurn::Runs, "Enable and disable skills"),
     ("trust", MidTurn::Runs, "Load this project's .agents files and run its edit hooks"),
     ("untrust", MidTurn::Runs, "Stop loading this project's .agents files and running its edit hooks"),
-    ("reload", MidTurn::Waits, "Install a newer release if there is one and restart this session in place: skills, settings, plugins, MCP servers and AGENTS.md load again"),
+    ("reload", MidTurn::Runs, "Install a newer release if there is one and restart this session in place: skills, settings, plugins, MCP servers and AGENTS.md load again"),
     ("mcp", MidTurn::Waits, "Show MCP servers: reconnect, log in, enable and disable"),
     ("usage", MidTurn::Runs, "Show token usage, cost and subscription limits"),
     ("history", MidTurn::Runs, "Search previous prompts"),
@@ -349,6 +349,15 @@ impl App {
         if running > 0 {
             self.push(Item::Error(format!("{running} background tasks still run and a restart would end them. Stop them in /tasks or /workflows, or wait, then /reload.")));
             return;
+        }
+        // The restarted server would not have them, and Msg::Reload refuses then anyway, after the turn was already cut.
+        if !self.queued_commands.is_empty() || !self.steering.lock().unwrap().is_empty() {
+            self.push(Item::Error("Messages wait for this turn and a restart would lose them. Alt+Up takes them back into the editor, or /reload once they ran.".into()));
+            return;
+        }
+        if self.working.is_some() {
+            self.abort.store(true, Ordering::Relaxed);
+            self.system("reload", "Interrupting the turn to restart...");
         }
         self.system("reload", if crate::update::enabled() { "Checking for a newer release..." } else { "Restarting..." });
         self.start(Command::Reload(Box::new(self.settings.clone())));

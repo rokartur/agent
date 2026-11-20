@@ -482,6 +482,22 @@ fn reload_restarts_the_same_session_with_its_model_effort_mode_trust_and_starter
 }
 
 #[test]
+#[cfg(unix)]
+fn reload_mid_turn_interrupts_the_turn_and_runs_next() {
+    let home = std::env::temp_dir().join(format!("agent-tui-reload-mid-turn-{}", std::process::id()));
+    let mut app = test_app(&home);
+    std::fs::remove_dir_all(&home).ok();
+    app.session_path = Some("/tmp/session.jsonl".into());
+    app.working = Some(Instant::now());
+
+    app.submit("/reload".into(), false);
+
+    assert!(app.abort.load(Ordering::Relaxed));
+    assert!(app.queued_commands.is_empty());
+    assert!(matches!(app.deferred_commands.front(), Some(Command::Reload(_))));
+}
+
+#[test]
 fn reload_keeps_the_server_while_a_message_typed_during_the_update_waits() {
     let home = std::env::temp_dir().join(format!("agent-tui-reload-waiting-{}", std::process::id()));
     let mut app = test_app(&home);
