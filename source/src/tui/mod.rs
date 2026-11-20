@@ -1100,6 +1100,13 @@ fn notice_source(text: &str) -> (&str, &str) {
     text.strip_prefix('[').and_then(|rest| rest.split_once("] ")).unwrap_or(("agent", text))
 }
 
+/// The first line of a follow-up without its opening up to the id the source label already shows:
+/// "Background terminal bt-2 \"make\" exited" under "bt-2" reads "\"make\" exited".
+fn follow_up_head<'a>(source: &str, text: &'a str) -> &'a str {
+    let head = text.lines().next().unwrap_or_default();
+    head.split_once(&format!(" {source} ")).map_or(head, |(_, rest)| rest)
+}
+
 // shortcut: notices carry no severity, so the wording decides; give Event::Notice a tone if this misfires.
 fn notice_tone(text: &str) -> Tone {
     let text = text.to_lowercase();

@@ -270,6 +270,12 @@ fn bracketed_notice_prefix_becomes_the_source() {
 }
 
 #[test]
+fn a_follow_up_names_its_source_once() {
+    assert_eq!(follow_up_head("bt-2", "Background terminal bt-2 \"make\" exited (exit 0) after 19s.\n\nstdout:\nok"), "\"make\" exited (exit 0) after 19s.");
+    assert_eq!(follow_up_head("peer:x", "Message from another agent session x:\n\nhi"), "Message from another agent session x:");
+}
+
+#[test]
 fn error_notices_get_the_error_tone() {
     assert!(matches!(notice_tone(r#"API stream error: {"type":"overloaded_error"}. Retrying in 2s."#), Tone::Error));
     assert!(matches!(notice_tone("headroom sync failed: x"), Tone::Error));

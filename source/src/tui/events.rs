@@ -241,7 +241,7 @@ impl App {
                 None => self.pending_page = Some(url),
             },
             // The output tail went to the model; /tasks shows it in full.
-            Event::FollowUp { source, text } => self.system(&source, text.split_once('\n').map_or(text.as_str(), |(head, _)| head)),
+            Event::FollowUp { source, text } => self.system(&source, follow_up_head(&source, &text)),
             Event::TurnEnd { usage, context_tokens, .. } => {
                 self.context_tokens = context_tokens;
                 self.last_usage = usage;
