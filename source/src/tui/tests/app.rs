@@ -482,6 +482,7 @@ fn reload_restarts_the_same_session_with_its_model_effort_mode_trust_and_starter
 }
 
 #[test]
+#[cfg(unix)]
 fn reload_mid_turn_interrupts_the_turn_and_runs_next() {
     let home = std::env::temp_dir().join(format!("agent-tui-reload-mid-turn-{}", std::process::id()));
     let mut app = test_app(&home);
