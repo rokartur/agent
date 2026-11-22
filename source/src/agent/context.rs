@@ -26,8 +26,15 @@ pub fn split(system: &str, tools: &Value, messages: &[Value], total: u64) -> Per
     parts
 }
 
-const INSTRUCTION_TAGS: [(&str, &str); 6] =
-    [("addendum", "APPEND_SYSTEM.md"), ("skills", "Skills list"), ("ponytail", "Ponytail mode"), ("caveman", "Caveman mode"), ("cwd", "Working directory"), ("computer", "Remote device")];
+const INSTRUCTION_TAGS: [(&str, &str); 7] = [
+    ("addendum", "APPEND_SYSTEM.md"),
+    ("skills", "Skills list"),
+    ("ponytail", "Ponytail mode"),
+    ("caveman", "Caveman mode"),
+    ("ui_blocks", "UI blocks"),
+    ("cwd", "Working directory"),
+    ("computer", "Remote device"),
+];
 
 /// What the system prompt is made of, as (label, tokens) with `tokens` split by bytes: each AGENTS.md by path,
 /// each tagged section from `prompt` and `modes`, and the untagged rest (SYSTEM.md or the default, output style, plan mode).

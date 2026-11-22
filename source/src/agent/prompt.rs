@@ -10,6 +10,16 @@ const DEFAULT_PREAMBLE: &str = "You are an expert coding assistant. You help use
 - Be concise in your responses
 - Show file paths clearly when working with files
 </rules>";
+/// The shape `tui::ui_block` draws.
+pub const UI_BLOCKS: &str = r#"<ui_blocks>
+The terminal draws a ```ui fenced block in your reply as components instead of code. Use one where a drawing reads faster than prose: a series to compare, key numbers, progress. It holds one JSON node, or an array of nodes stacked:
+- {"col": [nodes]} stacks nodes; {"row": [nodes]} puts them side by side in equal columns
+- {"text": "Markdown"}
+- {"stat": "42,914", "label": "Downloads", "delta": "+18%"}, the delta red when it starts with a minus
+- {"progress": 0.72, "label": "Migrated"}, a fraction from 0 to 1
+- {"chart": [["Day", "Person", "Agent"], ["Nov 3", 90, 147], ["Nov 4", 1541, 1263]], "form": "columns"}: the first row names the label column and each series, series stack; "form" is "columns" (default, for a sequence such as days) or "bars" (for categories with long names)
+Every node takes an optional "title", drawn bold above it.
+</ui_blocks>"#;
 const CONTEXT_FILES: [&str; 3] = ["AGENTS.override.md", "AGENTS.md", "AGENTS.MD"];
 
 /// Preamble, addendum, project context, skills, cwd. ponytail and caveman come from `modes`.

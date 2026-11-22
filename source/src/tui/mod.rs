@@ -24,6 +24,7 @@ mod session_panels;
 mod settings_panels;
 mod skills;
 mod transcript;
+mod ui_block;
 mod view;
 mod voice;
 mod wire;

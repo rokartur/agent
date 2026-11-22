@@ -906,6 +906,10 @@ impl Agent {
     /// The system prompt and tool schemas the next request sends, with modes, plugin tools and plan mode applied.
     fn system_and_tools(&self) -> (String, Value) {
         let mut system = if self.modes.is_empty() { self.system.clone() } else { format!("{}\n\n{}", self.system, self.modes) };
+        // Only the TUI draws these blocks; elsewhere they would show as raw JSON.
+        if self.interactive {
+            system = format!("{system}\n\n{}", prompt::UI_BLOCKS);
+        }
         let mut tools = self.tools.clone();
         let list = tools.as_array_mut().expect("tool schemas are an array");
         list.extend(self.plugins.tools());
