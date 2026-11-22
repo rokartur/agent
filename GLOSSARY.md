@@ -118,6 +118,10 @@ _Avoid_: Sibling, neighbour
 An HTML page the model writes with the `Page` tool: a document or a choice between UI mocks, saved in the session's folder (with `--no-session`, in the run's temp folder, removed on exit) and served by its session server to the user's browser, which can answer back.
 _Avoid_: Generative UI, artifact, canvas
 
+**UI block**:
+A ```ui fenced block of JSON in a reply that the terminal draws in its place: text, stats, progress bars and charts, stacked or side by side.
+_Avoid_: Widget, generative UI, card
+
 ## Remote sessions
 
 **Session server**:

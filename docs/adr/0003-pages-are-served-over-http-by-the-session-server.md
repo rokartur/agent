@@ -12,7 +12,7 @@ ADR 0002 left out browser clients. This is a narrow exception: the browser reads
 
 ## Considered options
 
-- Native TUI widgets for charts, forms and cards: no browser, but a widget library on our own renderer, and still poor mocks.
+- Native TUI widgets for charts, forms and cards: no browser, but a widget library on our own renderer, and still poor mocks. ADR 0005 later added UI blocks for a glance inside a reply; mocks and documents stay pages.
 - A component schema in JSON instead of free HTML: a consistent look, but a schema to maintain that is too narrow for mocks. The Arc (uiarc.dev) dark tokens in `document.css`, shared by the stylesheet and the charts, give the consistent look instead.
 - Tunnel the pages of a remote session through the session stream to a proxy on the client: no extra port, but an HTTP proxy in the client, and WireGuard already encrypts the direct path.
 - Upload to a hosted service such as Postplan: reachable anywhere, but session data would leave the user's computers.

@@ -54,6 +54,7 @@ Run a session on another of your computers over Tailscale: its files, its shell,
 - **It reads PDFs**: `Read` returns a PDF's text, 20 pages at a time. Needs `pdftotext` from poppler.
 - **It draws**: with a ChatGPT or Antigravity login, any session can ask for an image, a logo or an edit of a screenshot. The `ImageGenerate` tool writes it with `gpt-image-2` on the ChatGPT login, else an Antigravity image model, and shows the model the result. `image_model` in `~/.agents/settings.json` picks another one.
 - **It shows pages**: when a report, chart, form or a choice between UI mocks reads better in a browser, the `Page` tool opens it there. When the call waits, a form or a mock pick answers back to the agent. Pages are served only to you and cannot load anything from the network.
+- **It draws in the terminal**: for a quick look, a reply can hold a `ui` block of JSON that the terminal draws in place: stats, progress bars, stacked column and bar charts and Markdown, side by side or stacked.
 - **You choose how much it does alone**: ask before every change, let a reviewer model approve, or `--yolo`.
 - **Sessions outlive the terminal**: close it mid-turn and the turn finishes anyway. `agent attach` picks the session up again in any terminal, and two terminals on one session see the same screen.
 

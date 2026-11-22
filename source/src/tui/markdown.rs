@@ -18,7 +18,8 @@ pub fn render(text: &str, width: usize) -> Vec<Line> {
     let mut lists: Vec<(Option<u64>, usize)> = Vec::new();
     let mut item_prefix: Option<Span> = None;
     let mut quote_depth = 0;
-    let mut in_code = false;
+    // The open code block's language and text, drawn whole at its end so a `ui` block can parse.
+    let mut code: Option<(String, String)> = None;
     let mut table: Vec<Vec<Line>> = Vec::new();
     // The open link's URL and where its text starts in `spans`.
     let mut link: Option<(String, usize)> = None;
@@ -116,22 +117,17 @@ pub fn render(text: &str, width: usize) -> Vec<Line> {
                     CodeBlockKind::Fenced(info) => info.split_whitespace().next().unwrap_or_default(),
                     CodeBlockKind::Indented => "",
                 };
-                out.push(code_rule(&base(list_indent(&lists), quote_depth), width, language));
-                in_code = true;
+                code = Some((language.to_string(), String::new()));
             }
             Event::End(TagEnd::CodeBlock) => {
-                out.push(code_rule(&base(list_indent(&lists), quote_depth), width, ""));
-                in_code = false;
+                let (language, source) = code.take().expect("a code block ends after it starts");
+                out.extend(code_block(&language, &source, width, &base(list_indent(&lists), quote_depth)));
             }
             // Inside a list item or quote pulldown-cmark sends one Text per line.
-            Event::Text(text) if in_code => {
-                let indent = base(list_indent(&lists), quote_depth);
-                for line in text.trim_end_matches('\n').split('\n') {
-                    let line = line.replace('\t', "    ");
-                    out.extend(wrap(&[span(line, CODE)], width, &indent));
-                }
-            }
-            Event::Text(text) => spans.push(span(text.to_string(), style)),
+            Event::Text(text) => match code.as_mut() {
+                Some((_, source)) => source.push_str(&text),
+                None => spans.push(span(text.to_string(), style)),
+            },
             Event::Code(text) => spans.push(span(text.to_string(), INLINE_CODE)),
             Event::Start(Tag::Strong) => styles.push(Style { bold: true, ..style }),
             Event::Start(Tag::Emphasis) => styles.push(Style { italic: true, ..style }),
@@ -181,6 +177,29 @@ pub fn render(text: &str, width: usize) -> Vec<Line> {
 /// Where the innermost list's markers start: under the text of the item that holds it.
 fn list_indent(lists: &[(Option<u64>, usize)]) -> usize {
     lists.iter().rev().skip(1).map(|(_, marker_width)| marker_width).sum()
+}
+
+/// A `ui` block whose JSON parses, drawn by `ui_block`; any other block is its code between two rules, and a `ui`
+/// block that fails to draw adds the reason under it. Mid-stream the JSON is cut off, so it shows as code until it closes.
+fn code_block(language: &str, source: &str, width: usize, indent: &Line) -> Vec<Line> {
+    let mut problem = None;
+    if language == "ui"
+        && let Ok(node) = serde_json::from_str(source)
+    {
+        match super::ui_block::render(&node, width.saturating_sub(line_width(indent))) {
+            Ok(lines) => return lines.into_iter().map(|line| [indent.clone(), line].concat()).collect(),
+            Err(error) => problem = Some(error),
+        }
+    }
+    let mut out = vec![code_rule(indent, width, language)];
+    for line in source.trim_end_matches('\n').lines() {
+        out.extend(wrap(&[span(line.replace('\t', "    "), CODE)], width, indent));
+    }
+    out.push(code_rule(indent, width, ""));
+    if let Some(problem) = problem {
+        out.extend(wrap(&[span(format!("ui block: {problem}"), super::WARN)], width, indent));
+    }
+    out
 }
 
 /// A rule across the code block, with the fence's language on the opening one: `── rust ─────`.
