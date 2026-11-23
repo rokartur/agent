@@ -17,6 +17,8 @@ pub struct Style {
     pub italic: bool,
     pub underline: bool,
     pub strikethrough: bool,
+    /// Swaps fg and bg, so a block glyph can leave the terminal's own background where it draws.
+    pub reverse: bool,
     pub selected: bool,
 }
 
@@ -63,11 +65,14 @@ impl Style {
         if self.strikethrough {
             codes.push("9".into());
         }
+        if self.reverse && !self.selected {
+            codes.push("7".into());
+        }
         format!("\x1b[{}m", codes.join(";"))
     }
 }
 
-pub const PLAIN: Style = Style { fg: Color::Default, bg: None, bold: false, italic: false, underline: false, strikethrough: false, selected: false };
+pub const PLAIN: Style = Style { fg: Color::Default, bg: None, bold: false, italic: false, underline: false, strikethrough: false, reverse: false, selected: false };
 pub const BRIGHT: Style = Style::fg(255);
 pub const MUTED: Style = Style::fg(245);
 pub const DIM: Style = Style::fg(241);

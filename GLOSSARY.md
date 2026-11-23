@@ -119,7 +119,7 @@ An HTML page the model writes with the `Page` tool: a document or a choice betwe
 _Avoid_: Generative UI, artifact, canvas
 
 **UI block**:
-A ```ui fenced block of JSON in a reply that the terminal draws in its place: text, stats, progress bars and charts, stacked or side by side.
+A ```ui fenced block of JSON in a reply that the terminal draws in its place: text, stats, progress bars, sparklines, timelines and charts, stacked or side by side.
 _Avoid_: Widget, generative UI, card
 
 ## Remote sessions

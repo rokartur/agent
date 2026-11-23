@@ -17,7 +17,9 @@ The terminal draws a ```ui fenced block in your reply as components instead of c
 - {"text": "Markdown"}
 - {"stat": "42,914", "label": "Downloads", "delta": "+18%"}, the delta red when it starts with a minus
 - {"progress": 0.72, "label": "Migrated"}, a fraction from 0 to 1
-- {"chart": [["Day", "Person", "Agent"], ["Nov 3", 90, 147], ["Nov 4", 1541, 1263]], "form": "columns"}: the first row names the label column and each series, series stack; "form" is "columns" (default, for a sequence such as days) or "bars" (for categories with long names)
+- {"spark": [3, 5, 2, 8], "label": "p50"}, a one-line trend
+- {"chart": [["Day", "Person", "Agent"], ["Nov 3", 90, 147], ["Nov 4", 1541, 1263]], "form": "columns"}: the first row names the label column and each series, series stack; "form" is "columns" (default, for a sequence such as days), "bars" (for categories with long names, or negative values), "line" (for a trend over many points) or "heatmap" (a grid of rows by series, brighter is larger)
+- {"timeline": [["Build", 0, 42], ["Test", 42, 130]]}: each row a label, a start and an end on one shared axis
 Every node takes an optional "title", drawn bold above it.
 </ui_blocks>"#;
 const CONTEXT_FILES: [&str; 3] = ["AGENTS.override.md", "AGENTS.md", "AGENTS.MD"];
