@@ -940,7 +940,8 @@ impl Agent {
     }
 
     fn cwd_section(&self) -> String {
-        prompt::cwd_section(&self.cwd, &self.extra_dirs, self.user_device.as_deref())
+        let rex = prompt::rex_section(|name| std::env::var(name).ok());
+        format!("{}{rex}", prompt::cwd_section(&self.cwd, &self.extra_dirs, self.user_device.as_deref()))
     }
 
     /// The last request's context tokens split across `context::PARTS`, and the system prompt's part across its sources.
