@@ -4,6 +4,7 @@ use serde_json::{Value, json};
 // and blind `sleep N` burned 41h of wall time.
 const MIN_BLOCKED_SLEEP_SECS: u64 = 15;
 const HEAD_DEFAULT_LINES: u64 = 10;
+const SCRATCH_DIRS: [&str; 4] = ["/tmp", "/private/tmp", "/var/folders", "/private/var/folders"];
 
 /// Why bash should not run `command` (a blind sleep, a merge that ignores CI or an in-place edit of one file), or None when it may run.
 /// File reads chained with other commands run as written: refusing them cost every benchmark run 1-3 turns,
@@ -16,18 +17,23 @@ pub fn bash(command: &str) -> Option<String> {
         return Some("gh pr merge would run whatever gh pr checks returned. Gate it on the exit status: gh pr checks N --watch --fail-fast && gh pr merge N ...".into());
     }
     if in_place_edit(command) {
-        return Some("Edit one file with Edit (`edits` for several changes), ReplaceLines or InsertLines: they run the edit checks and show new language server errors. sed -i and perl -i stay for many files at once (a glob, xargs, find -exec) or on another machine.".into());
+        return Some("Edit one file with Edit (`edits` for several changes), ReplaceLines or InsertLines: they run the edit checks and show new language server errors. sed -i and perl -i stay for many files at once (a glob, xargs, find -exec), a scratch file under /tmp or another machine.".into());
     }
     None
 }
 
 /// `sed -i` or `perl -i` on one named file. A glob, a variable, xargs, find -exec, ssh or offload passes:
-/// Edit cannot reach those files in one call.
+/// Edit cannot reach those files in one call. A scratch file passes too: no repo's edit checks cover it.
 fn in_place_edit(command: &str) -> bool {
     if command.contains("ssh ") || command.contains("offload ") {
         return false;
     }
-    shell_segments(command).iter().any(|words| {
+    let segments = shell_segments(command);
+    let dir = match segments.first().map(Vec::as_slice) {
+        Some([cd, dir]) if cd == "cd" => dir.as_str(),
+        _ => "",
+    };
+    segments.iter().any(|words| {
         let start = words.iter().position(|word| !word.contains('=') && !matches!(word.as_str(), "do" | "then" | "else")).unwrap_or(words.len());
         let [tool, args @ ..] = &words[start..] else { return false };
         let in_place = match tool.as_str() {
@@ -37,8 +43,15 @@ fn in_place_edit(command: &str) -> bool {
             _ => false,
         };
         let file = args.iter().rev().find(|arg| !arg.contains(['>', '<']));
-        in_place && file.is_some_and(|file| !file.contains(['*', '?', '[', '{', '$', '`']))
+        in_place && file.is_some_and(|file| !file.contains(['*', '?', '[', '{', '$', '`']) && !is_scratch(file, dir))
     })
+}
+
+/// A file under a system temp directory, named outright or relative to the command's leading `cd DIR`.
+fn is_scratch(file: &str, dir: &str) -> bool {
+    let file = file.trim_matches(['\'', '"']);
+    let path = if file.starts_with('/') { file } else { dir };
+    !file.contains("..") && SCRATCH_DIRS.iter().any(|scratch| path == *scratch || path.strip_prefix(scratch).is_some_and(|rest| rest.starts_with('/')))
 }
 
 /// The switch letters a `-xyz` word starts with, up to the first one `is_switch` rejects; empty for `--long` and non-flags.
@@ -242,6 +255,8 @@ mod tests {
             ("sed -Ei.bak 's/a b/c/' 'my notes.md'", "Edit one file"),
             ("LC_ALL=C sed --in-place 's/a/b/' a.md 2>/dev/null", "Edit one file"),
             ("if true; then sed -i '' \"s/a/\\\"b/\" a.md; fi", "Edit one file"),
+            ("cd /tmp/x && sed -i '' 's/a/b/' ../../repo/a.md", "Edit one file"),
+            ("cd /tmpfiles && sed -i '' 's/a/b/' a.md", "Edit one file"),
         ];
         for (command, advice) in blocked {
             let reason = bash(command).unwrap_or_else(|| panic!("{command} should be blocked"));
@@ -279,6 +294,10 @@ mod tests {
             "ssh studio 'cd /tmp/x && sed -i \"\" \"s/a/b/\" src/a.rs'",
             "offload 'sed -i \"\" \"\\$d\" src/a.rs'",
             "perl -MList::Util -ne 'print' a.txt",
+            "sed -i '' 's/a/b/' /tmp/verify-phone.js; rm -f x.js",
+            "cd /tmp/kit-test && perl -pi -e 's|a|b|' cases.txt && bun run.ts",
+            "cd /tmp && sed -i '' 's/sleep 20/sleep 12/' cases.txt",
+            "sed -i '' 's/a/b/' /var/folders/v9/x/T/agent-1/diff-0.log",
             "sed -n 's/a/b/p' a.md",
         ];
         for command in allowed {
