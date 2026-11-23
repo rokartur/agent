@@ -87,8 +87,9 @@ impl App {
         bottom.extend(todos);
         let shells = self.terminals.lock().unwrap().running();
         let agents = footer_agents(&self.subagents.lock().unwrap());
+        let sessions = self.started_sessions.len();
         let workflows = footer_workflows(&self.workflows);
-        let pills = usize::from(shells > 0) + usize::from(agents > 0);
+        let pills = self.pill_tabs().len();
         if pills == 0 && workflows.is_empty() && matches!(self.panel, Some(Panel::Agents { .. })) {
             self.panel = None;
         }
@@ -156,7 +157,7 @@ impl App {
             _ => None,
         };
         let pill_focus = focus.filter(|row| (1..=pills).contains(row)).map(|row| row - 1);
-        bottom.extend(background_rows(shells, agents, self.viewed.as_ref().map(|view| view.run.label.as_str()), pill_focus, width));
+        bottom.extend(background_rows(shells, agents, sessions, self.viewed.as_ref().map(|view| view.run.label.as_str()), pill_focus, width));
         let workflow_focus = focus.and_then(|row| row.checked_sub(1 + pills));
         bottom.extend(workflow_rows(&workflows, workflow_focus, width));
 
@@ -462,10 +463,11 @@ pub(super) fn step_row(step: &workflow::Step) -> (String, String) {
     (step.label.clone(), right)
 }
 
-/// /tasks, as in Claude Code, with shells and local agents on separate tabs, each row with its status.
-pub(super) fn tasks_panel(terminals: &[Arc<Terminal>], runs: &[Arc<Run>], catalog: &[Model], agents: bool, selected: usize, columns: usize) -> Vec<Line> {
+/// /tasks, as in Claude Code, with shells, local agents and started sessions on separate tabs, each row with its status.
+pub(super) fn tasks_panel(terminals: &[Arc<Terminal>], runs: &[Arc<Run>], sessions: &[Peer], catalog: &[Model], shown_tab: TaskTab, selected: usize, columns: usize) -> Vec<Line> {
     let active_shells = terminals.iter().filter(|t| t.status() == TerminalStatus::Running).count();
     let active_agents = runs.iter().filter(|run| run.is_running()).count();
+    let working_sessions = sessions.iter().filter(|peer| peer.busy).count();
     let mut counts = Vec::new();
     if active_shells > 0 {
         counts.push(format!("{active_shells} active {}", if active_shells == 1 { "shell" } else { "shells" }));
@@ -473,10 +475,29 @@ pub(super) fn tasks_panel(terminals: &[Arc<Terminal>], runs: &[Arc<Run>], catalo
     if active_agents > 0 {
         counts.push(format!("{active_agents} active {}", if active_agents == 1 { "agent" } else { "agents" }));
     }
+    if working_sessions > 0 {
+        counts.push(format!("{working_sessions} working {}", if working_sessions == 1 { "session" } else { "sessions" }));
+    }
     let summary = if counts.is_empty() { "nothing running".to_string() } else { counts.join(" · ") };
-    let tab = |label: String, active: bool| if active { span(format!(" {label} "), ACTIVE_TAB) } else { span(label, MUTED) };
-    let header = vec![span("Background", SYSTEM.bold()), span("  ", PLAIN), tab(format!("Shells {}", terminals.len()), !agents), span("  ", PLAIN), tab(format!("Agents {}", runs.len()), agents)];
-    let names: Vec<&str> = if agents { runs.iter().map(|run| run.label.as_str()).collect() } else { terminals.iter().map(|t| t.title.as_str()).collect() };
+    let tab = |label: String, this: TaskTab| if this == shown_tab { span(format!(" {label} "), ACTIVE_TAB) } else { span(label, MUTED) };
+    let mut header = vec![
+        span("Background", SYSTEM.bold()),
+        span("  ", PLAIN),
+        tab(format!("Shells {}", terminals.len()), TaskTab::Shells),
+        span("  ", PLAIN),
+        tab(format!("Agents {}", runs.len()), TaskTab::Agents),
+    ];
+    if !sessions.is_empty() || shown_tab == TaskTab::Sessions {
+        header.extend([span("  ", PLAIN), tab(format!("Sessions {}", sessions.len()), TaskTab::Sessions)]);
+    }
+    // Cards are files any process of this user writes, so their text could carry escape codes.
+    let printable = |text: &str| -> String { text.chars().filter(|c| !c.is_control()).collect() };
+    let session_names: Vec<String> = sessions.iter().map(|peer| printable(if peer.title.is_empty() { &peer.session } else { &peer.title })).collect();
+    let names: Vec<&str> = match shown_tab {
+        TaskTab::Shells => terminals.iter().map(|t| t.title.as_str()).collect(),
+        TaskTab::Agents => runs.iter().map(|run| run.label.as_str()).collect(),
+        TaskTab::Sessions => session_names.iter().map(String::as_str).collect(),
+    };
     let name_width = names.iter().map(|name| width(name)).max().unwrap_or(0).min(TASK_NAME_WIDTH);
     let name = |text: &str, index: usize, running: bool| {
         let style = if index == selected {
@@ -491,33 +512,50 @@ pub(super) fn tasks_panel(terminals: &[Arc<Terminal>], runs: &[Arc<Run>], catalo
         [cell, vec![span(" ".repeat(gap), PLAIN)]].concat()
     };
     let mut rows: Vec<Line> = Vec::new();
-    if !agents {
-        for (index, terminal) in terminals.iter().enumerate() {
-            let status = terminal.status();
-            let mut row = vec![status_mark(status.as_str())];
-            row.extend(name(&terminal.title, index, status == TerminalStatus::Running));
-            row.push(span(status.as_str(), DIM));
-            rows.push(row);
+    match shown_tab {
+        TaskTab::Shells => {
+            for (index, terminal) in terminals.iter().enumerate() {
+                let status = terminal.status();
+                let mut row = vec![status_mark(status.as_str())];
+                row.extend(name(&terminal.title, index, status == TerminalStatus::Running));
+                row.push(span(status.as_str(), DIM));
+                rows.push(row);
+            }
         }
-    } else {
-        for (index, run) in runs.iter().enumerate() {
-            let state = run.state.lock().unwrap();
-            let (status, mark) = match state.result {
-                None if state.last_tool.is_empty() => ("running".to_string(), status_mark("running")),
-                None => (format!("running {}", state.last_tool), status_mark("running")),
-                Some(Ok(_)) => ("done".to_string(), status_mark("done")),
-                Some(Err(_)) => ("failed".to_string(), status_mark("failed")),
-            };
-            let mut row = vec![mark];
-            row.extend(name(&run.label, index, state.result.is_none()));
-            let model = if run.launch.script { String::new() } else { format!(" · {} {}", model_name(catalog, &run.model), run.thinking) };
-            row.push(span(format!("{status} · {} tools{model}", state.tool_calls), DIM));
-            rows.push(row);
+        TaskTab::Sessions => {
+            for (index, peer) in sessions.iter().enumerate() {
+                let status = if peer.busy { "working" } else { "idle" };
+                let mut row = vec![status_mark(if peer.busy { "running" } else { status })];
+                row.extend(name(&session_names[index], index, peer.busy));
+                row.push(span(format!("{status} · {}", printable(&peer.cwd)), DIM));
+                rows.push(row);
+            }
+        }
+        TaskTab::Agents => {
+            for (index, run) in runs.iter().enumerate() {
+                let state = run.state.lock().unwrap();
+                let (status, mark) = match state.result {
+                    None if state.last_tool.is_empty() => ("running".to_string(), status_mark("running")),
+                    None => (format!("running {}", state.last_tool), status_mark("running")),
+                    Some(Ok(_)) => ("done".to_string(), status_mark("done")),
+                    Some(Err(_)) => ("failed".to_string(), status_mark("failed")),
+                };
+                let mut row = vec![mark];
+                row.extend(name(&run.label, index, state.result.is_none()));
+                let model = if run.launch.script { String::new() } else { format!(" · {} {}", model_name(catalog, &run.model), run.thinking) };
+                row.push(span(format!("{status} · {} tools{model}", state.tool_calls), DIM));
+                rows.push(row);
+            }
         }
     }
     let mut lines = vec![Vec::new(), header, vec![span(summary, MUTED)], Vec::new()];
     if rows.is_empty() {
-        lines.push(vec![span(if agents { "  No agents yet." } else { "  No shells yet." }, MUTED)]);
+        let empty = match shown_tab {
+            TaskTab::Shells => "  No shells yet.",
+            TaskTab::Agents => "  No agents yet.",
+            TaskTab::Sessions => "  No started sessions run.",
+        };
+        lines.push(vec![span(empty, MUTED)]);
     }
     let shown = PANEL_ROWS + 3;
     let first = (selected + 1).saturating_sub(shown);

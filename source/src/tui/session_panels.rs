@@ -249,55 +249,88 @@ impl App {
     }
 
     pub(super) fn agents_key(&mut self, code: KeyCode) {
+        let tabs = self.pill_tabs();
         let Some(Panel::Agents { row }) = self.panel.as_mut() else { return };
         let workflows = footer_workflows(&self.workflows);
-        let agents = footer_agents(&self.subagents.lock().unwrap());
-        let pills = usize::from(self.terminals.lock().unwrap().running() > 0) + usize::from(agents > 0);
+        let pills = tabs.len();
         let last = pills + workflows.len();
         let selected = (*row).min(last);
         let workflow = selected.checked_sub(1 + pills).map(|offset| workflows[offset].clone());
         match code {
             KeyCode::Up if selected > 1 => *row = selected - 1,
             KeyCode::Down => *row = (selected + 1).min(last),
-            // The shells and agents pills share one line, so ←/→ walk between them too.
-            KeyCode::Left if selected == 2 && pills == 2 => *row = 1,
-            KeyCode::Right if selected == 1 && pills == 2 => *row = 2,
+            // The pills share one line, so ←/→ walk between them too.
+            KeyCode::Left if (2..=pills).contains(&selected) => *row = selected - 1,
+            KeyCode::Right if (1..pills).contains(&selected) => *row = selected + 1,
             KeyCode::Char('x') => {
                 if let Some(workflow) = workflow {
                     workflow.stop();
                 }
             }
-            KeyCode::Enter if (1..=pills).contains(&selected) => self.open_tasks(selected == pills && agents > 0),
+            KeyCode::Enter if (1..=pills).contains(&selected) => self.open_tasks(tabs[selected - 1]),
             KeyCode::Enter => self.panel = workflow.map(|workflow| Panel::WorkflowRun { id: workflow.id.clone(), phase: None, index: 0 }),
             KeyCode::Up | KeyCode::Esc => self.panel = None,
             _ => {}
         }
     }
 
+    /// The /tasks tabs whose pill shows under the footer, in pill order.
+    pub(super) fn pill_tabs(&self) -> Vec<TaskTab> {
+        let shown = [
+            (self.terminals.lock().unwrap().running() > 0, TaskTab::Shells),
+            (footer_agents(&self.subagents.lock().unwrap()) > 0, TaskTab::Agents),
+            (!self.started_sessions.is_empty(), TaskTab::Sessions),
+        ];
+        shown.into_iter().filter(|(shown, _)| *shown).map(|(_, tab)| tab).collect()
+    }
+
     /// Sorts only on open, so a task that finishes does not move under the cursor while the panel is up.
-    pub(super) fn open_tasks(&mut self, agents: bool) {
+    pub(super) fn open_tasks(&mut self, tab: TaskTab) {
         self.terminals.lock().unwrap().running_first();
         self.subagents.lock().unwrap().running_first();
-        self.panel = Some(Panel::Tasks { agents, index: 0 });
+        self.panel = Some(Panel::Tasks { tab, index: 0 });
     }
 
     pub(super) fn tasks_key(&mut self, code: KeyCode) {
-        let Some(Panel::Tasks { agents, index }) = self.panel.as_mut() else { return };
+        let Some(Panel::Tasks { tab, index }) = self.panel.as_mut() else { return };
         let terminals = self.terminals.lock().unwrap().list.clone();
         let runs = self.subagents.lock().unwrap().list.clone();
-        let len = if *agents { runs.len() } else { terminals.len() };
+        let tabs: &[TaskTab] = if self.started_sessions.is_empty() && *tab != TaskTab::Sessions { &[TaskTab::Shells, TaskTab::Agents] } else { &[TaskTab::Shells, TaskTab::Agents, TaskTab::Sessions] };
+        let len = match tab {
+            TaskTab::Shells => terminals.len(),
+            TaskTab::Agents => runs.len(),
+            TaskTab::Sessions => self.started_sessions.len(),
+        };
+        let at = tabs.iter().position(|shown| shown == tab).expect("the open tab is listed");
         match code {
             KeyCode::Up => *index = index.saturating_sub(1),
             KeyCode::Down => *index = (*index + 1).min(len.saturating_sub(1)),
-            KeyCode::Tab | KeyCode::BackTab | KeyCode::Left | KeyCode::Right => (*agents, *index) = (!*agents, 0),
+            KeyCode::Tab | KeyCode::Right => (*tab, *index) = (tabs[(at + 1) % tabs.len()], 0),
+            KeyCode::BackTab | KeyCode::Left => (*tab, *index) = (tabs[(at + tabs.len() - 1) % tabs.len()], 0),
             _ if *index >= len => {}
-            KeyCode::Char('x') if *agents => runs[*index].stop(),
-            KeyCode::Char('x') => _ = terminals[*index].stop(),
-            KeyCode::Enter if *agents => {
-                let run = runs[*index].clone();
-                self.view_run(Some(run));
-            }
-            KeyCode::Enter => self.panel = Some(Panel::Terminal { index: *index, scroll: 0, loaded: None, lines: Vec::new() }),
+            KeyCode::Char('x') => match tab {
+                TaskTab::Shells => _ = terminals[*index].stop(),
+                TaskTab::Agents => runs[*index].stop(),
+                TaskTab::Sessions => {
+                    let peer = self.started_sessions.remove(*index);
+                    *index = (*index).min(self.started_sessions.len().saturating_sub(1));
+                    if let Err(e) = crate::serve::stop(&self.home, peer.pid) {
+                        self.push(Item::Error(format!("Cannot stop session {}: {e}", peer.session)));
+                    }
+                }
+            },
+            KeyCode::Enter => match tab {
+                TaskTab::Shells => self.panel = Some(Panel::Terminal { index: *index, scroll: 0, loaded: None, lines: Vec::new() }),
+                TaskTab::Agents => {
+                    let run = runs[*index].clone();
+                    self.view_run(Some(run));
+                }
+                TaskTab::Sessions => {
+                    let pid = self.started_sessions[*index].pid;
+                    self.panel = None;
+                    self.release_typing_client(|client| client.attach(pid));
+                }
+            },
             _ => {}
         }
     }

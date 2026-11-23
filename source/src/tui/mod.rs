@@ -461,6 +461,10 @@ struct App {
     /// Banner entries kept by /new.
     header_len: usize,
     session_id: String,
+    /// The id this process began with, which the sessions it started report to (see `Agent::first_session`).
+    first_session: String,
+    /// The running sessions on this computer that this one started, read again each second.
+    started_sessions: Vec<Peer>,
     session_path: Option<String>,
     sessions_dir: PathBuf,
     panel: Option<Panel>,
@@ -619,6 +623,7 @@ pub(crate) fn leave(out: &mut Stdout) {
 fn event_loop(app: &mut App, inbox: &Receiver<Msg>) -> Result<(), String> {
     let mut progress_sent: Option<Instant> = None;
     let mut unattended_since: Option<Instant> = None;
+    let mut sessions_read: Option<Instant> = None;
     loop {
         let busy = app.working.is_some() && app.settings.progress_bar;
         if let Some(show) = progress_due(busy, progress_sent, Instant::now()) {
@@ -627,6 +632,10 @@ fn event_loop(app: &mut App, inbox: &Receiver<Msg>) -> Result<(), String> {
         }
         app.report_to_cmux();
         app.report_to_rex();
+        if !app.clients.is_empty() && sessions_read.is_none_or(|read| read.elapsed() >= Duration::from_secs(1)) {
+            sessions_read = Some(Instant::now());
+            app.started_sessions = crate::serve::live(&app.home).into_iter().filter(|peer| peer.started_by == app.first_session).collect();
+        }
         app.draw();
         let mut wait = if app.edge_drag.is_some() {
             EDGE_SCROLL
@@ -761,6 +770,8 @@ impl App {
             menu_index: 0,
             header_len: 0,
             session_id: agent.session.id.clone(),
+            first_session: agent.first_session.clone(),
+            started_sessions: Vec::new(),
             session_path: agent.session.display_path(),
             sessions_dir: agent.sessions_dir.clone(),
             panel: None,
