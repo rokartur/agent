@@ -107,6 +107,7 @@ fn tasks_list_shells_and_agents_on_separate_tabs() {
     assert_eq!(started[1..3], ["Background  Shells 0  Agents 3   Sessions 2 ", "2 active agents · 1 working session"]);
     assert_eq!(started[4], "❯ ● review #320   working · /repo");
     assert_eq!(started[5], "  ■ def456        idle · /repo", "an untitled session shows its id");
+    assert_eq!(started.last().unwrap(), "↑/↓ to select · Tab to switch · Enter to view, /back there returns · x to stop · Esc to close");
 }
 
 #[test]

@@ -61,6 +61,7 @@ pub(super) const BUILTIN_COMMANDS: &[(&str, MidTurn, &str)] = &[
     ("account", MidTurn::Runs, "Show accounts and their usage; pick one to use until it reaches the switch threshold"),
     ("detach", MidTurn::Runs, "Close this terminal's view and leave the session running; `agent attach` returns to it"),
     ("attach", MidTurn::Runs, "Show the running sessions: switch this terminal to one, or stop it"),
+    ("back", MidTurn::Runs, "Switch this terminal to the session that started this one with StartSession"),
     ("env", MidTurn::Runs, "[name]: Pick, add or remove the computers sessions can run on, or start a new session on one; this one keeps running"),
     ("quit", MidTurn::Runs, "Quit agent"),
 ];
@@ -138,6 +139,7 @@ impl App {
             "quit" | "exit" => self.quit = true,
             "detach" => self.detach(),
             "attach" => self.open_running(),
+            "back" => self.back_to_starter(),
             "env" => self.switch_environment(args),
             "compact" => {
                 self.system("compact", "Compacting context...");

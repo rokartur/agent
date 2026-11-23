@@ -463,6 +463,8 @@ struct App {
     session_id: String,
     /// The id this process began with, which the sessions it started report to (see `Agent::first_session`).
     first_session: String,
+    /// The first session id of the session that started this one with StartSession, prefixed `device:` when on another computer.
+    started_by: Option<String>,
     /// The running sessions on this computer that this one started, read again each second.
     started_sessions: Vec<Peer>,
     session_path: Option<String>,
@@ -771,6 +773,7 @@ impl App {
             header_len: 0,
             session_id: agent.session.id.clone(),
             first_session: agent.first_session.clone(),
+            started_by: agent.started_by.clone(),
             started_sessions: Vec::new(),
             session_path: agent.session.display_path(),
             sessions_dir: agent.sessions_dir.clone(),

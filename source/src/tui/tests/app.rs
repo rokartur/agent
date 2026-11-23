@@ -561,3 +561,33 @@ fn reload_keeps_the_server_while_a_message_typed_during_the_update_waits() {
     let _ = std::fs::remove_dir_all(&home);
     assert!(app.quit && app.reload.is_some());
 }
+
+#[test]
+fn back_moves_the_terminal_to_the_session_that_started_this_one() {
+    let home = std::env::temp_dir().join(format!("agent-tui-back-{}", std::process::id()));
+    let mut app = test_app(&home);
+    let (client, lines) = server::Client::fake(1);
+    app.add_client(client);
+    app.typing_client = Some(1);
+
+    app.submit("/back".into(), false);
+    assert!(matches!(&app.entries.last().unwrap().item, Item::System { text, .. } if text == "No session started this one."));
+
+    app.started_by = Some("orch1".into());
+    // peers::list skips this test's own pid, so the starter is a live child process.
+    let mut sleeper = crate::process::command("sleep").arg("30").spawn().unwrap();
+    let starter = sleeper.id();
+    let cards = crate::agent::peers::dir(&home);
+    std::fs::create_dir_all(&cards).unwrap();
+    std::fs::write(cards.join(format!("{starter}.json")), json!({"pid": starter, "session": "s1", "first_session": "orch1"}).to_string()).unwrap();
+    let socket = crate::serve::socket(&home, starter);
+    std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
+    std::fs::write(socket, "").unwrap();
+    app.submit("/back".into(), false);
+    sleeper.kill().unwrap();
+    sleeper.wait().unwrap();
+    std::fs::remove_dir_all(&home).ok();
+    let attach = json!({"attach": starter}).to_string();
+    assert!(lines.try_iter().any(|line| line == attach));
+    assert!(app.clients.is_empty());
+}

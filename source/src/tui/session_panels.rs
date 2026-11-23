@@ -47,6 +47,16 @@ impl App {
         self.panel = Some(Panel::Running { index: 0, sessions, confirm: false });
     }
 
+    /// /back: moves the typing terminal to the session whose StartSession started this one.
+    pub(super) fn back_to_starter(&mut self) {
+        let Some(started_by) = self.started_by.clone() else { return self.system("back", "No session started this one.") };
+        // A remote starter's `device:` prefix matches no local first_session, so it lands in the error below.
+        let Some(starter) = crate::serve::live(&self.home).into_iter().find(|peer| peer.first_session == started_by) else {
+            return self.system("back", "The session that started this one no longer runs on this computer.");
+        };
+        self.release_typing_client(|client| client.attach(starter.pid));
+    }
+
     pub(super) fn running_key(&mut self, code: KeyCode) {
         let Some(Panel::Running { index, sessions, confirm }) = self.panel.as_mut() else { return };
         let stopping = std::mem::take(confirm);

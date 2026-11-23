@@ -568,7 +568,8 @@ pub(super) fn tasks_panel(terminals: &[Arc<Terminal>], runs: &[Arc<Run>], sessio
     if rows.len() > shown {
         lines.extend([Vec::new(), vec![span(format!("  {}/{}", selected + 1, rows.len()), DIM)]]);
     }
-    lines.extend([Vec::new(), vec![span("↑/↓ to select · Tab to switch · Enter to view · x to stop · Esc to close", MUTED.italic())]]);
+    let enter = if shown_tab == TaskTab::Sessions { "Enter to view, /back there returns" } else { "Enter to view" };
+    lines.extend([Vec::new(), vec![span(format!("↑/↓ to select · Tab to switch · {enter} · x to stop · Esc to close"), MUTED.italic())]]);
     lines
 }
 
