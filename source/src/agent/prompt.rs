@@ -55,6 +55,15 @@ pub fn cwd_section(cwd: &Path, extra_dirs: &[PathBuf], user_device: Option<&str>
     format!("{}\n{}", tag("cwd", &content), tag("computer", &computer))
 }
 
+/// Rex exports the session and pane a program runs in; its SessionStart hook gives Claude Code and Codex this note.
+pub fn rex_section(env: impl Fn(&str) -> Option<String>) -> String {
+    let (Some(session), Some(block)) = (env("REX_SESSION"), env("REX_BLOCK")) else { return String::new() };
+    let content = format!(
+        "You run in a Rex terminal. REX_SESSION={session} is your session and REX_BLOCK={block} your pane, both set in your shell; the user may be viewing another one. Drive Rex with the `rex` CLI, where a tab is a window and a pane is a block. The rex skill has the guide; without it, run `rex skill show`."
+    );
+    format!("\n{}", tag("terminal", &content))
+}
+
 fn tag(name: &str, content: &str) -> String {
     format!("<{name}>\n{content}\n</{name}>")
 }
@@ -622,6 +631,18 @@ mod tests {
         assert_eq!(cwd_section(&root.join("a"), &extra, None), format!("<cwd>\n{}\nAdditional directories: {}, {}\n</cwd>", root.join("a").display(), extra[0].display(), extra[1].display()));
         let remote = cwd_section(&root.join("a"), &[], Some("laptop"));
         assert!(remote.starts_with(&format!("<cwd>\n{}\n</cwd>\n<computer>\n", root.join("a").display())) && remote.contains("another computer, laptop."));
+    }
+
+    #[test]
+    fn rex_terminal_names_its_session_and_pane() {
+        let rex = |name: &str| match name {
+            "REX_SESSION" => Some("session:1".to_string()),
+            "REX_BLOCK" => Some("block:2".to_string()),
+            _ => None,
+        };
+        let section = rex_section(rex);
+        assert!(section.starts_with("\n<terminal>\n") && section.contains("REX_SESSION=session:1") && section.contains("REX_BLOCK=block:2"), "{section}");
+        assert_eq!(rex_section(|_| None), "");
     }
 
     #[test]
