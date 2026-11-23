@@ -225,12 +225,12 @@ impl App {
             }
             "skill-usage" => self.skill_usage(),
             "rtk" => self.rtk_gain(),
-            "tasks" if self.terminals.lock().unwrap().list.is_empty() && self.subagents.lock().unwrap().list.is_empty() => {
-                self.system("tasks", "No background tasks yet. The agent starts them with Bash run_in_background or Agent.");
+            "tasks" if self.terminals.lock().unwrap().list.is_empty() && self.subagents.lock().unwrap().list.is_empty() && self.started_sessions.is_empty() => {
+                self.system("tasks", "No background tasks yet. The agent starts them with Bash run_in_background, Agent or StartSession.");
             }
             "tasks" => {
-                let agents = self.terminals.lock().unwrap().running() == 0 && !self.subagents.lock().unwrap().list.is_empty();
-                self.open_tasks(agents);
+                let tab = self.pill_tabs().first().copied().unwrap_or(if self.subagents.lock().unwrap().list.is_empty() { TaskTab::Shells } else { TaskTab::Agents });
+                self.open_tasks(tab);
             }
             "workflows" => self.open_workflows(),
             "login" => self.panel = Some(Panel::Login(login::Login::Kind { index: 0 })),

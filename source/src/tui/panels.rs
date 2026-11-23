@@ -104,13 +104,13 @@ pub(super) enum Panel {
         data: Value,
         index: usize,
     },
-    /// The rows under the footer: `row` 0 is main, then the shells pill and the agents pill while they run, then each workflow.
+    /// The rows under the footer: `row` 0 is main, then the shells, agents and sessions pills while they run, then each workflow.
     Agents {
         row: usize,
     },
-    /// /tasks: the shells tab, or the subagent runs tab when `agents`; `index` selects in that tab.
+    /// /tasks: `index` selects in `tab`.
     Tasks {
-        agents: bool,
+        tab: TaskTab,
         index: usize,
     },
     /// /workflows with more than one run.
@@ -180,6 +180,15 @@ pub(super) enum Panel {
 }
 
 /// The panel the model picker returns to: none for /model, the settings list, or the start-fresh panel.
+/// The /tasks tabs, in order, each with its pill under the footer.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(super) enum TaskTab {
+    Shells,
+    Agents,
+    /// Sessions this one started with StartSession on this computer.
+    Sessions,
+}
+
 #[derive(Clone, Copy)]
 pub(super) enum ModelsBack {
     Close,
@@ -366,7 +375,7 @@ impl App {
             Panel::PluginSettings { plugin, index, edit } => self.plugin_settings_panel(plugin, index, edit, width),
             Panel::Plugin { plugin, data, index } => self.plugin_panel(plugin, data, index, width),
             Panel::Agents { .. } => Vec::new(),
-            Panel::Tasks { agents, index } => tasks_panel(&self.terminals.lock().unwrap().list, &self.subagents.lock().unwrap().list, &self.client.catalog(), *agents, *index, width),
+            Panel::Tasks { tab, index } => tasks_panel(&self.terminals.lock().unwrap().list, &self.subagents.lock().unwrap().list, &self.started_sessions, &self.client.catalog(), *tab, *index, width),
             Panel::Workflows { .. } | Panel::WorkflowRun { .. } | Panel::WorkflowSave { .. } => self.workflow_panel(width),
             Panel::Terminal { .. } | Panel::Diff { .. } => unreachable!("frame draws the full-screen view instead of a panel"),
             Panel::Btw => self.btw.as_ref().expect("the btw panel opens with a thread").render(width),

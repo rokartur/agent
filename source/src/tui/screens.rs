@@ -77,7 +77,7 @@ impl App {
             KeyCode::Esc => {
                 let index = *index;
                 drop(terminals);
-                self.panel = Some(Panel::Tasks { agents: false, index });
+                self.panel = Some(Panel::Tasks { tab: TaskTab::Shells, index });
             }
             _ => {}
         }

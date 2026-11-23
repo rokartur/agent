@@ -323,9 +323,7 @@ impl App {
             KeyCode::PageUp => self.scroll += self.layout.transcript_rows.max(1),
             KeyCode::PageDown => self.scroll = self.scroll.saturating_sub(self.layout.transcript_rows.max(1)),
             KeyCode::Up => self.editor.up(self.layout.width),
-            KeyCode::Down
-                if self.editor.is_empty() && (footer_agents(&self.subagents.lock().unwrap()) > 0 || self.terminals.lock().unwrap().running() > 0 || !footer_workflows(&self.workflows).is_empty()) =>
-            {
+            KeyCode::Down if self.editor.is_empty() && (!self.pill_tabs().is_empty() || !footer_workflows(&self.workflows).is_empty()) => {
                 self.panel = Some(Panel::Agents { row: 1 });
             }
             KeyCode::Down => self.editor.down(self.layout.width),

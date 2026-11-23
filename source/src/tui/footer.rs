@@ -164,9 +164,9 @@ pub(super) fn thinking_style(level: &str) -> Style {
     Style::rgb(gray * 0x010101)
 }
 
-/// The rows under the footer, as in Claude Code: a shells pill and an agents pill, each opening its /tasks tab,
+/// The rows under the footer, as in Claude Code: a shells, an agents and a sessions pill, each opening its /tasks tab,
 /// then the subagent viewed in place of the transcript. `focus` indexes the pills shown, walked to with ↓.
-pub(super) fn background_rows(shells: usize, agents: usize, viewed: Option<&str>, focus: Option<usize>, columns: usize) -> Vec<Line> {
+pub(super) fn background_rows(shells: usize, agents: usize, sessions: usize, viewed: Option<&str>, focus: Option<usize>, columns: usize) -> Vec<Line> {
     let mut rows = Vec::new();
     let mut counts = Vec::new();
     if shells > 0 {
@@ -174,6 +174,9 @@ pub(super) fn background_rows(shells: usize, agents: usize, viewed: Option<&str>
     }
     if agents > 0 {
         counts.push(format!("{agents} {}", if agents == 1 { "agent" } else { "agents" }));
+    }
+    if sessions > 0 {
+        counts.push(format!("{sessions} {}", if sessions == 1 { "session" } else { "sessions" }));
     }
     if !counts.is_empty() {
         let mut row = Vec::new();

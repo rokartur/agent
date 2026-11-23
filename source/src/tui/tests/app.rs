@@ -178,7 +178,7 @@ fn up_from_the_first_background_row_hands_keys_back_to_the_editor() {
 }
 
 #[test]
-fn left_and_right_walk_between_the_shells_and_agents_pills() {
+fn left_and_right_walk_between_the_shells_agents_and_sessions_pills() {
     let home = std::env::temp_dir().join(format!("agent-tui-background-sideways-{}", std::process::id()));
     let mut app = test_app(&home);
     std::fs::remove_dir_all(&home).ok();
@@ -190,6 +190,23 @@ fn left_and_right_walk_between_the_shells_and_agents_pills() {
     assert!(matches!(app.panel, Some(Panel::Agents { row: 2 })));
     app.key(KeyEvent::from(KeyCode::Left));
     assert!(matches!(app.panel, Some(Panel::Agents { row: 1 })));
+    app.started_sessions.push(Peer {
+        pid: 1,
+        session: "abc".into(),
+        title: String::new(),
+        cwd: "/repo".into(),
+        busy: true,
+        started_by: String::new(),
+        first_session: String::new(),
+        socket: PathBuf::new(),
+    });
+    app.key(KeyEvent::from(KeyCode::Right));
+    app.key(KeyEvent::from(KeyCode::Right));
+    assert!(matches!(app.panel, Some(Panel::Agents { row: 3 })));
+    app.key(KeyEvent::from(KeyCode::Enter));
+    assert!(matches!(app.panel, Some(Panel::Tasks { tab: TaskTab::Sessions, index: 0 })));
+    app.key(KeyEvent::from(KeyCode::Tab));
+    assert!(matches!(app.panel, Some(Panel::Tasks { tab: TaskTab::Shells, index: 0 })), "Tab wraps from the last tab to the first");
     app.terminals.lock().unwrap().kill_all();
 }
 
