@@ -764,6 +764,10 @@ impl Turn {
             }
             Event::Titled(title) => json!({"sessionUpdate": "session_info_update", "title": title}),
             Event::Notice(notice) if self.notices && !notice.is_empty() => json!({"sessionUpdate": "notice", "severity": "info", "title": notice}),
+            Event::EditHook { label, failure } if self.notices => {
+                let title = failure.as_ref().map_or(format!("[edit-hooks] {label}"), |output| crate::agent::edit_hooks::failure(label, output));
+                json!({"sessionUpdate": "notice", "severity": "info", "title": title})
+            }
             _ => return Vec::new(),
         }]
     }

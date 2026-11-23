@@ -212,6 +212,13 @@ impl App {
                 let tone = notice_tone(text);
                 self.push(Item::System { source: source.into(), text: text.into(), tone });
             }
+            Event::EditHook { label, failure } => match self.entries.last_mut() {
+                Some(Entry { item: Item::EditHooks(runs), cache }) => {
+                    runs.push((label, failure));
+                    *cache = None;
+                }
+                _ => self.push(Item::EditHooks(vec![(label, failure)])),
+            },
             Event::SubagentDone(run) => self.push(Item::Subagent(run)),
             Event::ToolStart { id, name, input } => {
                 let call = Item::Tool { id, name, input, result: None, progress: None, started: Some(Instant::now()), calls: Vec::new() };

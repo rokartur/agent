@@ -38,6 +38,8 @@ pub struct Settings {
     pub reserve_tokens: u64,
     pub keep_recent_tokens: u64,
     pub expand_tools: bool,
+    /// Ctrl+O shows thinking along with tool output.
+    pub expand_thinking: bool,
     /// The session's cost after the context tokens in the footer.
     pub footer_cost: bool,
     /// The name of the account the current model's provider uses, before the model in the footer.
@@ -417,6 +419,7 @@ const PROJECT_KEYS: &[&str] = &[
     "condense",
     "context_windows",
     "expand_tools",
+    "expand_thinking",
     "subagents",
     "rtk",
 ];
@@ -517,6 +520,7 @@ fn from_json(own: &Value) -> Settings {
         reserve_tokens: own["reserve_tokens"].as_u64().unwrap_or(16_384).max(4_096),
         keep_recent_tokens: own["keep_recent_tokens"].as_u64().unwrap_or(20_000),
         expand_tools: own["expand_tools"].as_bool().unwrap_or(false),
+        expand_thinking: own["expand_thinking"].as_bool().unwrap_or(true),
         footer_cost: own["footer_cost"].as_bool().unwrap_or(true),
         footer_account: own["footer_account"].as_bool().unwrap_or(false),
         condense: own["condense"]["enabled"].as_bool().unwrap_or(true),
@@ -671,6 +675,7 @@ fn to_json(settings: &Settings) -> Value {
         "reserve_tokens": settings.reserve_tokens,
         "keep_recent_tokens": settings.keep_recent_tokens,
         "expand_tools": settings.expand_tools,
+        "expand_thinking": settings.expand_thinking,
         "footer_cost": settings.footer_cost,
         "footer_account": settings.footer_account,
         "context_windows": settings.context_windows,

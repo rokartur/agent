@@ -61,6 +61,35 @@ fn an_allowed_review_shows_only_when_expanded_and_a_denied_one_always() {
 }
 
 #[test]
+fn edit_hooks_show_a_count_and_their_commands_and_failures_only_when_expanded() {
+    let home = std::env::temp_dir().join(format!("agent-tui-edit-hooks-{}", std::process::id()));
+    let mut app = test_app(&home);
+    std::fs::remove_dir_all(&home).ok();
+    app.agent_event(Event::EditHook { label: "fmt --no-error-on-unmatched-pattern a.md".into(), failure: None });
+    app.agent_event(Event::EditHook { label: "tsc".into(), failure: Some("error TS2322".into()) });
+    let rows = |app: &mut App, expanded| {
+        app.expanded = expanded;
+        app.transcript_tail(80, 1000).0.iter().map(text).skip_while(|row| !row.contains("edit-hooks")).collect::<Vec<_>>()
+    };
+    assert_eq!(rows(&mut app, false), ["✗ edit-hooks: 2 ran, 1 failed (ctrl+o to expand)"]);
+    assert_eq!(rows(&mut app, true), ["✗ edit-hooks: 2 ran, 1 failed", "  ✓ fmt --no-error-on-unmatched-pattern a.md", "  ✗ tsc", "    error TS2322"]);
+}
+
+#[test]
+fn ctrl_o_shows_thinking_only_when_the_setting_allows() {
+    let home = std::env::temp_dir().join(format!("agent-tui-thinking-{}", std::process::id()));
+    let mut app = test_app(&home);
+    std::fs::remove_dir_all(&home).ok();
+    app.agent_event(Event::Thinking("pondering".into()));
+    app.agent_event(Event::Text("answer".into()));
+    app.expanded = true;
+    let shows_thinking = |app: &mut App| app.transcript_tail(80, 1000).0.iter().map(text).any(|row| row.contains("pondering"));
+    assert!(shows_thinking(&mut app));
+    app.settings.expand_thinking = false;
+    assert!(!shows_thinking(&mut app));
+}
+
+#[test]
 fn code_mode_toggles_with_its_command_and_floats_over_the_transcript() {
     let home = std::env::temp_dir().join(format!("agent-tui-code-mode-{}", std::process::id()));
     let mut app = test_app(&home);

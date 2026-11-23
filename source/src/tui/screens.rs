@@ -183,7 +183,7 @@ pub(super) fn subagent_lines(path: &Path, width: usize, cwd: &Path) -> Result<Ve
     let mut lines = Vec::new();
     let mut previous_run = None;
     for entry in &mut entries {
-        let item_lines = entry.lines(width, false, cwd).clone();
+        let item_lines = entry.lines(width, false, false, cwd).clone();
         if item_lines.is_empty() {
             continue;
         }

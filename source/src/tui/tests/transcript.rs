@@ -26,7 +26,7 @@ fn unknown_tool_args_read_as_key_values() {
 #[test]
 fn done_line_leads_with_the_dim_star() {
     let item = Item::Done { took: Duration::from_secs(83), usage: Usage { input: 1200, output: 300, ..Usage::default() }, total: Duration::from_secs(600) };
-    let line = &render_item(&item, 80, false, Path::new("/repo"))[0];
+    let line = &render_item(&item, 80, false, false, Path::new("/repo"))[0];
     assert!(text(line).starts_with("✧ 1m 23s ↑"), "{}", text(line));
     assert_eq!(line[0].style, DIM);
 }
@@ -40,7 +40,7 @@ fn prompt_rows_mark_every_row_for_copy_and_fill_no_background() {
 
 #[test]
 fn user_prompt_sits_on_a_full_width_band() {
-    let rows = render_item(&Item::User("a\nb".into()), 6, false, Path::new("/repo"));
+    let rows = render_item(&Item::User("a\nb".into()), 6, false, false, Path::new("/repo"));
     assert_eq!(rows.iter().map(text).collect::<Vec<_>>(), ["❯ a   ", "  b   "]);
     assert!(rows.iter().flatten().all(|s| s.style.bg == Some(PROMPT_BG)));
 }
@@ -100,7 +100,7 @@ fn a_scripts_calls_show_under_its_code_row_between_its_code_and_its_result() {
     app.agent_event(end("c1-1", "a.txt"));
     app.agent_event(start("c10-1", "Read", json!({"file_path": "x"})));
     app.agent_event(end("c1", "1"));
-    let rows = |expanded| app.entries[app.header_len..].iter().flat_map(|entry| render_item(&entry.item, 60, expanded, Path::new("/repo"))).map(|row| text(&row)).collect::<Vec<_>>();
+    let rows = |expanded| app.entries[app.header_len..].iter().flat_map(|entry| render_item(&entry.item, 60, expanded, false, Path::new("/repo"))).map(|row| text(&row)).collect::<Vec<_>>();
     assert_eq!(rows(false), ["✓ Code await $`ls`; · 1", "  ✓ Bash ls · a.txt", "• Read x"]);
     assert_eq!(rows(true), ["✓ Code await $`ls`;", "  return 1;", "  ✓ Bash ls", "  └ a.txt", "└ 1", "• Read x"]);
 }
@@ -136,7 +136,7 @@ fn a_running_tool_shows_its_progress_under_its_row_until_it_ends() {
         started: None,
         calls: Vec::new(),
     };
-    let rows = |item: &Item| render_item(item, 80, false, Path::new("/repo")).iter().map(text).collect::<Vec<_>>();
+    let rows = |item: &Item| render_item(item, 80, false, false, Path::new("/repo")).iter().map(text).collect::<Vec<_>>();
     assert_eq!(rows(&tool(None)), ["• Video source: a.mp4", "└ transcribing 0:10 / 1:00"]);
     assert_eq!(rows(&tool(Some(("done".into(), false)))), ["✓ Video source: a.mp4 · done"]);
 }
@@ -200,7 +200,7 @@ fn a_tabbed_log_row_wraps_its_description_under_the_description_column() {
 
 #[test]
 fn a_system_line_takes_its_mark_and_color_from_its_tone() {
-    let row = |tone| render_item(&Item::System { source: "trust".into(), text: "x".into(), tone }, 40, false, Path::new("/repo")).remove(0);
+    let row = |tone| render_item(&Item::System { source: "trust".into(), text: "x".into(), tone }, 40, false, false, Path::new("/repo")).remove(0);
     let look = |line: &Line| (text(line), line[0].style, line.last().unwrap().style);
     assert_eq!(look(&row(Tone::Info)), ("ℹ trust: x".to_string(), SYSTEM, NOTICE_TEXT));
     assert_eq!(look(&row(Tone::Warn)), ("! trust: x".to_string(), WARN, NOTICE_TEXT));
@@ -238,7 +238,7 @@ fn history_shows_agent_added_texts_as_notices() {
 }
 
 #[test]
-fn history_shows_an_edit_hook_report_as_its_live_notice() {
+fn history_shows_an_edit_hook_report_whole() {
     let messages = [json!({"role": "user", "content": [{"type": "text", "text": "[edit-hooks] tsc failed:\nerror TS2322"}]})];
     let items = history_items(&messages);
     assert!(matches!(&items[0], Item::System { source, text, tone: Tone::Error } if source == "edit-hooks" && text == "tsc failed:\nerror TS2322"), "{:?}", items.len());

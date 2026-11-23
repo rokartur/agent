@@ -62,6 +62,11 @@ pub enum Event {
     Text(String),
     Thinking(String),
     Notice(String),
+    /// An edit hook's command finished; `failure` holds its output when it failed.
+    EditHook {
+        label: String,
+        failure: Option<String>,
+    },
     /// A foreground subagent finished; the TUI draws its status line from the run.
     SubagentDone(Arc<subagent::Run>),
     ToolStart {
@@ -749,8 +754,8 @@ impl Agent {
                     }
                     fix_rounds += 1;
                     let (message, retry) = edit_hooks::report(&failures, fix_rounds);
-                    emit(Event::Notice(message.clone()));
                     if !retry {
+                        emit(Event::Notice(message.lines().next().unwrap_or_default().into()));
                         return Ok(answer);
                     }
                     self.push(json!({"role": "user", "content": [{"type": "text", "text": message}]}))?;
