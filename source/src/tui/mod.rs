@@ -315,6 +315,8 @@ enum Item {
         text: String,
         tone: Tone,
     },
+    /// The edit hooks of one run: each command's label and, when it failed, its output.
+    EditHooks(Vec<(String, Option<String>)>),
     /// A foreground subagent's end: status, label, tool calls, time, tokens.
     Subagent(Arc<Run>),
     Error(String),
@@ -357,10 +359,10 @@ enum Tone {
     Error,
 }
 
-/// A transcript item with its rendered lines cached for one (width, expanded) pair.
+/// A transcript item with its rendered lines cached for one (width, expanded, thinking) triple.
 struct Entry {
     item: Item,
-    cache: Option<(usize, bool, Vec<Line>)>,
+    cache: Option<(usize, bool, bool, Vec<Line>)>,
 }
 
 #[derive(Default)]
@@ -998,12 +1000,12 @@ impl App {
 }
 
 impl Entry {
-    fn lines(&mut self, width: usize, expanded: bool, cwd: &Path) -> &Vec<Line> {
-        let fresh = matches!(&self.cache, Some((w, e, _)) if *w == width && *e == expanded);
+    fn lines(&mut self, width: usize, expanded: bool, thinking: bool, cwd: &Path) -> &Vec<Line> {
+        let fresh = matches!(&self.cache, Some((w, e, t, _)) if *w == width && *e == expanded && *t == thinking);
         if !fresh {
-            self.cache = Some((width, expanded, render_item(&self.item, width, expanded, cwd)));
+            self.cache = Some((width, expanded, thinking, render_item(&self.item, width, expanded, thinking, cwd)));
         }
-        &self.cache.as_ref().unwrap().2
+        &self.cache.as_ref().unwrap().3
     }
 }
 

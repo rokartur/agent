@@ -8,6 +8,9 @@ impl Agent {
             return Vec::new();
         }
         let (hooks, mut failures, skipped) = edit_hooks::hooks(&files, &self.trusted_projects);
+        for invalid_config in &failures {
+            emit(Event::Notice(invalid_config.clone()));
+        }
         if skipped > 0 {
             emit(Event::Notice(format!("[edit-hooks] {skipped} skipped: their project is not trusted, /trust in it runs them")));
         }
@@ -22,11 +25,11 @@ impl Agent {
                 emit(Event::Notice(format!("[edit-hooks] {} skipped: {refusal}", hook.label)));
                 continue;
             }
-            emit(Event::Notice(format!("[edit-hooks] {}", hook.label)));
             let (output, is_error) = tools::run("Bash", &input, &hook.dir, &mut self.anchors, &self.rtk, &self.abort);
             if is_error {
                 failures.push(edit_hooks::failure(&hook.label, &output));
             }
+            emit(Event::EditHook { label: hook.label, failure: is_error.then_some(output) });
         }
         failures
     }

@@ -39,7 +39,7 @@ pub(super) fn prompt_rows(text: &str, style: Style, width: usize) -> Vec<Line> {
     rows
 }
 
-pub(super) fn render_item(item: &Item, width: usize, expanded: bool, cwd: &Path) -> Vec<Line> {
+pub(super) fn render_item(item: &Item, width: usize, expanded: bool, thinking_shown: bool, cwd: &Path) -> Vec<Line> {
     match item {
         Item::Lines(lines) => lines.clone(),
         Item::System { tone: Tone::Detail, .. } if !expanded => Vec::new(),
@@ -51,13 +51,14 @@ pub(super) fn render_item(item: &Item, width: usize, expanded: bool, cwd: &Path)
             };
             system_lines(icon, source, text, style, width)
         }
+        Item::EditHooks(runs) => edit_hooks_lines(runs, width, expanded),
         Item::Subagent(run) => subagent_done_lines(run, width),
         Item::Error(text) => system_lines("✗", "error", text, ERROR, width),
         Item::User(text) => prompt_rows(text, BRIGHT, width).into_iter().map(|row| band(row, width)).collect(),
         Item::Images(tags) => tags.iter().map(|tag| image_row(tag)).collect(),
         Item::Assistant { text, thinking } => {
             let mut lines = Vec::new();
-            if expanded && !thinking.trim().is_empty() {
+            if thinking_shown && !thinking.trim().is_empty() {
                 lines.extend(wrap(&[span(thinking.trim(), MUTED.italic())], width, &vec![span(" ", PLAIN)]));
                 if !text.trim().is_empty() {
                     lines.push(Vec::new());
@@ -75,7 +76,7 @@ pub(super) fn render_item(item: &Item, width: usize, expanded: bool, cwd: &Path)
             let mut lines = render_tool(name, input, result.as_ref(), width, expanded, cwd);
             // A script's calls go between its code and its result.
             let at = lines.iter().position(|line| line.first().is_some_and(|lead| lead.text == "└ ")).unwrap_or(lines.len());
-            let rows = calls.iter().flat_map(|call| render_item(call, width.saturating_sub(2), expanded, cwd)).map(|row| [vec![span("  ", PLAIN)], row].concat());
+            let rows = calls.iter().flat_map(|call| render_item(call, width.saturating_sub(2), expanded, thinking_shown, cwd)).map(|row| [vec![span("  ", PLAIN)], row].concat());
             lines.splice(at..at, rows);
             if let Some(progress) = progress.as_ref().filter(|_| result.is_none()) {
                 lines.push(truncate(&vec![span("└ ", MUTED), span(progress, MUTED)], width));
@@ -118,6 +119,31 @@ pub(super) fn system_lines(icon: &str, source: &str, text: &str, style: Style, w
     // Wrapped rows hang under the source; the icon row starts at column 0 like a tool row.
     if let Some(first) = lines.first_mut() {
         first.remove(0);
+    }
+    lines
+}
+
+/// Collapsed: how many ran and failed. Expanded: each command, with the output of the ones that failed.
+pub(super) fn edit_hooks_lines(runs: &[(String, Option<String>)], width: usize, expanded: bool) -> Vec<Line> {
+    let failed = runs.iter().filter(|(_, failure)| failure.is_some()).count();
+    let mut summary = format!("{} ran", runs.len());
+    if failed > 0 {
+        summary += &format!(", {failed} failed");
+        if !expanded {
+            summary += " (ctrl+o to expand)";
+        }
+    }
+    let (icon, style) = if failed > 0 { ("✗", ERROR) } else { ("ℹ", SYSTEM) };
+    let mut lines = system_lines(icon, "edit-hooks", &summary, style, width);
+    if !expanded {
+        return lines;
+    }
+    for (label, failure) in runs {
+        let mark = if failure.is_some() { span("✗ ", ERROR) } else { span("✓ ", OK) };
+        lines.extend(wrap(&[mark, span(label, TOOL_ARGS)], width, &vec![span("  ", PLAIN)]));
+        for line in failure.iter().flat_map(|output| output.lines()) {
+            lines.extend(wrap(&[span(line, TOOL_ARGS)], width, &vec![span("    ", PLAIN)]));
+        }
     }
     lines
 }
@@ -342,7 +368,7 @@ pub(super) fn blank_between(item: &Item, below: &Item) -> bool {
 pub(super) fn transcript_run(item: &Item) -> Option<&'static str> {
     match item {
         Item::Tool { .. } | Item::Todos(_) => Some("tool"),
-        Item::System { .. } | Item::Subagent(_) | Item::Error(_) => Some("log"),
+        Item::System { .. } | Item::EditHooks(_) | Item::Subagent(_) | Item::Error(_) => Some("log"),
         _ => None,
     }
 }
@@ -356,7 +382,7 @@ pub(super) fn history_items(messages: &[Value]) -> Vec<Item> {
                 (Some("user"), Some("text")) => {
                     let text = block["text"].as_str().unwrap_or_default();
                     items.push(match crate::agent::harness_source(text) {
-                        // Live, the hook report was a whole Event::Notice; the rest were one-line follow-ups.
+                        // The hook report shows whole; the rest were one-line follow-ups.
                         Some("edit-hooks") => {
                             let (source, text) = notice_source(text);
                             Item::System { source: source.into(), text: text.into(), tone: notice_tone(text) }

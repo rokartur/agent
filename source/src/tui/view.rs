@@ -186,7 +186,7 @@ impl App {
         // Sticky header: the prompt of the turn at the top of the view, once its first line scrolls out above.
         if let Some(&(_, index)) = prompts.iter().find(|(top, _)| *top >= self.scroll + visible) {
             // shortcut: clicks and selection on the pinned rows hit the transcript lines under them.
-            let prompt = self.entries[index].lines(content_width, self.expanded, &self.cwd);
+            let prompt = self.entries[index].lines(content_width, self.expanded, self.expanded && self.settings.expand_thinking, &self.cwd);
             pin_prompt(&mut rows, prompt, content_width);
         }
         for (row, line) in rows.iter_mut().enumerate() {
@@ -247,6 +247,7 @@ impl App {
             return (lines[lines.len().saturating_sub(needed)..].to_vec(), lines.len(), Vec::new());
         }
         let expanded = self.expanded;
+        let thinking = expanded && self.settings.expand_thinking;
         let spinner = self.working.map(|started| crate::spinner::FRAMES[(started.elapsed().as_millis() / ANIMATION_TICK.as_millis()) as usize % crate::spinner::FRAMES.len()]);
         let mut chunks: Vec<Vec<Line>> = Vec::new();
         let mut count = 0;
@@ -262,7 +263,7 @@ impl App {
             };
             let last = index == self.entries.len() - 1;
             let done_for = matches!(self.entries[index].item, Item::Done { .. }).then(|| self.turn_ended.filter(|_| last).map_or(DONE_FLASH, |ended| ended.elapsed()));
-            let lines = self.entries[index].lines(width, expanded, &self.cwd);
+            let lines = self.entries[index].lines(width, expanded, thinking, &self.cwd);
             if lines.is_empty() {
                 continue;
             }

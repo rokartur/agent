@@ -214,9 +214,9 @@ fn scrollbar_thumb_tracks_the_position_and_hides_when_everything_fits() {
 fn pinned_prompt_keeps_three_rows_and_marks_the_cut() {
     let text = |rows: &[Line]| rows.iter().map(|row| row.iter().map(|s| s.text.as_str()).collect::<String>()).collect::<Vec<_>>();
     let mut rows = vec![vec![span("x", PLAIN)]; 5];
-    pin_prompt(&mut rows, &render_item(&Item::User("a\nb".into()), 10, false, Path::new("/repo")), 10);
+    pin_prompt(&mut rows, &render_item(&Item::User("a\nb".into()), 10, false, false, Path::new("/repo")), 10);
     assert_eq!(text(&rows), ["❯ a       ", "  b       ", "x", "x", "x"]);
-    pin_prompt(&mut rows, &render_item(&Item::User("1\n2\n3\n4".into()), 10, false, Path::new("/repo")), 10);
+    pin_prompt(&mut rows, &render_item(&Item::User("1\n2\n3\n4".into()), 10, false, false, Path::new("/repo")), 10);
     assert_eq!(text(&rows), ["❯ 1       ", "  2       ", "  3…      ", "x", "x"]);
     assert!(rows[2].iter().all(|s| s.style.bg == Some(PROMPT_BG)));
 }

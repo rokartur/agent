@@ -828,6 +828,8 @@ fn print_mode(agent: &mut Agent, prompt: &str, json: bool) -> Result<(), String>
         }
         Event::ToolStart { name, input, .. } if !json => eprintln!("· {} {}", terminal_safe(&name), terminal_safe(&preview(&input))),
         Event::Notice(text) => eprintln!("{}", terminal_safe(&text)),
+        Event::EditHook { label, failure: None } => eprintln!("[edit-hooks] {}", terminal_safe(&label)),
+        Event::EditHook { label, failure: Some(output) } => eprintln!("{}", terminal_safe(&agent::edit_hooks::failure(&label, &output))),
         Event::SubagentDone(run) => eprintln!("{}", terminal_safe(&run.summary())),
         Event::Permission { request, reply, .. } => {
             eprintln!("Denied {}: {} (print mode cannot ask; use --auto or --full-access)", request.kind.label(), terminal_safe(&request.detail));
