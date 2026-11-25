@@ -90,9 +90,6 @@ pub fn start(home: &Path, args: &[String], cwd: &Path, piped: bool, user_device:
     launch(home, args, cwd, piped, user_device).map(|(_, stream)| stream)
 }
 
-/// The most sessions one session keeps running on a computer: each is a whole agent process on the user's accounts.
-const MAX_MANAGED: usize = 8;
-
 /// A session to start for another session, which then gets each of its answers (ADR 0004).
 pub struct Managed<'a> {
     pub cwd: &'a Path,
@@ -116,8 +113,10 @@ const MAX_TITLE_CHARS: usize = 80;
 /// reviewer has a request to judge calls against; later messages from its orchestrator stay follow-ups.
 pub fn start_managed(home: &Path, managed: &Managed, user_device: Option<&str>) -> Result<Peer, String> {
     check_request(managed)?;
-    if live(home).iter().filter(|peer| peer.started_by == managed.started_by).count() >= MAX_MANAGED {
-        return Err(format!("{MAX_MANAGED} sessions you started already run on this computer. Stop one with TaskStop first."));
+    if let Some(max) = crate::settings::load(home)?.max_sessions
+        && live(home).iter().filter(|peer| peer.started_by == managed.started_by).count() >= max
+    {
+        return Err(format!("{max} sessions you started already run on this computer, the limit in subagents.max_sessions. Stop one with TaskStop first."));
     }
     check_project(home, managed.cwd)?;
     let created = managed.worktree.map(|name| crate::worktree::create(managed.cwd, name)).transpose()?;
@@ -539,11 +538,13 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn a_session_starts_at_most_eight_sessions_and_finds_only_its_own() {
+    fn a_session_starts_at_most_max_sessions_and_finds_only_its_own() {
         let home = std::env::temp_dir().join(format!("agent-serve-managed-{}", std::process::id()));
         _ = std::fs::remove_dir_all(&home);
         std::fs::create_dir_all(dir(&home)).unwrap();
         std::fs::create_dir_all(peers::dir(&home)).unwrap();
+        let max_sessions = 3;
+        std::fs::write(crate::settings::path(&home), serde_json::json!({"subagents": {"max_sessions": max_sessions}}).to_string()).unwrap();
         fn managed<'a>(cwd: &'a Path, prompt: &'a str, title: &'a str, full_access: bool) -> Managed<'a> {
             Managed { cwd, worktree: None, title, model: "m", thinking: "high", full_access, started_by: "orch1", prompt }
         }
@@ -567,7 +568,7 @@ mod tests {
         }
 
         // Sleeping children stand for running sessions: a card needs a live pid of its own.
-        let mut sleepers: Vec<_> = (0..MAX_MANAGED).map(|_| crate::process::command("sleep").arg("30").spawn().unwrap()).collect();
+        let mut sleepers: Vec<_> = (0..max_sessions).map(|_| crate::process::command("sleep").arg("30").spawn().unwrap()).collect();
         let card = |n: usize, pid: u32, started_by: &str| {
             std::fs::write(peers::dir(&home).join(format!("{pid}.json")), serde_json::json!({"pid": pid, "session": format!("s{n}"), "started_by": started_by}).to_string()).unwrap();
             std::fs::write(socket(&home, pid), "").unwrap();
@@ -581,7 +582,7 @@ mod tests {
         assert_eq!(owned("zz").unwrap_err(), "No session zz runs here.");
         // One short of the cap leaves room: at the cap the next start is refused before anything starts.
         card(0, sleepers[0].id(), "orch1");
-        assert_eq!(start("fix it", "t"), format!("{MAX_MANAGED} sessions you started already run on this computer. Stop one with TaskStop first."));
+        assert_eq!(start("fix it", "t"), "3 sessions you started already run on this computer, the limit in subagents.max_sessions. Stop one with TaskStop first.");
 
         for sleeper in &mut sleepers {
             sleeper.kill().unwrap();

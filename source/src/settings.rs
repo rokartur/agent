@@ -53,6 +53,10 @@ pub struct Settings {
     pub subagent_effort: String,
     /// The model a child gets when the subagent call names none; empty means the parent's.
     pub subagent_model: String,
+    /// Subagents one session runs at once; None is unlimited.
+    pub max_subagents: Option<usize>,
+    /// Sessions one session keeps running through StartSession on a computer; None is unlimited.
+    pub max_sessions: Option<usize>,
     pub switch_at_percent: u64,
     pub when_all_over_limit: Policy,
     /// Empty means the other provider's default model.
@@ -529,6 +533,8 @@ fn from_json(own: &Value) -> Settings {
         subagent_concurrency: own["subagents"]["concurrency"].as_u64().unwrap_or(4) as usize,
         subagent_effort: level(&own["subagents"]["implementation_effort"], &THINKING_LEVELS, "medium"),
         subagent_model: own["subagents"]["model"].as_str().unwrap_or_default().to_string(),
+        max_subagents: own["subagents"]["max_running"].as_u64().map(|n| n.max(1) as usize),
+        max_sessions: own["subagents"]["max_sessions"].as_u64().map(|n| n.max(1) as usize),
         switch_at_percent: own["accounts"]["switch_at_percent"].as_u64().unwrap_or(90).min(100),
         when_all_over_limit: own["accounts"]["when_all_over_limit"].as_str().and_then(Policy::parse).unwrap_or(Policy::LeastUsed),
         fallback_model: own["accounts"]["fallback_model"].as_str().unwrap_or_default().to_string(),
@@ -726,9 +732,13 @@ fn to_json(settings: &Settings) -> Value {
         })).collect::<Vec<_>>(),
         "lsp": settings.lsp.iter().map(|(language, server)| (language.clone(), json!({"command": server.command, "extensions": server.extensions, "roots": server.roots}))).collect::<serde_json::Map<_, _>>(),
         "condense": {"enabled": settings.condense, "model": settings.condense_model, "min_batch_chars": settings.condense_min_batch_chars},
-        "subagents": {"concurrency": settings.subagent_concurrency, "implementation_effort": settings.subagent_effort, "model": settings.subagent_model},
+        "subagents": {"concurrency": settings.subagent_concurrency, "implementation_effort": settings.subagent_effort, "model": settings.subagent_model, "max_running": limit_json(settings.max_subagents), "max_sessions": limit_json(settings.max_sessions)},
         "accounts": {"switch_at_percent": settings.switch_at_percent, "when_all_over_limit": settings.when_all_over_limit.label(), "fallback_model": settings.fallback_model, "default": settings.default_accounts},
     })
+}
+
+fn limit_json(limit: Option<usize>) -> Value {
+    limit.map_or(json!("unlimited"), |n| json!(n))
 }
 
 #[cfg(test)]

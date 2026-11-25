@@ -156,7 +156,9 @@
       "properties": {
         "concurrency": { "type": "integer", "minimum": 1, "default": 4 },
         "implementation_effort": { "enum": ["off", "minimal", "low", "medium", "high", "xhigh", "max"], "default": "medium" },
-        "model": { "type": "string", "default": "", "description": "Model for a subagent call that names none; empty means the parent's." }
+        "model": { "type": "string", "default": "", "description": "Model for a subagent call that names none; empty means the parent's." },
+        "max_running": { "oneOf": [{ "type": "integer", "minimum": 1 }, { "const": "unlimited" }], "default": "unlimited", "description": "Subagents one session runs at once." },
+        "max_sessions": { "oneOf": [{ "type": "integer", "minimum": 1 }, { "const": "unlimited" }], "default": "unlimited", "description": "Sessions one session keeps running through StartSession on a computer." }
       }
     },
     "accounts": {

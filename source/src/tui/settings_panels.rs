@@ -47,6 +47,8 @@ pub(super) enum Setting {
     MessageThreads,
     SmallModel,
     OutputStyle,
+    MaxSubagents,
+    MaxSessions,
 }
 
 impl Setting {
@@ -96,6 +98,8 @@ impl Setting {
             Setting::MessageThreads => "Message threads",
             Setting::SmallModel => "Small model",
             Setting::OutputStyle => "Output style",
+            Setting::MaxSubagents => "Max subagents",
+            Setting::MaxSessions => "Max sessions",
         }
     }
 }
@@ -104,7 +108,7 @@ impl Setting {
 pub(super) const SETTING_SECTIONS: [(&str, &[Setting]); 5] = {
     use Setting::*;
     [
-        ("Model", &[Model, Thinking, Speed, ContextWindow, PermissionMode, SubagentEffort, SubagentModel, ReviewerModel, SmallModel]),
+        ("Model", &[Model, Thinking, Speed, ContextWindow, PermissionMode, SubagentEffort, SubagentModel, MaxSubagents, MaxSessions, ReviewerModel, SmallModel]),
         ("Context", &[AutoCompact, CompactionReserve, KeepRecent, Condense, CondenseModel, CondenseMinBatch, CacheTtl, MessageThreads]),
         ("Accounts", &[SwitchAt, WhenAllOverLimit, FallbackModel, ProviderOrder]),
         ("Modes", &[OutputStyle, Ponytail, Caveman, Rtk, CodeMode, HeadroomProxy, HeadroomUrl, HeadroomToken, ConflictPriority]),
@@ -138,6 +142,9 @@ pub(super) const KEEP_RECENT_TOKENS: [u64; 4] = [10_000, 20_000, 40_000, 80_000]
 pub(super) const CONDENSE_MIN_CHARS: [u64; 4] = [10_000, 20_000, 40_000, 80_000];
 // 0 = never switch accounts.
 pub(super) const SWITCH_AT_PERCENT: [u64; 6] = [70, 80, 90, 95, 100, 0];
+// None = unlimited.
+pub(super) const MAX_SUBAGENTS: [Option<usize>; 5] = [None, Some(8), Some(16), Some(32), Some(64)];
+pub(super) const MAX_SESSIONS: [Option<usize>; 5] = [None, Some(2), Some(4), Some(8), Some(16)];
 
 impl App {
     pub(super) fn settings_key(&mut self, key: KeyEvent) {
@@ -235,6 +242,8 @@ impl App {
             Indicators => s.indicators = step(&INDICATORS, &s.indicators.as_str(), forward).to_string(),
             MessageThreads => s.message_threads = !s.message_threads,
             OutputStyle => s.output_style = step(&OUTPUT_STYLES, &s.output_style.as_str(), forward).to_string(),
+            MaxSubagents => s.max_subagents = step(&MAX_SUBAGENTS, &s.max_subagents, forward),
+            MaxSessions => s.max_sessions = step(&MAX_SESSIONS, &s.max_sessions, forward),
             Model | CondenseModel | FallbackModel | ReviewerModel | SubagentModel | SmallModel | ContextWindow | HeadroomUrl | HeadroomToken => {
                 unreachable!("{row:?} opens its own panel")
             }
@@ -287,6 +296,8 @@ impl App {
             Setting::CacheTtl => choices(CACHE_TTLS.map(String::from), &s.cache_ttl),
             Setting::ReviewerModel => auto(&s.reviewer_model),
             Setting::SubagentModel => auto(&s.subagent_model),
+            Setting::MaxSubagents => choices(MAX_SUBAGENTS.map(limit_label), &limit_label(s.max_subagents)),
+            Setting::MaxSessions => choices(MAX_SESSIONS.map(limit_label), &limit_label(s.max_sessions)),
             Setting::FooterCost => on_off_choices(s.footer_cost),
             Setting::FooterAccount => on_off_choices(s.footer_account),
             Setting::ProgressBar => on_off_choices(s.progress_bar),
@@ -744,6 +755,10 @@ pub(super) fn step<T: PartialEq + Clone>(options: &[T], current: &T, forward: bo
         (Some(i), false) => (i + options.len() - 1) % options.len(),
     };
     options[index].clone()
+}
+
+fn limit_label(limit: Option<usize>) -> String {
+    limit.map_or("unlimited".into(), |n| n.to_string())
 }
 
 pub(super) fn switch_label(percent: u64) -> String {

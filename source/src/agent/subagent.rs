@@ -13,7 +13,6 @@ use crate::api::Usage;
 use crate::settings::Settings;
 
 const DEFAULT_SWARM_PROMPT: &str = include_str!("swarm-prompt.md");
-const MAX_RUNNING: usize = 64;
 /// Sent ahead of every task, since the child's system prompt is the root's.
 const CHILD_BRIEF: &str = "You are a subagent. Another agent spawned you for the task below and reads only your final answer. \
 Nobody answers questions here: finish the task on your own, making the reasonable call where it is unclear. \
@@ -189,6 +188,8 @@ pub struct Runs {
     pub list: Vec<Arc<Run>>,
     /// Only grows, so the id of a failed spawn that left `list` is never given to another run.
     spawned: usize,
+    /// The `subagents.max_running` setting; None is unlimited.
+    pub max_running: Option<usize>,
 }
 
 impl Runs {
@@ -226,8 +227,10 @@ impl Runs {
 pub fn spawn(runs: &Arc<Mutex<Runs>>, launch: Launch, background: bool, workflow: Option<String>, follow_ups: &Arc<Mutex<Vec<FollowUp>>>) -> Result<Arc<Run>, String> {
     let (run, roster) = {
         let mut runs = runs.lock().unwrap();
-        if runs.running() >= MAX_RUNNING {
-            return Err(format!("{MAX_RUNNING} subagents are already running, the limit. Wait for one to finish."));
+        if let Some(max) = runs.max_running
+            && runs.running() >= max
+        {
+            return Err(format!("{max} subagents are already running, the limit in subagents.max_running. Wait for one to finish."));
         }
         let roster = runs.roster();
         runs.spawned += 1;
@@ -631,13 +634,27 @@ mod tests {
 
     #[test]
     fn finished_runs_do_not_count_toward_the_limit() {
-        let mut runs = Runs::default();
-        for _ in 0..MAX_RUNNING {
+        let mut runs = Runs { max_running: Some(2), ..Runs::default() };
+        for _ in 0..2 {
             let run = scan_run();
             run.state.lock().unwrap().result = Some(Ok("done".into()));
             runs.list.push(Arc::new(run));
         }
         let runs = Arc::new(Mutex::new(runs));
+        let error = spawn(&runs, test_launch(), true, None, &Arc::default()).err().unwrap();
+        assert!(error.starts_with("Cannot start subagent"), "{error}");
+    }
+
+    #[test]
+    fn running_runs_stop_at_max_running_and_unlimited_has_no_cap() {
+        let mut runs = Runs { max_running: Some(2), ..Runs::default() };
+        for _ in 0..2 {
+            runs.list.push(Arc::new(scan_run()));
+        }
+        let runs = Arc::new(Mutex::new(runs));
+        let error = spawn(&runs, test_launch(), true, None, &Arc::default()).err().unwrap();
+        assert_eq!(error, "2 subagents are already running, the limit in subagents.max_running. Wait for one to finish.");
+        runs.lock().unwrap().max_running = None;
         let error = spawn(&runs, test_launch(), true, None, &Arc::default()).err().unwrap();
         assert!(error.starts_with("Cannot start subagent"), "{error}");
     }
