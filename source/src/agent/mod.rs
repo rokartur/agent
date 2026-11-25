@@ -503,7 +503,11 @@ impl Agent {
             crons: Arc::default(),
             terminals: Arc::default(),
             web: tools::web::Web::new(&home, tools::web::store_dir()),
-            subagents: Arc::default(),
+            subagents: {
+                let mut runs = Runs::default();
+                runs.max_running = settings.max_subagents;
+                Arc::new(Mutex::new(runs))
+            },
             workflows: Arc::default(),
             parent,
             inbox: None,
@@ -871,6 +875,7 @@ impl Agent {
         self.keep_recent_tokens = settings.keep_recent_tokens;
         self.condense = condense::Config::new(settings, cheap_model);
         self.subagent_concurrency = settings.subagent_concurrency;
+        self.subagents.lock().unwrap().max_running = settings.max_subagents;
         self.subagent_effort = settings.subagent_effort.clone();
         self.subagent_model = settings.subagent_model.clone();
         self.code_mode = settings.code_mode;

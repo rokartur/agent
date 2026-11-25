@@ -85,7 +85,7 @@ fn settings_rows_keep_their_labels() {
 #[test]
 fn settings_sections_hold_every_row_once_and_search_spans_them() {
     let rows: Vec<usize> = all_settings().into_iter().map(|row| row as usize).collect();
-    assert_eq!(rows, (0..=Setting::OutputStyle as usize).collect::<Vec<_>>());
+    assert_eq!(rows, (0..=Setting::MaxSessions as usize).collect::<Vec<_>>());
     assert_eq!(matching_settings(Setting::HeadroomUrl, ""), SETTING_SECTIONS[3].1);
     assert_eq!(matching_settings(Setting::Model, "CONTEXT WIN"), [Setting::ContextWindow]);
     assert_eq!(matching_settings(Setting::Model, "headroom"), [Setting::HeadroomProxy, Setting::HeadroomUrl, Setting::HeadroomToken]);
