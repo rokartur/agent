@@ -215,6 +215,25 @@ fn left_and_right_walk_between_the_shells_agents_and_sessions_pills() {
 }
 
 #[test]
+fn the_scheduled_pill_lists_jobs_and_x_cancels_one() {
+    let home = std::env::temp_dir().join(format!("agent-tui-scheduled-{}", std::process::id()));
+    let mut app = test_app(&home);
+    std::fs::remove_dir_all(&home).ok();
+    let follow_ups = Arc::new(Mutex::new(Vec::new()));
+    crate::tools::cron::wakeup(&app.crons, &serde_json::json!({"delay_seconds": 600, "prompt": "check CI"}), &follow_ups).unwrap();
+    app.key(KeyEvent::from(KeyCode::Down));
+    app.key(KeyEvent::from(KeyCode::Enter));
+    assert!(matches!(app.panel, Some(Panel::Tasks { tab: TaskTab::Scheduled, index: 0 })));
+    let Some(Panel::Tasks { tab, index }) = app.panel else { unreachable!() };
+    let rows: Vec<String> = tasks_panel(&[], &[], &[], app.crons.lock().unwrap().jobs(), &[], tab, index, 80).iter().map(text).collect();
+    assert!(rows[4].starts_with("❯ ■ cr-1   in 59"), "{}", rows[4]);
+    assert!(rows[4].ends_with("s · check CI"), "{}", rows[4]);
+    assert_eq!(rows.last().unwrap(), "↑/↓ to select · Tab to switch · x to cancel · Esc to close");
+    app.key(KeyEvent::from(KeyCode::Char('x')));
+    assert!(app.crons.lock().unwrap().jobs().is_empty());
+}
+
+#[test]
 fn cmd_c_copies_the_selection_when_copy_on_select_is_off() {
     let home = std::env::temp_dir().join(format!("agent-tui-cmd-c-{}", std::process::id()));
     let mut app = test_app(&home);

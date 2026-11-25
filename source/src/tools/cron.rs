@@ -11,10 +11,20 @@ pub struct Crons {
     next_id: usize,
 }
 
-struct Job {
-    id: String,
+pub struct Job {
+    pub id: String,
     when: When,
-    prompt: String,
+    pub prompt: String,
+}
+
+impl Job {
+    pub fn when(&self) -> String {
+        match &self.when {
+            When::Cron { expression, recurring: true, .. } => format!("{expression} recurring"),
+            When::Cron { expression, recurring: false, .. } => format!("{expression} once"),
+            When::Once(at) => format!("in {}s", at.duration_since(SystemTime::now()).unwrap_or_default().as_secs()),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -46,28 +56,24 @@ pub fn wakeup(crons: &Arc<Mutex<Crons>>, input: &Value, follow_ups: &Arc<Mutex<V
 impl Crons {
     pub fn delete(&mut self, input: &Value) -> Result<String, String> {
         let id = input["id"].as_str().ok_or("id required.")?;
-        let index = self.jobs.iter().position(|job| job.id == id).ok_or(format!("No scheduled task {id}."))?;
-        self.jobs.remove(index);
+        self.cancel(id).ok_or(format!("No scheduled task {id}."))?;
         Ok(format!("Cancelled {id}."))
     }
 
-    pub fn len(&self) -> usize {
-        self.jobs.len()
+    pub fn cancel(&mut self, id: &str) -> Option<Job> {
+        let index = self.jobs.iter().position(|job| job.id == id)?;
+        Some(self.jobs.remove(index))
+    }
+
+    pub fn jobs(&self) -> &[Job] {
+        &self.jobs
     }
 
     pub fn list(&self) -> String {
         if self.jobs.is_empty() {
             return "No scheduled tasks.".into();
         }
-        let mut lines = Vec::new();
-        for job in &self.jobs {
-            let when = match &job.when {
-                When::Cron { expression, recurring: true, .. } => format!("{expression} recurring"),
-                When::Cron { expression, recurring: false, .. } => format!("{expression} once"),
-                When::Once(at) => format!("in {}s", at.duration_since(SystemTime::now()).unwrap_or_default().as_secs()),
-            };
-            lines.push(format!("{}  {when}  {}", job.id, job.prompt));
-        }
+        let lines: Vec<String> = self.jobs.iter().map(|job| format!("{}  {}  {}", job.id, job.when(), job.prompt)).collect();
         lines.join("\n")
     }
 }

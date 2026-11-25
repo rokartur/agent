@@ -290,6 +290,7 @@ impl App {
             (self.terminals.lock().unwrap().running() > 0, TaskTab::Shells),
             (footer_agents(&self.subagents.lock().unwrap()) > 0, TaskTab::Agents),
             (!self.started_sessions.is_empty(), TaskTab::Sessions),
+            (!self.crons.lock().unwrap().jobs().is_empty(), TaskTab::Scheduled),
         ];
         shown.into_iter().filter(|(shown, _)| *shown).map(|(_, tab)| tab).collect()
     }
@@ -305,11 +306,19 @@ impl App {
         let Some(Panel::Tasks { tab, index }) = self.panel.as_mut() else { return };
         let terminals = self.terminals.lock().unwrap().list.clone();
         let runs = self.subagents.lock().unwrap().list.clone();
-        let tabs: &[TaskTab] = if self.started_sessions.is_empty() && *tab != TaskTab::Sessions { &[TaskTab::Shells, TaskTab::Agents] } else { &[TaskTab::Shells, TaskTab::Agents, TaskTab::Sessions] };
+        let job_ids: Vec<String> = self.crons.lock().unwrap().jobs().iter().map(|job| job.id.clone()).collect();
+        let mut tabs = vec![TaskTab::Shells, TaskTab::Agents];
+        if !self.started_sessions.is_empty() || *tab == TaskTab::Sessions {
+            tabs.push(TaskTab::Sessions);
+        }
+        if !job_ids.is_empty() || *tab == TaskTab::Scheduled {
+            tabs.push(TaskTab::Scheduled);
+        }
         let len = match tab {
             TaskTab::Shells => terminals.len(),
             TaskTab::Agents => runs.len(),
             TaskTab::Sessions => self.started_sessions.len(),
+            TaskTab::Scheduled => job_ids.len(),
         };
         let at = tabs.iter().position(|shown| shown == tab).expect("the open tab is listed");
         match code {
@@ -328,6 +337,10 @@ impl App {
                         self.push(Item::Error(format!("Cannot stop session {}: {e}", peer.session)));
                     }
                 }
+                TaskTab::Scheduled => {
+                    self.crons.lock().unwrap().cancel(&job_ids[*index]);
+                    *index = (*index).min(job_ids.len().saturating_sub(2));
+                }
             },
             KeyCode::Enter => match tab {
                 TaskTab::Shells => self.panel = Some(Panel::Terminal { index: *index, scroll: 0, loaded: None, lines: Vec::new() }),
@@ -340,6 +353,7 @@ impl App {
                     self.panel = None;
                     self.release_typing_client(|client| client.attach(pid));
                 }
+                TaskTab::Scheduled => {}
             },
             _ => {}
         }
