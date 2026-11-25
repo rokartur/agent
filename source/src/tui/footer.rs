@@ -42,11 +42,6 @@ impl App {
             left.push(span(FOOTER_SEPARATOR, DIM));
             left.push(span(format!("goal {}", goal.status.as_str()), MUTED));
         }
-        let scheduled = self.crons.lock().unwrap().len();
-        if scheduled > 0 {
-            left.push(span(FOOTER_SEPARATOR, DIM));
-            left.push(span(format!("{scheduled} scheduled"), MUTED));
-        }
         match *self.plan.lock().unwrap() {
             Plan::Off => {}
             Plan::Drafting => left.extend([span(FOOTER_SEPARATOR, DIM), span("plan", WARN)]),
@@ -168,9 +163,9 @@ pub(super) fn thinking_style(level: &str) -> Style {
     Style::rgb(gray * 0x010101)
 }
 
-/// The rows under the footer, as in Claude Code: a shells, an agents and a sessions pill, each opening its /tasks tab,
+/// The rows under the footer, as in Claude Code: a shells, an agents, a sessions and a scheduled pill, each opening its /tasks tab,
 /// then the subagent viewed in place of the transcript. `focus` indexes the pills shown, walked to with ↓.
-pub(super) fn background_rows(shells: usize, agents: usize, sessions: usize, viewed: Option<&str>, focus: Option<usize>, columns: usize) -> Vec<Line> {
+pub(super) fn background_rows(shells: usize, agents: usize, sessions: usize, scheduled: usize, viewed: Option<&str>, focus: Option<usize>, columns: usize) -> Vec<Line> {
     let mut rows = Vec::new();
     let mut counts = Vec::new();
     if shells > 0 {
@@ -181,6 +176,9 @@ pub(super) fn background_rows(shells: usize, agents: usize, sessions: usize, vie
     }
     if sessions > 0 {
         counts.push(format!("{sessions} {}", if sessions == 1 { "session" } else { "sessions" }));
+    }
+    if scheduled > 0 {
+        counts.push(format!("{scheduled} scheduled"));
     }
     if !counts.is_empty() {
         let mut row = Vec::new();

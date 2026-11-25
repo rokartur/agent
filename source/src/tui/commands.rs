@@ -51,7 +51,7 @@ pub(super) const BUILTIN_COMMANDS: &[(&str, MidTurn, &str)] = &[
     ("changes", MidTurn::Waits, "List files changed in this session and show their diffs"),
     ("skill-usage", MidTurn::Runs, "Show how often each skill was used, least used first"),
     ("rtk", MidTurn::Runs, "Show rtk token savings"),
-    ("tasks", MidTurn::Runs, "Show background shells and subagent runs"),
+    ("tasks", MidTurn::Runs, "Show background shells, subagent runs and scheduled tasks"),
     ("workflows", MidTurn::Runs, "Show workflow runs: progress, pause, stop, save as a command"),
     ("goal", MidTurn::Runs, "[objective | pause | resume | stop | done]: Set a goal the agent keeps working toward, or manage it"),
     ("btw", MidTurn::Runs, "<question>: Ask a side question without touching the session"),
@@ -228,8 +228,13 @@ impl App {
             }
             "skill-usage" => self.skill_usage(),
             "rtk" => self.rtk_gain(),
-            "tasks" if self.terminals.lock().unwrap().list.is_empty() && self.subagents.lock().unwrap().list.is_empty() && self.started_sessions.is_empty() => {
-                self.system("tasks", "No background tasks yet. The agent starts them with Bash run_in_background, Agent or StartSession.");
+            "tasks"
+                if self.terminals.lock().unwrap().list.is_empty()
+                    && self.subagents.lock().unwrap().list.is_empty()
+                    && self.started_sessions.is_empty()
+                    && self.crons.lock().unwrap().jobs().is_empty() =>
+            {
+                self.system("tasks", "No background tasks yet. The agent starts them with Bash run_in_background, Agent, StartSession, CronCreate or ScheduleWakeup.");
             }
             "tasks" => {
                 let tab = self.pill_tabs().first().copied().unwrap_or(if self.subagents.lock().unwrap().list.is_empty() { TaskTab::Shells } else { TaskTab::Agents });

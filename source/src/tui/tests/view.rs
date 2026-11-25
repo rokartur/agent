@@ -83,13 +83,13 @@ fn tasks_list_shells_and_agents_on_separate_tabs() {
     let mut script = scan_run();
     (script.label, script.launch.script) = ("script".into(), true);
     let runs = [Arc::new(done), Arc::new(running), Arc::new(script)];
-    let rows: Vec<String> = tasks_panel(&[], &runs, &[], &[sonnet], TaskTab::Agents, 1, 80).iter().map(text).collect();
+    let rows: Vec<String> = tasks_panel(&[], &runs, &[], &[], &[sonnet], TaskTab::Agents, 1, 80).iter().map(text).collect();
     assert_eq!(rows[1..3], ["Background  Shells 0   Agents 3 ", "2 active agents"]);
     assert_eq!(rows[4], "  ✓ scan       done · 0 tools · opus high");
     assert_eq!(rows[5], "❯ ● recon 1a   running · 0 tools · sonnet 5 medium");
     assert_eq!(rows[6], "  ● script     running · 0 tools", "a script run has no model");
     assert_eq!(rows.last().unwrap(), "↑/↓ to select · Tab to switch · Enter to view · x to stop · Esc to close");
-    let shells: Vec<String> = tasks_panel(&[], &runs, &[], &[], TaskTab::Shells, 0, 80).iter().map(text).collect();
+    let shells: Vec<String> = tasks_panel(&[], &runs, &[], &[], &[], TaskTab::Shells, 0, 80).iter().map(text).collect();
     assert_eq!(shells[1], "Background   Shells 0   Agents 3");
     assert_eq!(shells[4], "  No shells yet.");
     let peer = |session: &str, title: &str, busy| Peer {
@@ -103,7 +103,7 @@ fn tasks_list_shells_and_agents_on_separate_tabs() {
         socket: PathBuf::new(),
     };
     let sessions = [peer("abc123", "review #320", true), peer("def456", "", false)];
-    let started: Vec<String> = tasks_panel(&[], &runs, &sessions, &[], TaskTab::Sessions, 0, 80).iter().map(text).collect();
+    let started: Vec<String> = tasks_panel(&[], &runs, &sessions, &[], &[], TaskTab::Sessions, 0, 80).iter().map(text).collect();
     assert_eq!(started[1..3], ["Background  Shells 0  Agents 3   Sessions 2 ", "2 active agents · 1 working session"]);
     assert_eq!(started[4], "❯ ● review #320   working · /repo");
     assert_eq!(started[5], "  ■ def456        idle · /repo", "an untitled session shows its id");
@@ -112,14 +112,15 @@ fn tasks_list_shells_and_agents_on_separate_tabs() {
 
 #[test]
 fn background_rows_show_shells_agents_and_sessions_pills() {
-    let rows = |shells, agents, viewed, focus| background_rows(shells, agents, 0, viewed, focus, 40).iter().map(text).collect::<Vec<_>>();
+    let rows = |shells, agents, viewed, focus| background_rows(shells, agents, 0, 0, viewed, focus, 40).iter().map(text).collect::<Vec<_>>();
     assert_eq!(rows(2, 13, None, None), ["2 shells · 13 agents · ↓ to view"]);
     assert_eq!(rows(0, 1, None, Some(0)), ["1 agent · Enter to view"]);
     assert_eq!(rows(1, 0, Some("scan"), None), ["1 shell · ↓ to view", "viewing scan · Esc back"]);
     assert_eq!(rows(0, 0, Some("scan"), None), ["viewing scan · Esc back"]);
     assert!(rows(0, 0, None, None).is_empty());
-    assert_eq!(background_rows(0, 1, 4, None, None, 40).iter().map(text).collect::<Vec<_>>(), ["1 agent · 4 sessions · ↓ to view"]);
-    let focused = background_rows(2, 13, 0, None, Some(1), 40);
+    assert_eq!(background_rows(0, 1, 4, 0, None, None, 40).iter().map(text).collect::<Vec<_>>(), ["1 agent · 4 sessions · ↓ to view"]);
+    assert_eq!(background_rows(0, 0, 0, 2, None, None, 40).iter().map(text).collect::<Vec<_>>(), ["2 scheduled · ↓ to view"]);
+    let focused = background_rows(2, 13, 0, 0, None, Some(1), 40);
     assert_eq!(focused[0][0].style, Style::fg(45));
     assert_eq!(focused[0][2].style, Style::fg(16).on(45));
 }

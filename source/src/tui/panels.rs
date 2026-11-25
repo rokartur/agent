@@ -188,6 +188,8 @@ pub(super) enum TaskTab {
     Agents,
     /// Sessions this one started with StartSession on this computer.
     Sessions,
+    /// CronCreate and ScheduleWakeup jobs waiting to fire.
+    Scheduled,
 }
 
 #[derive(Clone, Copy)]
@@ -376,7 +378,16 @@ impl App {
             Panel::PluginSettings { plugin, index, edit } => self.plugin_settings_panel(plugin, index, edit, width),
             Panel::Plugin { plugin, data, index } => self.plugin_panel(plugin, data, index, width),
             Panel::Agents { .. } => Vec::new(),
-            Panel::Tasks { tab, index } => tasks_panel(&self.terminals.lock().unwrap().list, &self.subagents.lock().unwrap().list, &self.started_sessions, &self.client.catalog(), *tab, *index, width),
+            Panel::Tasks { tab, index } => tasks_panel(
+                &self.terminals.lock().unwrap().list,
+                &self.subagents.lock().unwrap().list,
+                &self.started_sessions,
+                self.crons.lock().unwrap().jobs(),
+                &self.client.catalog(),
+                *tab,
+                *index,
+                width,
+            ),
             Panel::Workflows { .. } | Panel::WorkflowRun { .. } | Panel::WorkflowSave { .. } => self.workflow_panel(width),
             Panel::Terminal { .. } | Panel::Diff { .. } => unreachable!("frame draws the full-screen view instead of a panel"),
             Panel::Btw => self.btw.as_ref().expect("the btw panel opens with a thread").render(width),

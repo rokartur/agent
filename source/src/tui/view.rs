@@ -88,6 +88,7 @@ impl App {
         let shells = self.terminals.lock().unwrap().running();
         let agents = footer_agents(&self.subagents.lock().unwrap());
         let sessions = self.started_sessions.len();
+        let scheduled = self.crons.lock().unwrap().jobs().len();
         let workflows = footer_workflows(&self.workflows);
         let pills = self.pill_tabs().len();
         if pills == 0 && workflows.is_empty() && matches!(self.panel, Some(Panel::Agents { .. })) {
@@ -157,7 +158,7 @@ impl App {
             _ => None,
         };
         let pill_focus = focus.filter(|row| (1..=pills).contains(row)).map(|row| row - 1);
-        bottom.extend(background_rows(shells, agents, sessions, self.viewed.as_ref().map(|view| view.run.label.as_str()), pill_focus, width));
+        bottom.extend(background_rows(shells, agents, sessions, scheduled, self.viewed.as_ref().map(|view| view.run.label.as_str()), pill_focus, width));
         let workflow_focus = focus.and_then(|row| row.checked_sub(1 + pills));
         bottom.extend(workflow_rows(&workflows, workflow_focus, width));
 
@@ -463,8 +464,18 @@ pub(super) fn step_row(step: &workflow::Step) -> (String, String) {
     (step.label.clone(), right)
 }
 
-/// /tasks, as in Claude Code, with shells, local agents and started sessions on separate tabs, each row with its status.
-pub(super) fn tasks_panel(terminals: &[Arc<Terminal>], runs: &[Arc<Run>], sessions: &[Peer], catalog: &[Model], shown_tab: TaskTab, selected: usize, columns: usize) -> Vec<Line> {
+/// /tasks, as in Claude Code, with shells, local agents, started sessions and scheduled jobs on separate tabs, each row with its status.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn tasks_panel(
+    terminals: &[Arc<Terminal>],
+    runs: &[Arc<Run>],
+    sessions: &[Peer],
+    jobs: &[crate::tools::cron::Job],
+    catalog: &[Model],
+    shown_tab: TaskTab,
+    selected: usize,
+    columns: usize,
+) -> Vec<Line> {
     let active_shells = terminals.iter().filter(|t| t.status() == TerminalStatus::Running).count();
     let active_agents = runs.iter().filter(|run| run.is_running()).count();
     let working_sessions = sessions.iter().filter(|peer| peer.busy).count();
@@ -490,6 +501,9 @@ pub(super) fn tasks_panel(terminals: &[Arc<Terminal>], runs: &[Arc<Run>], sessio
     if !sessions.is_empty() || shown_tab == TaskTab::Sessions {
         header.extend([span("  ", PLAIN), tab(format!("Sessions {}", sessions.len()), TaskTab::Sessions)]);
     }
+    if !jobs.is_empty() || shown_tab == TaskTab::Scheduled {
+        header.extend([span("  ", PLAIN), tab(format!("Scheduled {}", jobs.len()), TaskTab::Scheduled)]);
+    }
     // Cards are files any process of this user writes, so their text could carry escape codes.
     let printable = |text: &str| -> String { text.chars().filter(|c| !c.is_control()).collect() };
     let session_names: Vec<String> = sessions.iter().map(|peer| printable(if peer.title.is_empty() { &peer.session } else { &peer.title })).collect();
@@ -497,6 +511,7 @@ pub(super) fn tasks_panel(terminals: &[Arc<Terminal>], runs: &[Arc<Run>], sessio
         TaskTab::Shells => terminals.iter().map(|t| t.title.as_str()).collect(),
         TaskTab::Agents => runs.iter().map(|run| run.label.as_str()).collect(),
         TaskTab::Sessions => session_names.iter().map(String::as_str).collect(),
+        TaskTab::Scheduled => jobs.iter().map(|job| job.id.as_str()).collect(),
     };
     let name_width = names.iter().map(|name| width(name)).max().unwrap_or(0).min(TASK_NAME_WIDTH);
     let name = |text: &str, index: usize, running: bool| {
@@ -531,6 +546,14 @@ pub(super) fn tasks_panel(terminals: &[Arc<Terminal>], runs: &[Arc<Run>], sessio
                 rows.push(row);
             }
         }
+        TaskTab::Scheduled => {
+            for (index, job) in jobs.iter().enumerate() {
+                let mut row = vec![status_mark("waiting")];
+                row.extend(name(&job.id, index, true));
+                row.push(span(format!("{} · {}", job.when(), printable(&job.prompt.replace('\n', " "))), DIM));
+                rows.push(row);
+            }
+        }
         TaskTab::Agents => {
             for (index, run) in runs.iter().enumerate() {
                 let state = run.state.lock().unwrap();
@@ -554,6 +577,7 @@ pub(super) fn tasks_panel(terminals: &[Arc<Terminal>], runs: &[Arc<Run>], sessio
             TaskTab::Shells => "  No shells yet.",
             TaskTab::Agents => "  No agents yet.",
             TaskTab::Sessions => "  No started sessions run.",
+            TaskTab::Scheduled => "  Nothing scheduled.",
         };
         lines.push(vec![span(empty, MUTED)]);
     }
@@ -568,8 +592,12 @@ pub(super) fn tasks_panel(terminals: &[Arc<Terminal>], runs: &[Arc<Run>], sessio
     if rows.len() > shown {
         lines.extend([Vec::new(), vec![span(format!("  {}/{}", selected + 1, rows.len()), DIM)]]);
     }
-    let enter = if shown_tab == TaskTab::Sessions { "Enter to view, /back there returns" } else { "Enter to view" };
-    lines.extend([Vec::new(), vec![span(format!("↑/↓ to select · Tab to switch · {enter} · x to stop · Esc to close"), MUTED.italic())]]);
+    let hint = match shown_tab {
+        TaskTab::Sessions => "Enter to view, /back there returns · x to stop",
+        TaskTab::Scheduled => "x to cancel",
+        _ => "Enter to view · x to stop",
+    };
+    lines.extend([Vec::new(), vec![span(format!("↑/↓ to select · Tab to switch · {hint} · Esc to close"), MUTED.italic())]]);
     lines
 }
 
