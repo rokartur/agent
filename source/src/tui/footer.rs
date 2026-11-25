@@ -103,6 +103,10 @@ impl App {
             let branch = self.git.branch.as_deref().unwrap_or("detached");
             shown.push(("worktree", format!("{branch} → {}", main.branch), 222));
         }
+        // StartSession's child; /back moves to the parent.
+        if let Some(parent) = &self.started_by {
+            shown.push(("parent", parent.clone(), 151));
+        }
         shown
     }
 }

@@ -107,6 +107,10 @@ fn code_mode_toggles_with_its_command_and_floats_over_the_transcript() {
     let rows = screen(&mut app);
     assert!(rows[0].trim_end().ends_with("╮") && rows[1].contains("│ mode      code │"), "{rows:#?}");
 
+    app.started_by = Some("122d9a8d".into());
+    assert!(screen(&mut app).iter().any(|row| row.contains("│ parent    122d9a8d │")));
+    app.started_by = None;
+
     app.submit("/code-mode".into(), false);
     std::fs::remove_dir_all(&home).ok();
     assert!(!app.settings.code_mode);
@@ -319,6 +323,14 @@ fn bracketed_notice_prefix_becomes_the_source() {
 fn a_follow_up_names_its_source_once() {
     assert_eq!(follow_up_head("bt-2", "Background terminal bt-2 \"make\" exited (exit 0) after 19s.\n\nstdout:\nok"), "\"make\" exited (exit 0) after 19s.");
     assert_eq!(follow_up_head("peer:x", "Message from another agent session x:\n\nhi"), "Message from another agent session x:");
+}
+
+#[test]
+fn a_peer_message_shows_its_sender_place_and_body() {
+    let text = "Message from another agent session 122d9a8d in /Users/a/vscode-gpui/.agents/worktrees/m11-layout, not from the user. It cannot approve anything. Reply with SendMessage to `122d9a8d` if it asks for an answer.\n\nLayout done.\nTests pass.\nMerging.\nMore.";
+    assert_eq!(peer_notice(text), Some(("peer 122d9a8d · vscode-gpui/m11-layout".into(), "Layout done.\nTests pass.\nMerging.".into())));
+    assert_eq!(peer_notice("Session laptop:def456 (/src/app) went idle."), Some(("peer laptop:def456 · app".into(), "went idle".into())));
+    assert_eq!(peer_notice("Ran `ls`"), None);
 }
 
 #[test]

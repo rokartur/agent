@@ -387,6 +387,7 @@ pub(super) fn history_items(messages: &[Value]) -> Vec<Item> {
                             let (source, text) = notice_source(text);
                             Item::System { source: source.into(), text: text.into(), tone: notice_tone(text) }
                         }
+                        Some("peer") if let Some((source, text)) = peer_notice(text) => Item::System { source, text, tone: Tone::Info },
                         Some(source) => Item::System { source: source.into(), text: text.lines().next().unwrap_or_default().into(), tone: Tone::Info },
                         None => Item::User(text.to_string()),
                     });

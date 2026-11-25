@@ -1126,6 +1126,31 @@ fn follow_up_head<'a>(source: &str, text: &'a str) -> &'a str {
     head.split_once(&format!(" {source} ")).map_or(head, |(_, rest)| rest)
 }
 
+/// A peer message as `(source, text)`: the sender and where it works instead of the delivery boilerplate,
+/// then the first lines of what it said. None for text from another producer.
+fn peer_notice(text: &str) -> Option<(String, String)> {
+    if let Some(rest) = text.strip_prefix("Message from another agent session ") {
+        let (from, rest) = rest.split_once(" in ")?;
+        let (cwd, _) = rest.split_once(", not from the user.")?;
+        let body = rest.split_once("\n\n").map_or("", |(_, body)| body);
+        return Some((peer_source(from, cwd), body.lines().take(3).collect::<Vec<_>>().join("\n")));
+    }
+    let rest = text.strip_prefix("Session ")?;
+    let (from, rest) = rest.split_once(" (")?;
+    let (cwd, state) = rest.split_once(") ")?;
+    Some((peer_source(from, cwd), state.trim_end_matches('.').to_string()))
+}
+
+/// "/x/vscode-gpui/.agents/worktrees/m11-layout" reads "vscode-gpui/m11-layout": many sessions share a repo.
+fn peer_source(from: &str, cwd: &str) -> String {
+    let last = |path: &str| path.rsplit('/').next().unwrap_or(path).to_string();
+    let place = match cwd.split_once("/.agents/worktrees/") {
+        Some((repo, worktree)) => format!("{}/{worktree}", last(repo)),
+        None => last(cwd),
+    };
+    format!("peer {from} · {place}")
+}
+
 // shortcut: notices carry no severity, so the wording decides; give Event::Notice a tone if this misfires.
 fn notice_tone(text: &str) -> Tone {
     let text = text.to_lowercase();
