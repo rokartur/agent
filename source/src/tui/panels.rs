@@ -87,10 +87,11 @@ pub(super) enum Panel {
         index: usize,
         confirm: bool,
     },
-    /// Token totals per `usage::SCOPES`, read when /usage opens; the last tab shows subscription limits.
+    /// Token totals per `usage::SCOPES` and requests per day, read when /usage opens; the first tabs show subscription limits and the activity heatmap.
     Usage {
         tab: usize,
         totals: [Vec<ModelTotal>; 4],
+        days: usage::Days,
     },
     /// The settings a plugin declares in plugin.json; `edit` holds a string being typed.
     PluginSettings {
@@ -371,7 +372,7 @@ impl App {
             Panel::Plugins { index, confirm } => self.plugins_panel(index, confirm, width),
             Panel::Skills { query, index } => self.skills_panel(query, index, width),
             Panel::Mcp { index, confirm } => self.mcp_panel(index, confirm, width),
-            Panel::Usage { tab, totals } => self.usage_panel(tab, totals, width),
+            Panel::Usage { tab, totals, days } => self.usage_panel(tab, totals, days, width),
             Panel::PluginSettings { plugin, index, edit } => self.plugin_settings_panel(plugin, index, edit, width),
             Panel::Plugin { plugin, data, index } => self.plugin_panel(plugin, data, index, width),
             Panel::Agents { .. } => Vec::new(),

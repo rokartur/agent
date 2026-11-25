@@ -216,7 +216,7 @@ fn context_use_turns_yellow_at_70_and_red_at_90_percent() {
 
 #[test]
 fn token_counts_round_like_pi() {
-    assert_eq!([tokens(950), tokens(14_400), tokens(999_600), tokens(1_250_000)], ["950", "14k", "1.0M", "1.2M"]);
+    assert_eq!([tokens(950), tokens(14_400), tokens(999_600), tokens(1_250_000), tokens(3_140_000_000)], ["950", "14k", "1.0M", "1.2M", "3.1B"]);
 }
 
 #[test]
