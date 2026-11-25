@@ -222,7 +222,8 @@ impl App {
             "context" => _ = self.commands.send(Command::Context),
             "history" => self.open_history(),
             "usage" => {
-                self.panel = Some(Panel::Usage { tab: 0, totals: usage::totals(&self.sessions_dir, &self.session_id, crate::process::now_ms()) });
+                let (totals, days) = usage::totals(&self.sessions_dir, &self.session_id, crate::process::now_ms());
+                self.panel = Some(Panel::Usage { tab: 0, totals, days });
                 self.refresh_usage_in_background();
             }
             "skill-usage" => self.skill_usage(),

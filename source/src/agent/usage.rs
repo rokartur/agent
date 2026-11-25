@@ -1,5 +1,5 @@
 use serde_json::{Value, json};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
 use crate::api::models::{self, Model, Price};
@@ -77,12 +77,13 @@ pub fn dollars(cost: f64) -> String {
     format!("${cost:.3}")
 }
 
-/// pi's token counts: 950, 14k, 1.2M.
+/// pi's token counts: 950, 14k, 1.2M, 3.1B.
 pub fn tokens(count: u64) -> String {
     match count {
         n if n < 1000 => n.to_string(),
         n if n < 999_500 => format!("{}k", (n + 500) / 1000),
-        n => format!("{:.1}M", n as f64 / 1_000_000.0),
+        n if n < 999_950_000 => format!("{:.1}M", n as f64 / 1_000_000.0),
+        n => format!("{:.1}B", n as f64 / 1_000_000_000.0),
     }
 }
 
@@ -111,13 +112,20 @@ impl ModelTotal {
     }
 }
 
-/// Sums the `usage` records of every session in `dir` for each of `SCOPES`, sorted by model.
-pub fn totals(dir: &Path, session_id: &str, now_ms: u64) -> [Vec<ModelTotal>; SCOPES.len()] {
+/// Tokens per local day, cache reads and writes included, keyed by `local_day`.
+pub type Days = HashMap<u32, u64>;
+
+/// Sums the `usage` records of every session in `dir` for each of `SCOPES`, sorted by model, and their tokens per local day.
+/// One pass, since the sessions directory can hold a gigabyte.
+pub fn totals(dir: &Path, session_id: &str, now_ms: u64) -> ([Vec<ModelTotal>; SCOPES.len()], Days) {
     let mut by_model: [BTreeMap<String, ModelTotal>; SCOPES.len()] = Default::default();
+    let mut days = Days::new();
     let Ok(files) = std::fs::read_dir(dir) else { return Default::default() };
     for path in files.flatten().map(|file| file.path()) {
         let current = path.file_stem().is_some_and(|stem| stem == session_id);
         for (model, request, timestamp) in records(&path, 0).0 {
+            let Usage { input, output, cache_read, cache_write } = request.usage;
+            *days.entry(local_day(timestamp / 1000)).or_default() += input + output + cache_read + cache_write;
             let age = now_ms.saturating_sub(timestamp);
             for (scope, inside) in by_model.iter_mut().zip([current, age < DAY_MS, age < 7 * DAY_MS, true]) {
                 if inside {
@@ -126,7 +134,13 @@ pub fn totals(dir: &Path, session_id: &str, now_ms: u64) -> [Vec<ModelTotal>; SC
             }
         }
     }
-    by_model.map(|scope| scope.into_values().collect())
+    (by_model.map(|scope| scope.into_values().collect()), days)
+}
+
+/// The local date of `unix` seconds as YYYYMMDD.
+pub fn local_day(unix: u64) -> u32 {
+    let tm = crate::process::local_time(unix);
+    (tm.tm_year + 1900) as u32 * 10_000 + (tm.tm_mon + 1) as u32 * 100 + tm.tm_mday as u32
 }
 
 /// The Session scope of `totals` for one session file.
@@ -214,7 +228,7 @@ mod tests {
             std::fs::write(dir.join(format!("{name}.jsonl")), lines.iter().map(|l| format!("{l}\n")).collect::<String>()).unwrap();
         }
 
-        let [session, day, week, all] = totals(&dir, "cur", now);
+        let ([session, day, week, all], days) = totals(&dir, "cur", now);
         std::fs::remove_dir_all(&dir).unwrap();
 
         // read_dir order differs between file systems, so requests compare as sorted inputs.
@@ -232,6 +246,8 @@ mod tests {
         assert_eq!(inputs(&week), expect(&[("haiku", &[5]), ("opus", &[10, 20])]));
         assert_eq!(inputs(&all), expect(&[("haiku", &[5]), ("opus", &[10, 20, 40])]));
         assert_eq!(all[1].usage(), Usage { input: 70, output: 3, cache_read: 6, cache_write: 9 });
+        assert_eq!(days.values().sum::<u64>(), 99);
+        assert_eq!(days[&local_day((now - 1000) / 1000)], 27);
     }
 
     const OPUS: Rates = Rates { input: 4e-6, output: 20e-6, cache_read: 0.2e-6, cache_write: 5e-6 };

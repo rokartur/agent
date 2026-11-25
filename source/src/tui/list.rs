@@ -39,12 +39,7 @@ pub struct List<'a> {
 
 impl List<'_> {
     pub fn render(&self, columns: usize, max_rows: usize) -> Vec<Line> {
-        let mut header = vec![span(self.title.clone(), BRIGHT.bold())];
-        for (index, tab) in self.tabs.iter().enumerate() {
-            header.push(span("  ", PLAIN));
-            header.push(if index == self.tab { span(format!(" {tab} "), ACTIVE_TAB) } else { span(*tab, MUTED) });
-        }
-        let mut head = vec![header];
+        let mut head = vec![header(&self.title, self.tabs, self.tab)];
         if let Some(search) = &self.search {
             head.push(vec![span(format!("> {search}"), BRIGHT.bold())]);
         }
@@ -63,6 +58,16 @@ impl List<'_> {
             line
         })
     }
+}
+
+/// `Title   Tab   Tab` with the active tab on a background.
+pub fn header(title: &str, tabs: &[&str], active: usize) -> Line {
+    let mut header = vec![span(title, BRIGHT.bold())];
+    for (index, tab) in tabs.iter().enumerate() {
+        header.push(span("  ", PLAIN));
+        header.push(if index == active { span(format!(" {tab} "), ACTIVE_TAB) } else { span(*tab, MUTED) });
+    }
+    header
 }
 
 /// A panel around rows the caller styles: a blank line, `head`, the `max_rows` rows around `selected` behind a `→`, `n/len` when they scroll, key hints.

@@ -265,7 +265,7 @@ fn usage_tab_cycles_its_tabs_and_other_keys_do_nothing() {
     let home = std::env::temp_dir().join(format!("agent-tui-usage-{}", std::process::id()));
     let mut app = test_app(&home);
     std::fs::remove_dir_all(&home).ok();
-    app.panel = Some(Panel::Usage { tab: USAGE_TABS.len() - 1, totals: Default::default() });
+    app.panel = Some(Panel::Usage { tab: USAGE_TABS.len() - 1, totals: Default::default(), days: Default::default() });
     app.key(KeyEvent::from(KeyCode::Tab));
     app.key(KeyEvent::from(KeyCode::Char('x')));
     assert!(matches!(app.panel, Some(Panel::Usage { tab: 0, .. })));

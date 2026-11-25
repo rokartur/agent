@@ -299,7 +299,7 @@ fn parse_usage(data: &Value) -> Option<Windows> {
     }
     models.sort_by(|a, b| a.model.cmp(&b.model));
     let fullest = models.iter().max_by(|a, b| a.used.total_cmp(&b.used))?;
-    Some(Windows { five_hour: None, seven_day: fullest.used, resets_at: fullest.resets_at, models: models.clone() })
+    Some(Windows { five_hour: None, seven_day: fullest.used, resets_at: fullest.resets_at, models: models.clone(), windows: Vec::new() })
 }
 
 /// `fetchAvailableModels` as `google-antigravity/<id>`, by name; internal, disabled and image models cannot run the agent.

@@ -354,27 +354,26 @@ impl App {
         *tab = if code == KeyCode::Tab { (*tab + 1) % tabs } else { (*tab + tabs - 1) % tabs };
     }
 
-    pub(super) fn usage_panel(&self, tab: &usize, totals: &[Vec<ModelTotal>; 4], width: usize) -> Vec<Line> {
-        let (rows, selected) = match totals.get(*tab) {
-            Some(totals) => {
-                let rows = usage_rows(totals, &self.client.catalog());
-                let total_row = rows.len().saturating_sub(1);
-                (rows, total_row)
-            }
-            None => {
-                let subscriptions: Vec<AccountView> = self.client.accounts().into_iter().filter(|a| a.oauth).collect();
-                let (rows, account_rows) = account_rows(&subscriptions, &[]);
-                (rows, account_rows.first().copied().unwrap_or(0))
-            }
-        };
+    pub(super) fn usage_panel(&self, tab: &usize, totals: &[Vec<ModelTotal>; 4], days: &usage::Days, width: usize) -> Vec<Line> {
+        if *tab == 0 {
+            let accounts: Vec<AccountView> = self.client.accounts().into_iter().filter(|a| a.oauth && crate::api::accounts::reports_usage(&a.provider)).collect();
+            return limits_panel(&accounts, width, crate::process::now_ms());
+        }
+        match tab {
+            1 => return overview_panel(days, width, crate::process::now_ms()),
+            2 => return daily_panel(days, width, crate::process::now_ms()),
+            _ => {}
+        }
+        let totals = &totals[tab - 3];
+        let rows = usage_rows(totals, &self.client.catalog());
         let view = list::List {
             title: "Usage".to_string(),
             tabs: &USAGE_TABS,
             tab: *tab,
             search: None,
             rows: &rows,
-            selected,
-            empty: if *tab < usage::SCOPES.len() { "No usage recorded yet." } else { "No subscription accounts." },
+            selected: rows.len().saturating_sub(1),
+            empty: "No usage recorded yet.",
             hint: "tab scope     $ billed by OpenRouter, else at list prices; subscriptions do not bill     esc close",
         };
         view.render(width, PANEL_ROWS)
@@ -454,7 +453,254 @@ impl App {
     }
 }
 
-pub(super) const USAGE_TABS: [&str; 5] = ["Session", "24 hours", "7 days", "All", "Limits"];
+pub(super) const USAGE_TABS: [&str; 7] = ["Limits", "Overview", "Daily", "Session", "24 hours", "7 days", "All"];
+
+/// Claude Code's /usage: per window a bold title, a 50-cell bar with "N% used", and the local reset time.
+pub(super) fn limits_panel(accounts: &[AccountView], width: usize, now_ms: u64) -> Vec<Line> {
+    let mut lines = vec![Vec::new(), list::header("Usage", &USAGE_TABS, 0)];
+    if accounts.is_empty() {
+        lines.extend([Vec::new(), vec![span("/usage is only available for subscription plans.", DIM)]]);
+    }
+    // Claude Code caps the panel at 80 columns and draws the bar 50 wide from 62 up.
+    let max_width = width.saturating_sub(2).min(80);
+    for account in accounts {
+        if accounts.len() > 1 {
+            lines.extend([Vec::new(), vec![span(format!("{} ({})", account.name, account.provider), BRIGHT.bold())]]);
+        }
+        let Some(usage) = &account.usage else {
+            let status = match &account.status {
+                AccountStatus::Failed(error) => span(format!("Error: {}", error.lines().next().unwrap_or_default()), ERROR),
+                _ => span("Loading usage data…", DIM),
+            };
+            lines.extend([Vec::new(), vec![status]]);
+            continue;
+        };
+        let windows = usage.windows.iter().map(|w| (w.title, w.used, w.resets_at));
+        let google_quotas = usage.models.iter().map(|q| (q.model.as_str(), q.used, q.resets_at));
+        for (title, used, resets_at) in windows.chain(google_quotas) {
+            let reset = resets_at.map(|at| format!("Resets {}", reset_time(at, now_ms)));
+            let label = span(format!("{}% used", used.floor()), PLAIN);
+            lines.push(Vec::new());
+            if max_width >= 62 {
+                lines.extend([vec![span(title, PLAIN.bold())], vec![limit_bar(used, 50), span(" ", PLAIN), label]]);
+                lines.extend(reset.map(|reset| vec![span(reset, DIM)]));
+            } else {
+                let mut head = vec![span(title, PLAIN.bold())];
+                head.extend(reset.map(|reset| span(format!(" · {reset}"), DIM)));
+                lines.extend([head, vec![limit_bar(used, max_width)], vec![label]]);
+            }
+        }
+    }
+    lines.extend([Vec::new(), vec![span("tab scope     esc close", MUTED)]]);
+    lines.iter().map(|line| truncate(line, width)).collect()
+}
+
+/// Codex's analytics overview: lifetime and peak tokens, streaks, then a year of tokens per day.
+pub(super) fn overview_panel(days: &usage::Days, width: usize, now_ms: u64) -> Vec<Line> {
+    let mut lines = vec![Vec::new(), list::header("Usage", &USAGE_TABS, 1), Vec::new()];
+    if days.is_empty() {
+        lines.push(vec![span("No usage recorded yet.", DIM)]);
+    } else {
+        lines.extend(overview_stats(days, width, now_ms));
+        lines.extend([vec![span("Token activity", BRIGHT.bold())], vec![span("Last 12 months", MUTED)], Vec::new()]);
+        lines.extend(heatmap(days, width, now_ms));
+    }
+    lines.extend([Vec::new(), vec![span("tab scope     esc close", MUTED)]]);
+    lines.iter().map(|line| truncate(line, width)).collect()
+}
+
+fn overview_stats(days: &usage::Days, width: usize, now_ms: u64) -> Vec<Line> {
+    // Ten years of days bounds the longest streak without date arithmetic on YYYYMMDD keys.
+    let history = last_days(days, 3650, now_ms);
+    let mut longest = 0;
+    let mut run = 0;
+    for (_, tokens) in &history {
+        run = if *tokens > 0 { run + 1 } else { 0 };
+        longest = longest.max(run);
+    }
+    // A day without usage yet does not break the streak until it ends.
+    let today_empty = history.last().is_some_and(|(_, tokens)| *tokens == 0);
+    let current = history.iter().rev().skip(today_empty as usize).take_while(|(_, tokens)| *tokens > 0).count();
+    let stats = [
+        (usage::tokens(days.values().sum()), "Lifetime tokens"),
+        (usage::tokens(days.values().copied().max().unwrap_or(0)), "Peak tokens"),
+        (format!("{current} days"), "Current streak"),
+        (format!("{longest} days"), "Longest streak"),
+    ];
+    let per_row = match width {
+        54.. => 4,
+        36.. => 2,
+        _ => 1,
+    };
+    let cell = width / per_row;
+    let mut lines = Vec::new();
+    for row in stats.chunks(per_row) {
+        lines.push(row.iter().map(|(value, _)| span(format!("{value:^cell$}"), BRIGHT.bold())).collect());
+        lines.push(row.iter().map(|(_, label)| span(format!("{label:^cell$}"), MUTED)).collect());
+        lines.push(Vec::new());
+    }
+    lines
+}
+
+const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+/// Tokens of the last `count` local days, oldest first, each with that day's noon in unix seconds.
+fn last_days(days: &usage::Days, count: u64, now_ms: u64) -> Vec<(u64, u64)> {
+    const DAY: u64 = 24 * 60 * 60;
+    // Noon keeps whole-day steps on the right date across a DST change.
+    let now = crate::process::local_time(now_ms / 1000);
+    let today_noon = now_ms / 1000 - (now.tm_hour * 3600 + now.tm_min * 60 + now.tm_sec) as u64 + 12 * 3600;
+    (0..count)
+        .rev()
+        .map(|ago| {
+            let noon = today_noon - ago * DAY;
+            (noon, days.get(&usage::local_day(noon)).copied().unwrap_or(0))
+        })
+        .collect()
+}
+
+/// Codex's token activity grid: up to 52 weeks of tokens per day, Sunday rows on top, shaded by the share of the busiest day.
+pub(super) fn heatmap(days: &usage::Days, width: usize, now_ms: u64) -> Vec<Line> {
+    // Codex blends its accent into a dark background at 14% (empty), 22%, 42%, 68% and 100%.
+    const SHADES: [Style; 5] = [Style::rgb(0x242424), Style::rgb(0x383225), Style::rgb(0x6b6047), Style::rgb(0xad9b72), Style::rgb(0xffe4a8)];
+    let weeks = width.saturating_sub(4).div_ceil(2).clamp(1, 52);
+    let today = crate::process::local_time(now_ms / 1000).tm_wday as usize;
+    let cells = last_days(days, ((weeks - 1) * 7 + today + 1) as u64, now_ms);
+    let max = cells.iter().map(|(_, tokens)| *tokens).max().unwrap_or(0);
+    let level = |tokens: u64| match tokens {
+        0 => 0,
+        t if t * 4 > max * 3 => 4,
+        t if t * 2 > max => 3,
+        t if t * 4 > max => 2,
+        _ => 1,
+    };
+    let mut labels = vec![' '; weeks * 2 - 1];
+    let mut taken_until = 0;
+    for week in 0..weeks {
+        let sunday = crate::process::local_time(cells[week * 7].0);
+        let month = MONTHS[sunday.tm_mon as usize];
+        let offset = week * 2;
+        if sunday.tm_mday <= 7 && offset >= taken_until && offset + month.len() <= labels.len() {
+            labels.splice(offset..offset + month.len(), month.chars());
+            taken_until = offset + month.len() + 1;
+        }
+    }
+    let mut lines = vec![vec![span("    ", PLAIN), span(labels.into_iter().collect::<String>(), MUTED)]];
+    for (weekday, name) in [" Su ", " Mo ", " Tu ", " We ", " Th ", " Fr ", " Sa "].into_iter().enumerate() {
+        let mut line = vec![span(name, MUTED)];
+        for week in 0..weeks {
+            if week > 0 {
+                line.push(span(" ", PLAIN));
+            }
+            line.push(match cells.get(week * 7 + weekday) {
+                Some((_, tokens)) => span("■", SHADES[level(*tokens)]),
+                None => span(" ", PLAIN),
+            });
+        }
+        lines.push(line);
+    }
+    let mut legend = vec![span("   Less", MUTED)];
+    for shade in SHADES {
+        legend.extend([span(" ", PLAIN), span("■", shade)]);
+    }
+    legend.push(span(" More", MUTED));
+    lines.extend([Vec::new(), legend]);
+    lines
+}
+
+/// Codex's usage chart: one bar of tokens per day of the last week, its amount above it, the date below.
+pub(super) fn daily_panel(days: &usage::Days, width: usize, now_ms: u64) -> Vec<Line> {
+    const ROWS: usize = 10;
+    const EIGHTHS: [char; 9] = [' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+    let week = last_days(days, 7, now_ms);
+    let date = |noon: u64| {
+        let tm = crate::process::local_time(noon);
+        (format!("{} {}", MONTHS[tm.tm_mon as usize], tm.tm_mday), tm.tm_year + 1900)
+    };
+    let (first, _) = date(week[0].0);
+    let (last, year) = date(week[6].0);
+    let mut lines = vec![Vec::new(), list::header("Usage", &USAGE_TABS, 2), Vec::new()];
+    lines.extend([vec![span(format!("{first}-{last}, {year}"), BRIGHT.bold())], vec![span("Total tokens", MUTED)], Vec::new()]);
+    let peak = week.iter().map(|(_, tokens)| *tokens).max().unwrap_or(0).max(1);
+    let axis = [usage::tokens(peak), usage::tokens(peak / 2)];
+    let axis_width = axis[0].len().max(axis[1].len()) + 2;
+    let column = (width.saturating_sub(axis_width) / 7).max(1);
+    let bar_width = (column * 3 / 5).max(1);
+    let eighths: Vec<usize> = week.iter().map(|(_, tokens)| (*tokens as usize * ROWS * 8).div_ceil(peak as usize)).collect();
+    // Row ROWS is the label row above a full-height bar; row 0 sits on the baseline.
+    for row in (0..=ROWS).rev() {
+        let tick = match row {
+            r if r == ROWS - 1 => &axis[0],
+            r if r == ROWS / 2 - 1 => &axis[1],
+            _ => "",
+        };
+        let mut line = vec![span(format!("{tick:>w$}  ", w = axis_width - 2), MUTED)];
+        for (day, height) in eighths.iter().enumerate() {
+            let filled = height.saturating_sub(row * 8).min(8);
+            if filled > 0 {
+                let bar = EIGHTHS[filled].to_string().repeat(bar_width);
+                line.push(span(format!("{bar:^column$}"), Style::fg(6)));
+            } else if row == height.div_ceil(8) {
+                let amount = usage::tokens(week[day].1);
+                line.push(span(format!("{amount:^column$}"), DIM));
+            } else {
+                line.push(span(" ".repeat(column), PLAIN));
+            }
+        }
+        lines.push(line);
+    }
+    lines.push(vec![span(format!("{:>w$}  ", "0", w = axis_width - 2), MUTED), span("─".repeat(column * 7), DIM)]);
+    let mut dates = vec![span(" ".repeat(axis_width), PLAIN)];
+    dates.extend(week.iter().map(|(noon, _)| span(format!("{:^column$}", date(*noon).0), MUTED)));
+    lines.extend([Vec::new(), dates, Vec::new(), vec![span("tab scope     esc close", MUTED)]]);
+    lines.iter().map(|line| truncate(line, width)).collect()
+}
+
+/// Full blocks, one eighth-block for the remainder, then blanks on the empty color: Claude Code's dark theme rate-limit bar.
+pub(super) fn limit_bar(percent: f64, cells: usize) -> Span {
+    const EIGHTHS: [char; 9] = [' ', '▏', '▎', '▍', '▌', '▋', '▊', '▉', '█'];
+    let filled = (percent / 100.0).clamp(0.0, 1.0) * cells as f64;
+    let full = filled.floor() as usize;
+    let mut bar = "█".repeat(full);
+    if full < cells {
+        bar.push(EIGHTHS[((filled - full as f64) * EIGHTHS.len() as f64) as usize]);
+        bar.push_str(&" ".repeat(cells - full - 1));
+    }
+    span(bar, Style::rgb(0xb1b9f9).on(60))
+}
+
+/// Claude Code's reset time: "5pm (Europe/Warsaw)" within a day, "Oct 9, 2:30pm (Europe/Warsaw)" further out.
+fn reset_time(resets_at_ms: u64, now_ms: u64) -> String {
+    let at = crate::process::local_time(resets_at_ms / 1000);
+    let now = crate::process::local_time(now_ms / 1000);
+    let label = clock_label(&at, &now, resets_at_ms.saturating_sub(now_ms) > 24 * 60 * 60 * 1000);
+    match time_zone() {
+        Some(zone) => format!("{label} ({zone})"),
+        None => label,
+    }
+}
+
+pub(super) fn clock_label(at: &libc::tm, now: &libc::tm, far: bool) -> String {
+    let hour = if at.tm_hour % 12 == 0 { 12 } else { at.tm_hour % 12 };
+    let minute = if at.tm_min == 0 { String::new() } else { format!(":{:02}", at.tm_min) };
+    let time = format!("{hour}{minute}{}", if at.tm_hour < 12 { "am" } else { "pm" });
+    if !far {
+        return time;
+    }
+    let year = if at.tm_year == now.tm_year { String::new() } else { format!(", {}", at.tm_year + 1900) };
+    format!("{} {}{year}, {time}", MONTHS[at.tm_mon as usize], at.tm_mday)
+}
+
+/// The IANA name Claude Code prints, from `TZ` or the `/etc/localtime` link.
+fn time_zone() -> Option<String> {
+    if let Ok(zone) = std::env::var("TZ")
+        && !zone.is_empty()
+    {
+        return Some(zone.trim_start_matches(':').to_string());
+    }
+    let link = std::fs::read_link("/etc/localtime").ok()?;
+    Some(link.to_str()?.split_once("zoneinfo/")?.1.to_string())
+}
 
 /// A column header row, one row per model, and a total row.
 pub(super) fn usage_rows(totals: &[ModelTotal], catalog: &[Model]) -> Vec<list::Row> {

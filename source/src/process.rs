@@ -111,6 +111,20 @@ pub fn now_ms() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).expect("clock is after 1970").as_millis() as u64
 }
 
+/// `unix` seconds in the local time zone.
+pub fn local_time(unix: u64) -> libc::tm {
+    let time = unix as libc::time_t;
+    // SAFETY: localtime_r and localtime_s only write the `tm` we own; a zeroed tm is a valid value of that C struct.
+    unsafe {
+        let mut tm: libc::tm = std::mem::zeroed();
+        #[cfg(unix)]
+        assert!(!libc::localtime_r(&time, &mut tm).is_null(), "localtime_r converts {unix}");
+        #[cfg(windows)]
+        assert_eq!(libc::localtime_s(&mut tm, &time), 0, "localtime_s converts {unix}");
+        tm
+    }
+}
+
 pub fn hash(text: &str) -> String {
     let digest = ring::digest::digest(&ring::digest::SHA256, text.as_bytes());
     let hex: String = digest.as_ref().iter().map(|b| format!("{b:02x}")).collect();
