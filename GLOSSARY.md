@@ -16,9 +16,9 @@ _Avoid_: Run, step
 Replacing the older part of a session's history with a summary, keeping recent messages verbatim.
 _Avoid_: Summarization, condensing
 
-**Condensing**:
-Replacing batches of old tool results with short summaries that cite the calls they cover, while the rest of the history stays.
-_Avoid_: Compaction, pruning
+**Clearing**:
+Replacing the results of the oldest tool calls with a short note, while the calls and the rest of the history stay. The `condense` setting turns it on.
+_Avoid_: Compaction, condensing, pruning
 
 **Message thread**:
 The copy of a session's history that the Anthropic API keeps between turns, so a turn sends only its new messages. One session can start many, one after each compaction or rewind.

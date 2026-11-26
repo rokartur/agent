@@ -12,8 +12,6 @@ pub(super) enum Setting {
     ExpandTools,
     ExpandThinking,
     Condense,
-    CondenseModel,
-    CondenseMinBatch,
     SwitchAt,
     WhenAllOverLimit,
     FallbackModel,
@@ -62,9 +60,7 @@ impl Setting {
             Setting::KeepRecent => "Keep recent context",
             Setting::ExpandTools => "Expand tool output",
             Setting::ExpandThinking => "Thinking on Ctrl+O",
-            Setting::Condense => "Condense tool output",
-            Setting::CondenseModel => "Condense model",
-            Setting::CondenseMinBatch => "Condense min batch",
+            Setting::Condense => "Clear old tool output",
             Setting::SwitchAt => "Switch account at",
             Setting::WhenAllOverLimit => "When all over limit",
             Setting::FallbackModel => "Fallback model",
@@ -109,7 +105,7 @@ pub(super) const SETTING_SECTIONS: [(&str, &[Setting]); 5] = {
     use Setting::*;
     [
         ("Model", &[Model, Thinking, Speed, ContextWindow, PermissionMode, SubagentEffort, SubagentModel, MaxSubagents, MaxSessions, ReviewerModel, SmallModel]),
-        ("Context", &[AutoCompact, CompactionReserve, KeepRecent, Condense, CondenseModel, CondenseMinBatch, CacheTtl, MessageThreads]),
+        ("Context", &[AutoCompact, CompactionReserve, KeepRecent, Condense, CacheTtl, MessageThreads]),
         ("Accounts", &[SwitchAt, WhenAllOverLimit, FallbackModel, ProviderOrder]),
         ("Modes", &[OutputStyle, Ponytail, Caveman, Rtk, CodeMode, HeadroomProxy, HeadroomUrl, HeadroomToken, ConflictPriority]),
         (
@@ -139,7 +135,6 @@ pub(super) const PROVIDER_LISTS: [&[&str]; 2] = [&models::PROVIDERS, &crate::too
 pub(super) const CONTEXT_WINDOWS: [Option<u64>; 5] = [None, Some(200_000), Some(272_000), Some(400_000), Some(1_000_000)];
 pub(super) const RESERVE_TOKENS: [u64; 5] = [16_384, 32_768, 65_536, 100_000, 150_000];
 pub(super) const KEEP_RECENT_TOKENS: [u64; 4] = [10_000, 20_000, 40_000, 80_000];
-pub(super) const CONDENSE_MIN_CHARS: [u64; 4] = [10_000, 20_000, 40_000, 80_000];
 // 0 = never switch accounts.
 pub(super) const SWITCH_AT_PERCENT: [u64; 6] = [70, 80, 90, 95, 100, 0];
 // None = unlimited.
@@ -196,7 +191,7 @@ impl App {
     pub(super) fn change_setting(&mut self, row: Setting, forward: bool) {
         use Setting::*;
         match row {
-            Model | CondenseModel | FallbackModel | ReviewerModel | SubagentModel | SmallModel => return self.open_models(row, "", ModelsBack::Settings),
+            Model | FallbackModel | ReviewerModel | SubagentModel | SmallModel => return self.open_models(row, "", ModelsBack::Settings),
             ContextWindow => return self.open_context_windows(),
             HeadroomUrl | HeadroomToken => {
                 let mut input = Editor::new();
@@ -215,7 +210,6 @@ impl App {
             ExpandTools => s.expand_tools = !s.expand_tools,
             ExpandThinking => s.expand_thinking = !s.expand_thinking,
             Condense => s.condense = !s.condense,
-            CondenseMinBatch => s.condense_min_batch_chars = step(&CONDENSE_MIN_CHARS, &s.condense_min_batch_chars, forward),
             SwitchAt => s.switch_at_percent = step(&SWITCH_AT_PERCENT, &s.switch_at_percent, forward),
             WhenAllOverLimit => s.when_all_over_limit = step(&Policy::ALL, &s.when_all_over_limit, forward),
             Ponytail => s.ponytail = step(&PONYTAIL_LEVELS, &s.ponytail.as_str(), forward).to_string(),
@@ -244,7 +238,7 @@ impl App {
             OutputStyle => s.output_style = step(&OUTPUT_STYLES, &s.output_style.as_str(), forward).to_string(),
             MaxSubagents => s.max_subagents = step(&MAX_SUBAGENTS, &s.max_subagents, forward),
             MaxSessions => s.max_sessions = step(&MAX_SESSIONS, &s.max_sessions, forward),
-            Model | CondenseModel | FallbackModel | ReviewerModel | SubagentModel | SmallModel | ContextWindow | HeadroomUrl | HeadroomToken => {
+            Model | FallbackModel | ReviewerModel | SubagentModel | SmallModel | ContextWindow | HeadroomUrl | HeadroomToken => {
                 unreachable!("{row:?} opens its own panel")
             }
         });
@@ -263,8 +257,6 @@ impl App {
             Setting::ExpandTools => on_off_choices(s.expand_tools),
             Setting::ExpandThinking => on_off_choices(s.expand_thinking),
             Setting::Condense => on_off_choices(s.condense),
-            Setting::CondenseModel => auto(&s.condense_model),
-            Setting::CondenseMinBatch => choices(CONDENSE_MIN_CHARS.map(|n| n.to_string()), &s.condense_min_batch_chars.to_string()),
             Setting::SwitchAt => choices(SWITCH_AT_PERCENT.map(switch_label), &switch_label(s.switch_at_percent)),
             Setting::WhenAllOverLimit => choices(Policy::ALL.map(|p| p.label().to_string()), s.when_all_over_limit.label()),
             Setting::FallbackModel => auto(&s.fallback_model),
@@ -716,7 +708,7 @@ pub(super) fn window_source(settings: &Settings, model: &Model) -> &'static str 
 }
 
 /// Picker rows for settings `row` whose provider or id matches `query` (see `list::search`): pinned models first, each part grouped in provider order.
-/// `None` is "auto", offered for the optional condense and fallback models.
+/// `None` is "auto", offered for every model setting but the main one.
 pub(super) fn matching_models<'a>(catalog: &'a [Model], settings: &Settings, row: Setting, query: &str) -> Vec<Option<&'a Model>> {
     let auto = (row != Setting::Model && list::search_rank("auto", query).is_some()).then_some(None);
     let providers = settings.sort_providers(&models::PROVIDERS);
@@ -737,7 +729,6 @@ pub(super) fn model_owners(model: &Model) -> String {
 pub(super) fn model_setting(settings: &mut Settings, row: Setting) -> &mut String {
     match row {
         Setting::Model => &mut settings.model,
-        Setting::CondenseModel => &mut settings.condense_model,
         Setting::FallbackModel => &mut settings.fallback_model,
         Setting::ReviewerModel => &mut settings.reviewer_model,
         Setting::SubagentModel => &mut settings.subagent_model,

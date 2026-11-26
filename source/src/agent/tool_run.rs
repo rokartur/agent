@@ -96,7 +96,7 @@ impl Agent {
             blocks.extend(extra_blocks);
             json!(blocks)
         };
-        // Video puts its transcript in text blocks between the frames; the UI, plugins and condense read it too.
+        // Video puts its transcript in text blocks between the frames; the UI and plugins read it too.
         let output = crate::acp::result_text(&content);
         self.end_call(id, name, started, &output, is_error, emit)?;
         Ok((content, output, is_error))
@@ -146,7 +146,6 @@ impl Agent {
             }
         }
         let result = match name {
-            "ContextTreeQuery" => condense::query(&self.history.messages, &self.history.condensed, input),
             "Todo" => self.todo(input),
             "EnterPlanMode" => self.enter_plan(emit),
             "ExitPlanMode" => self.complete_plan(input),

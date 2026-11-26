@@ -201,15 +201,14 @@ impl Agent {
         // The title named the session before this one: an empty one lets the first prompt name this one.
         self.title.clear();
         self.history = saved.history;
-        self.next_ref = condense::next_ref(&self.history.condensed);
+        self.cleared_through = None;
+        self.last_reply_at = saved.last_reply_ms.and_then(|ms| Instant::now().checked_sub(Duration::from_millis(now_ms().saturating_sub(ms))));
         crate::image::fit_history(&mut self.history.messages);
         *self.todos.lock().unwrap() = saved.todos;
         *self.goal.lock().unwrap() = saved.goal;
         *self.plan.lock().unwrap() = saved.plan;
         self.tools = self.tool_schemas();
         self.spent = saved.spent;
-        self.pending_condense.clear();
-        self.held_condensed.clear();
         self.pending_title = None;
         self.nested_instructions.clear();
         self.extra_dirs = saved.extra_dirs;
@@ -351,6 +350,7 @@ impl Session {
                     saved.config = Some(SessionConfig { mode, model: text("model")?, effort: text("effort")? });
                 }
                 Some("usage") => {
+                    saved.last_reply_ms = entry["timestamp"].as_u64().or(saved.last_reply_ms);
                     if let (Some(provider), Some(account)) = (entry["provider"].as_str(), entry["account"].as_str()) {
                         saved.accounts.insert(provider.to_string(), account.to_string());
                     }

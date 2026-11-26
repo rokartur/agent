@@ -210,26 +210,6 @@
     }
   },
   {
-    "name": "ContextTreeQuery",
-    "description": "Get back the original outputs of tool calls a pruner summary replaced, by the short refs it lists (e.g. [\"t12\", \"t3\"]).",
-    "eager_input_streaming": true,
-    "input_schema": {
-      "type": "object",
-      "properties": {
-        "toolCallIds": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          },
-          "description": "Short refs or raw tool call ids."
-        }
-      },
-      "required": [
-        "toolCallIds"
-      ]
-    }
-  },
-  {
     "name": "Todo",
     "description": "Task list for multi-step work. Status: pending, in_progress, completed; delete leaves a tombstone.",
     "eager_input_streaming": true,

@@ -18,7 +18,7 @@ A session is one JSONL file, `~/.agents/sessions/<id>.jsonl`, appended to as the
 `checkpoints_reset` | a worktree move | clears `checkpoints` |
 `rewind` | `index` | truncates `messages`, drops later checkpoints and compactions |
 `compaction` | `cut`, `summary` | the provider sees the summary instead of `messages[..cut]` |
-`condense` | refs and summary of a tool-call batch | the provider sees the stub, `ContextTreeQuery` returns the original |
+`condense` | refs and summary from sessions before old tool results were cleared | ignored |
 `goal`, `plan`, `todo` | the tools of the same name | restored state |
 `extra_dirs` | `/workspace` | restored list |
 
@@ -34,11 +34,11 @@ Indexes in `rewind`, `tool_checkpoint` and `compaction` are message indexes. Two
 
 Esc Esc on an idle session lists `RewindPoint`s: every user prompt with its index. Picking one truncates the conversation and, inside a git repo, restores the work tree from the checkpoint snapshots (`agent/snapshots.rs`): a private repo under `~/.agents/snapshots` holds a tree per tool call that edited files. Ignored files are not stored. Files changed since the agent last wrote them are left alone and listed (`RestoredFiles`).
 
-## Compaction and condense
+## Compaction and clearing old tool results
 
 Two mechanisms shrink the provider's view, both keep the originals in `messages`:
 
 - **Compaction** (`Agent::compact`): one summary replaces everything before `cut`. Runs on `/compact [note]`, `/handoff`, and automatically when context tokens pass `context_window - reserve_tokens`. The summary prompt is `SUMMARY_PROMPT` in `agent/compaction.rs`; `keep_recent_tokens` stays verbatim.
-- **Condense** (`agent/condense.rs`, pi-condense's design): batches of finished tool calls are summarized on a background thread by the cheap model, each call labelled `[[N:name]]` and given a short ref like `t7`. Finished summaries are held until the outputs they replace reach `HELD_CHARS` (60,000 chars); then all but the newest are applied at once, so the model keeps its recent outputs and the prompt cache is rewritten once per swap. After that the model sees the summary; `ContextTreeQuery` fetches an original by ref. `PROTECTED_TOOLS` never condense. Settings: `condense.enabled`, `condense.model`, `condense.min_batch_chars`.
+- **Clearing** (`agent/condense.rs`, setting `condense.enabled`): the results of the oldest tool calls up to a cut are cleared; the model runs a call again when it needs one. The cut (`Agent::cleared_through`) moves to all but the newest 10 clearable calls only when the prompt cache is cold (`cache_ttl` since the last reply): any move rewrites the cache from the system prompt on, and on a warm cache that cost more than it saved, near compaction too. On Anthropic the request carries a `clear_tool_uses_20250919` edit whose `keep` grows with every call, so the server clears the same results each turn; a server-side edit keeps the later thinking valid, where a client rewrite would drop it. Other providers get the same edit applied in `api::request::clear_tool_uses`. `PROTECTED_TOOLS` are never cleared. Research and measurements: `docs/condense-upstream.md` at the repo root.
 
 `/context` shows how the window splits across system prompt, tools, messages and summaries (`agent/context.rs`).

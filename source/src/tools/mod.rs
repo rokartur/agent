@@ -52,14 +52,13 @@ pub struct Facts {
 }
 
 #[rustfmt::skip]
-const FACTS: [Facts; 36] = [
+const FACTS: [Facts; 35] = [
     Facts { name: "Read",             asks: false, plan_blocked: false, changes_files: false, root_only: false, needs_ui: false },
     Facts { name: "Bash",             asks: true,  plan_blocked: false, changes_files: true,  root_only: false, needs_ui: false },
     Facts { name: "Write",            asks: true,  plan_blocked: true,  changes_files: true,  root_only: false, needs_ui: false },
     Facts { name: "ReplaceLines",     asks: true,  plan_blocked: true,  changes_files: true,  root_only: false, needs_ui: false },
     Facts { name: "Edit",             asks: true,  plan_blocked: true,  changes_files: true,  root_only: false, needs_ui: false },
     Facts { name: "InsertLines",      asks: true,  plan_blocked: true,  changes_files: true,  root_only: false, needs_ui: false },
-    Facts { name: "ContextTreeQuery", asks: false, plan_blocked: false, changes_files: false, root_only: false, needs_ui: false },
     Facts { name: "Todo",             asks: false, plan_blocked: false, changes_files: false, root_only: false, needs_ui: false },
     Facts { name: "Goal",             asks: false, plan_blocked: false, changes_files: false, root_only: false, needs_ui: false },
     Facts { name: "Agent",            asks: true,  plan_blocked: true,  changes_files: true,  root_only: true,  needs_ui: false },
@@ -101,10 +100,9 @@ pub fn facts(name: &str) -> Option<&'static Facts> {
 /// Every tool in tools.json order; `Agent` carries the swarm prompt like jcode's `swarm`.
 /// One fixed list: the tools head the cached prompt prefix, so changing it mid-session rewrites the whole cache.
 /// `image_generate` is whether an account has an image model; without one ImageGenerate is left out. `code` is the `code_mode` setting.
-pub fn schemas(swarm_prompt: &str, context_tree_query: bool, image_generate: bool, code: bool) -> Value {
+pub fn schemas(swarm_prompt: &str, image_generate: bool, code: bool) -> Value {
     let all: Vec<Value> = serde_json::from_str(SCHEMAS).expect("tools.json is valid JSON");
     let offered = |tool: &Value| match tool["name"].as_str() {
-        Some("ContextTreeQuery") => context_tree_query,
         Some("ImageGenerate") => image_generate,
         Some("Code") => code,
         _ => true,
@@ -735,19 +733,17 @@ mod tests {
     }
 
     #[test]
-    fn context_tree_query_image_generate_and_code_are_offered_only_when_asked() {
-        let offers = |query: bool, images: bool, code: bool, name: &str| schemas("", query, images, code).as_array().unwrap().iter().any(|tool| tool["name"] == name);
-        assert!(offers(true, false, false, "ContextTreeQuery"));
-        assert!(!offers(false, true, true, "ContextTreeQuery"));
-        assert!(offers(false, true, false, "ImageGenerate"));
-        assert!(!offers(true, false, true, "ImageGenerate"));
-        assert!(offers(false, false, true, "Code"));
-        assert!(!offers(true, true, false, "Code"));
+    fn image_generate_and_code_are_offered_only_when_asked() {
+        let offers = |images: bool, code: bool, name: &str| schemas("", images, code).as_array().unwrap().iter().any(|tool| tool["name"] == name);
+        assert!(offers(true, false, "ImageGenerate"));
+        assert!(!offers(false, true, "ImageGenerate"));
+        assert!(offers(false, true, "Code"));
+        assert!(!offers(true, false, "Code"));
     }
 
     #[test]
     fn parameters_a_schema_lacks_are_named_at_any_depth() {
-        let tools = schemas("", false, false, false);
+        let tools = schemas("", false, false);
         let undeclared = |name: &str, input: Value| undeclared_params(&tools, name, &input);
         assert_eq!(undeclared("Grep", json!({"pattern": "x", "head_limit": 5, "-n": true})).unwrap(), "Grep does not take `head_limit`.");
         assert_eq!(undeclared("Grep", json!({"pattern": "x", "-n": true})), None);
@@ -761,7 +757,7 @@ mod tests {
 
     #[test]
     fn declared_parameters_free_form_values_and_other_tools_pass() {
-        let tools = schemas("", false, false, false);
+        let tools = schemas("", false, false);
         let undeclared = |name: &str, input: Value| undeclared_params(&tools, name, &input);
         assert_eq!(undeclared("Grep", json!({"pattern": "x", "-C": 2, "-A": 3, "-B": 1, "output_mode": "count"})), None);
         assert_eq!(undeclared("TaskStop", json!({"task_id": "bt-1"})), None);

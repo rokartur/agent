@@ -64,6 +64,7 @@ pub(super) fn parse_stream(reader: &mut dyn BufRead, abort: &AtomicBool, on_delt
     let mut cache_write_1h = None;
     let mut stop_reason = String::new();
     let mut id = String::new();
+    let mut cleared_tokens = 0;
     // message_delta sums the input of every server tool iteration (tool_search); message_start holds the first request's.
     let mut prompt_tokens = 0;
     let mut line = String::new();
@@ -130,6 +131,9 @@ pub(super) fn parse_stream(reader: &mut dyn BufRead, abort: &AtomicBool, on_delt
             "message_delta" => {
                 stop_reason = event["delta"]["stop_reason"].as_str().unwrap_or_default().to_string();
                 read_usage(&event["usage"], &mut usage, &mut cache_write_1h);
+                for edit in event["context_management"]["applied_edits"].as_array().into_iter().flatten() {
+                    cleared_tokens += edit["cleared_input_tokens"].as_u64().unwrap_or(0);
+                }
             }
             "message_stop" => break,
             "error" => {
@@ -141,7 +145,17 @@ pub(super) fn parse_stream(reader: &mut dyn BufRead, abort: &AtomicBool, on_delt
             _ => {}
         }
     }
-    Ok(Reply { message: json!({"role": "assistant", "content": blocks}), stop_reason, context_tokens: prompt_tokens + usage.output, usage, cache_write_1h, id, bad_tool_inputs, ..Reply::default() })
+    Ok(Reply {
+        message: json!({"role": "assistant", "content": blocks}),
+        stop_reason,
+        context_tokens: prompt_tokens + usage.output,
+        usage,
+        cache_write_1h,
+        id,
+        bad_tool_inputs,
+        cleared_tokens,
+        ..Reply::default()
+    })
 }
 
 pub(super) fn append(field: &mut Value, text: &str) {

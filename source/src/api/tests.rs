@@ -2,6 +2,22 @@ use super::thread::THREAD_IDLE;
 use super::*;
 
 #[test]
+fn a_clear_tool_uses_edit_is_applied_here_to_the_oldest_unexcluded_results() {
+    let call = |id: &str, name: &str| json!({"role": "assistant", "content": [{"type": "tool_use", "id": id, "name": name, "input": {}}]});
+    let result = |id: &str| json!({"role": "user", "content": [{"type": "tool_result", "tool_use_id": id, "content": "output"}]});
+    let request = json!({
+        "messages": [call("a", "Read"), result("a"), call("b", "Todo"), result("b"), call("c", "Bash"), result("c"), call("d", "Bash"), result("d")],
+        "context_management": {"edits": [{"type": "clear_tool_uses_20250919", "keep": {"type": "tool_uses", "value": 1}, "exclude_tools": ["Todo"]}]},
+    });
+    let cleared = request::clear_tool_uses(&request);
+    let contents: Vec<&str> = cleared["messages"].as_array().unwrap().iter().skip(1).step_by(2).map(|m| m["content"][0]["content"].as_str().unwrap()).collect();
+    assert_eq!(contents[1], "output");
+    assert_eq!(contents[3], "output");
+    assert!(contents[0].starts_with("[Old tool result cleared") && contents[2].starts_with("[Old tool result cleared"));
+    assert!(cleared.get("context_management").is_none());
+}
+
+#[test]
 fn picking_an_account_reports_it_before_the_next_request() {
     let home = std::env::temp_dir().join(format!("agent-pick-{}", std::process::id()));
     let client = Client::new(&home).unwrap();
@@ -154,6 +170,18 @@ fn server_tool_iterations_bill_their_sum_but_the_context_is_one_request() {
     let reply = parse_stream(&mut body.as_bytes(), &AtomicBool::new(false), &mut |_| {}).ok().unwrap();
     assert_eq!((reply.usage.input, reply.usage.cache_read, reply.usage.cache_write), (641, 2769, 2769));
     assert_eq!(reply.context_tokens, 4 + 2769 + 211);
+}
+
+#[test]
+fn tokens_context_editing_cleared_reach_the_reply() {
+    let events = [
+        r#"{"type":"message_start","message":{"id":"msg_1","usage":{"input_tokens":4}}}"#,
+        r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":7},"context_management":{"applied_edits":[{"type":"clear_tool_uses_20250919","cleared_tool_uses":8,"cleared_input_tokens":50000}]}}"#,
+        r#"{"type":"message_stop"}"#,
+    ];
+    let body: String = events.iter().map(|e| format!("data: {e}\n\n")).collect();
+    let reply = parse_stream(&mut body.as_bytes(), &AtomicBool::new(false), &mut |_| {}).ok().unwrap();
+    assert_eq!(reply.cleared_tokens, 50000);
 }
 
 #[test]

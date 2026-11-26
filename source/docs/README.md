@@ -5,7 +5,7 @@ How `agent` is built. User-facing material lives one level up: [`../../README.md
 | Doc | Read it when |
 |---|---|
 | [architecture.md](architecture.md) | You need the module map, the threads, or what happens to a prompt from Enter to the answer. |
-| [sessions.md](sessions.md) | You touch the session journal, resume, rewind, compaction, condense or file snapshots. |
+| [sessions.md](sessions.md) | You touch the session journal, resume, rewind, compaction, clearing old tool results or file snapshots. |
 | [tools.md](tools.md) | You add or change a tool, its permission class, or the line anchors edits rely on. |
 | [providers.md](providers.md) | You touch accounts, model lists, failover between accounts, custom providers or headroom. |
 | [configuration.md](configuration.md) | You touch settings, the system prompt, `.agents` files, skills, prompts, edit hooks or trust. |

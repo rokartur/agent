@@ -44,49 +44,16 @@ const TOOL_RESULT_SUMMARY_CHARS: usize = 2000;
 const COMPACT_MAX_TOKENS: u64 = 128_000;
 
 impl Agent {
-    /// Summarizes the turn's tool results on a background thread; the next request picks the summary up.
-    pub(super) fn start_condense(&mut self, assistant_text: &str, calls: Vec<condense::Call>) {
-        if !self.condense.enabled {
-            return;
+    /// Moves the cut of cleared tool results when `condense::advance` lets it, and returns the edit that clears through it.
+    pub(super) fn advance_clearing(&mut self, messages: &[Value]) -> Option<Value> {
+        if !self.condense {
+            return None;
         }
-        let calls = condense::select(calls, self.condense.min_batch_chars, self.last_context_tokens);
-        if calls.is_empty() {
-            return;
-        }
-        let (system, prompt) = condense::summarizer_prompt(assistant_text, &calls);
-        let request = api::plain_request(&self.condense.model, system, &prompt, condense::SUMMARY_MAX_TOKENS);
-        let client = self.client.clone();
-        let first_ref = self.next_ref;
-        self.next_ref += calls.len();
-        let chars: usize = calls.iter().map(|call| call.output.chars().count()).sum();
-        self.pending_condense.push(std::thread::spawn(move || {
-            let reply = client.send_quiet(&request, &AtomicBool::new(false))?;
-            let summary = text_of(&reply.message);
-            if summary.trim().is_empty() || reply.stop_reason != "end_turn" {
-                return Err("the summary came back empty or cut off".to_string());
-            }
-            Ok((condense::condensed(&summary, &calls, first_ref), chars, reply))
-        }));
-    }
-
-    /// Holds finished summaries and applies the ones `condense::release` lets go; a failed one leaves its originals in place.
-    pub(super) fn collect_condensed(&mut self, emit: &mut dyn FnMut(Event)) -> Result<(), String> {
-        let (finished, running) = std::mem::take(&mut self.pending_condense).into_iter().partition(|handle| handle.is_finished());
-        self.pending_condense = running;
-        for handle in finished {
-            match handle.join().unwrap_or_else(|_| Err("the summarizer thread panicked".into())) {
-                Ok((batch, chars, reply)) => {
-                    self.usage.add(reply.usage);
-                    self.session.append(&usage::reply_entry(&reply, now_ms()))?;
-                    self.held_condensed.push((batch, chars));
-                }
-                Err(error) => emit(Event::Notice(format!("Condense failed, kept the original tool outputs: {error}"))),
-            }
-        }
-        for batch in condense::release(&mut self.held_condensed) {
-            self.record(condense::entry(&batch))?;
-        }
-        Ok(())
+        let clearable = condense::clearable(messages);
+        let ttl = Duration::from_secs(if self.cache_ttl == "1h" { 3600 } else { 300 });
+        let cache_cold = self.last_reply_at.is_none_or(|at| at.elapsed() >= ttl);
+        self.cleared_through = condense::advance(self.cleared_through.as_deref(), &clearable, cache_cold);
+        condense::edits(self.cleared_through.as_deref(), &clearable)
     }
 
     /// Summarizes everything before a recent assistant message and keeps the rest verbatim, like pi.

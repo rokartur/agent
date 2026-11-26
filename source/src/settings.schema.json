@@ -27,7 +27,7 @@
     },
     "reviewer_model": { "type": "string", "default": "", "description": "Model for the auto-mode reviewer; empty means small_model." },
     "image_model": { "type": "string", "default": "", "description": "Model for ImageGenerate: a Codex image model such as gpt-image-2 (openai-codex/ prefix optional) on a ChatGPT login, or google-antigravity/<model>. Empty means gpt-image-2 when a ChatGPT login exists, else the first image model an Antigravity account lists." },
-    "small_model": { "type": "string", "default": "", "description": "Model for small jobs: session titles, long Video descriptions and compaction, and the reviewer and condense when theirs is empty. Empty means the provider's small model (Haiku, Luna)." },
+    "small_model": { "type": "string", "default": "", "description": "Model for small jobs: session titles, long Video descriptions and compaction, and the reviewer when its own is empty. Empty means the provider's small model (Haiku, Luna)." },
     "auto_compact": { "type": "boolean", "default": true },
     "reserve_tokens": { "type": "integer", "minimum": 4096, "default": 16384, "description": "Context tokens kept free for the answer; compaction starts before they run out." },
     "keep_recent_tokens": { "type": "integer", "minimum": 0, "default": 20000, "description": "Recent tokens compaction keeps verbatim." },
@@ -145,9 +145,7 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "enabled": { "type": "boolean", "default": true },
-        "model": { "type": "string", "default": "", "description": "Empty means small_model." },
-        "min_batch_chars": { "type": "integer", "minimum": 10000, "default": 10000 }
+        "enabled": { "type": "boolean", "default": true, "description": "Clear old tool results: Anthropic's context editing, elsewhere a placeholder. The model runs a call again for a result it needs." }
       }
     },
     "subagents": {

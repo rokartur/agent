@@ -33,7 +33,7 @@ The TUI (`tui::run`) runs in the session server, `agent serve`, with the event l
 - **worker**: owns the `Agent`. Receives `Command`s (prompt, compact, resume, ...) over one channel and sends `Msg::Agent(Event)` back over another. Only this thread touches `agent.messages`.
 - **clients**: a listener thread, and per attached terminal a reader that forwards its events as `Msg::Input` and a writer that sends it frames.
 - **update**, **on_start**, **headroom sync**: one-shot threads at start.
-- Per background shell, subagent, workflow, condense batch and session title: a thread that reports through the same `events` channel or through `Arc<Mutex<_>>` fields on `Agent` that the UI also reads (`todos`, `goal`, `plan`, `terminals`, `subagents`, `workflows`, `permission_mode`).
+- Per background shell, subagent, workflow and session title: a thread that reports through the same `events` channel or through `Arc<Mutex<_>>` fields on `Agent` that the UI also reads (`todos`, `goal`, `plan`, `terminals`, `subagents`, `workflows`, `permission_mode`).
 
 The split rule: the worker thread mutates conversation state, the UI thread reads shared state and sends commands. A mode change in `/settings` reaches the running turn through those shared fields, not through a message.
 
@@ -42,8 +42,8 @@ The split rule: the worker thread mutates conversation state, the UI thread read
 1. `Agent::prompt` (`agent/mod.rs`) builds the user message: `!cmd` shell output captured earlier, pending todo notes, pasted images, then the text. It is appended to `messages` and to the session journal.
 2. `run_turns` loops:
    - Auto-compact when `last_context_tokens` passed `context_window - reserve_tokens`.
-   - `collect_condensed` folds finished condense batches in.
-   - `provider_view` is what the model sees: compaction summaries and condense stubs in place of the originals.
+   - `provider_view` is what the model sees: compaction summaries in place of the originals.
+   - `advance_clearing` moves the cut of cleared tool results and adds its context edit to the request.
    - `api::request` builds the Anthropic-shaped request with cache breakpoints; `Client::send` picks an account, translates for the provider and streams deltas back as `Event::Text`, `Event::Thinking`, `Event::Notice`.
    - No tool calls: deliver queued steering messages if any, else run the edit hooks for every file edited this prompt and either return or push the hook report and loop.
    - Tool calls: each goes through `permissions::request_for` (ask, reviewer model, or allowed), a file snapshot around it, the tool itself, plugin `tool_call`/`tool_result` events, and a `tool_time` journal entry. Results go back as one user message with `tool_result` blocks.

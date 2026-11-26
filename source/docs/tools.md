@@ -12,7 +12,6 @@ Built-in tools are defined in `tools/mod.rs` (`schemas` gives the JSON schema li
 | Time | `ScheduleWakeup`, `CronCreate`, `CronDelete`, `CronList` | `tools/cron.rs` |
 | Web | `WebSearch`, `WebFetch`, `GetSearchContent` | `tools/web/` |
 | Git | `EnterWorktree`, `ExitWorktree` | `worktree.rs` |
-| Context | `ContextTreeQuery` | `agent/condense.rs` |
 | Scripts | `Code` | `agent/code.rs` |
 
 `--tools a,b` (print, headless, acp) and `--parent` (subagents) narrow the list; `Agent.only_tools` is the filter.
