@@ -1,6 +1,7 @@
 use super::*;
 
-const BG_WAIT_SUBAGENTS_ONLY: &str = "WaitForAgents waits for subagents only. A background Bash task (bt-N) reports its exit as a message: keep working or end the turn, or peek with TaskOutput.";
+const BG_WAIT_SUBAGENTS_ONLY: &str =
+    "WaitForAgents waits for subagents only. A background Bash task (bt-N) reports its exit as a message: keep working or end the turn, or wait with TaskOutput and `block`.";
 
 impl Agent {
     pub(super) fn todo(&mut self, input: &Value) -> Result<String, String> {
@@ -9,6 +10,18 @@ impl Agent {
             self.session.append(&self.todos.lock().unwrap().entry())?;
         }
         Ok(text)
+    }
+
+    pub(super) fn task_output(&self, input: &Value) -> Result<String, String> {
+        if input["block"] == true
+            && let Some(id) = input["task_id"].as_str()
+        {
+            // The UI reads the terminals while this waits, so the lock is released first.
+            let terminal = self.terminals.lock().unwrap().find(id)?;
+            let timeout = Duration::from_millis(input["timeout"].as_u64().unwrap_or(30_000).min(600_000));
+            bg::wait_for_exit(&terminal, timeout, &self.abort)?;
+        }
+        self.terminals.lock().unwrap().status_of(input, &self.follow_ups)
     }
 
     /// TaskStop: `sa-N` stops a subagent, `wf-N` a workflow, `bt-N` a background terminal, anything else a session this one started.

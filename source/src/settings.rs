@@ -31,7 +31,7 @@ pub struct Settings {
     /// ImageGenerate's model: a Codex one (`gpt-image-2`, `openai-codex/` optional) or `google-antigravity/<id>`; empty takes
     /// gpt-image-2 on a ChatGPT login, else the first image model an Antigravity account lists.
     pub image_model: String,
-    /// Session titles, long Video descriptions and compaction, and the reviewer and condense when theirs is empty;
+    /// Session titles, long Video descriptions and compaction, and the reviewer when its own is empty;
     /// empty means the provider's small model.
     pub small_model: String,
     pub auto_compact: bool,
@@ -44,10 +44,8 @@ pub struct Settings {
     pub footer_cost: bool,
     /// The name of the account the current model's provider uses, before the model in the footer.
     pub footer_account: bool,
+    /// Old tool results are cleared: by Anthropic's context editing, elsewhere by a placeholder.
     pub condense: bool,
-    /// Empty means `small_model`.
-    pub condense_model: String,
-    pub condense_min_batch_chars: u64,
     pub subagent_concurrency: usize,
     /// The effort the swarm prompt tells the model to pass for implementation children.
     pub subagent_effort: String,
@@ -191,8 +189,6 @@ pub const CONFLICT_PRIORITIES: [&str; 2] = ["project", "global"];
 pub const MID_TURN: [&str; 2] = ["steering", "queued"];
 pub const WORKING_ANIMATIONS: [&str; 5] = ["star", "fill", "radar", "arc", "diamond"];
 pub const INDICATORS: [&str; 2] = ["bar", "box"];
-/// Below this a condensed batch costs more in cache rewrites than its summary saves on later cache reads.
-pub const CONDENSE_MIN_BATCH_CHARS: u64 = 10_000;
 /// "agent" on a phone keypad.
 pub const DEFAULT_TAILNET_PORT: u16 = 24368;
 
@@ -528,8 +524,6 @@ fn from_json(own: &Value) -> Settings {
         footer_cost: own["footer_cost"].as_bool().unwrap_or(true),
         footer_account: own["footer_account"].as_bool().unwrap_or(false),
         condense: own["condense"]["enabled"].as_bool().unwrap_or(true),
-        condense_model: own["condense"]["model"].as_str().unwrap_or_default().to_string(),
-        condense_min_batch_chars: own["condense"]["min_batch_chars"].as_u64().unwrap_or(CONDENSE_MIN_BATCH_CHARS).max(CONDENSE_MIN_BATCH_CHARS),
         subagent_concurrency: own["subagents"]["concurrency"].as_u64().unwrap_or(4) as usize,
         subagent_effort: level(&own["subagents"]["implementation_effort"], &THINKING_LEVELS, "medium"),
         subagent_model: own["subagents"]["model"].as_str().unwrap_or_default().to_string(),
@@ -731,7 +725,7 @@ fn to_json(settings: &Settings) -> Value {
             "models": p.models.iter().map(|m| json!({"id": m.id, "context_window": m.context_window, "max_tokens": m.max_tokens})).collect::<Vec<_>>(),
         })).collect::<Vec<_>>(),
         "lsp": settings.lsp.iter().map(|(language, server)| (language.clone(), json!({"command": server.command, "extensions": server.extensions, "roots": server.roots}))).collect::<serde_json::Map<_, _>>(),
-        "condense": {"enabled": settings.condense, "model": settings.condense_model, "min_batch_chars": settings.condense_min_batch_chars},
+        "condense": {"enabled": settings.condense},
         "subagents": {"concurrency": settings.subagent_concurrency, "implementation_effort": settings.subagent_effort, "model": settings.subagent_model, "max_running": limit_json(settings.max_subagents), "max_sessions": limit_json(settings.max_sessions)},
         "accounts": {"switch_at_percent": settings.switch_at_percent, "when_all_over_limit": settings.when_all_over_limit.label(), "fallback_model": settings.fallback_model, "default": settings.default_accounts},
     })

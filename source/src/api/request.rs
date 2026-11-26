@@ -64,6 +64,26 @@ pub fn request(model: &str, max_tokens: u64, thinking: &str, cache_ttl: &str, sy
     request
 }
 
+/// Anthropic's `clear_tool_uses` edit applied here, for providers without context editing: the same results become a note.
+pub(super) fn clear_tool_uses(request: &Value) -> Value {
+    let mut request = request.clone();
+    let Some(edits) = request.as_object_mut().expect("a request is an object").remove("context_management") else { return request };
+    let edit = &edits["edits"][0];
+    let excluded = edit["exclude_tools"].as_array().cloned().unwrap_or_default();
+    let blocks = request["messages"].as_array().into_iter().flatten().flat_map(|message| message["content"].as_array().into_iter().flatten());
+    let clearable: Vec<String> = blocks.filter(|block| block["type"] == "tool_use" && !excluded.contains(&block["name"])).filter_map(|block| block["id"].as_str().map(String::from)).collect();
+    let keep = edit["keep"]["value"].as_u64().unwrap_or(0) as usize;
+    let cleared = &clearable[..clearable.len().saturating_sub(keep)];
+    for message in request["messages"].as_array_mut().into_iter().flatten() {
+        for block in message["content"].as_array_mut().into_iter().flatten() {
+            if block["type"] == "tool_result" && cleared.iter().any(|id| block["tool_use_id"] == id.as_str()) {
+                block["content"] = json!("[Old tool result cleared to save context; run the call again if you need it.]");
+            }
+        }
+    }
+    request
+}
+
 /// A one-shot request without tools or thinking, used for compaction summaries.
 pub fn plain_request(model: &str, system: &str, prompt: &str, max_tokens: u64) -> Value {
     json!({

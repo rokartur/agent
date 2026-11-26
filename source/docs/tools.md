@@ -12,7 +12,6 @@ Built-in tools are defined in `tools/mod.rs` (`schemas` gives the JSON schema li
 | Time | `ScheduleWakeup`, `CronCreate`, `CronDelete`, `CronList` | `tools/cron.rs` |
 | Web | `WebSearch`, `WebFetch`, `GetSearchContent` | `tools/web/` |
 | Git | `EnterWorktree`, `ExitWorktree` | `worktree.rs` |
-| Context | `ContextTreeQuery` | `agent/condense.rs` |
 | Scripts | `Code` | `agent/code.rs` |
 
 `--tools a,b` (print, headless, acp) and `--parent` (subagents) narrow the list; `Agent.only_tools` is the filter.
@@ -33,7 +32,7 @@ Every anchor is four ASCII letters so a long session can hold one per line read 
 
 `tools/guard.rs` refuses three command shapes before they run: a blind `sleep` loop, `gh pr merge` chained after `gh pr checks` with `;` or a pipe (drops the exit status), and plain file reads (`cat`, `head`, `sed -n`) mixed with other commands. A command that is only file reads runs as `Read` in the same turn so the lines come back with anchors.
 
-`run_in_background: true` starts the command in its own process group tracked by `tools/bg.rs`; its exit arrives as a follow-up message, `TaskOutput` peeks, `TaskStop` sends SIGTERM then SIGKILL; on Windows it ends the process tree with taskkill at once.
+`run_in_background: true` starts the command in its own process group tracked by `tools/bg.rs`; its exit arrives as a follow-up message, `TaskOutput` peeks, or with `block` waits for the exit up to `timeout` ms, `TaskStop` sends SIGTERM then SIGKILL; on Windows it ends the process tree with taskkill at once.
 
 ## Code mode
 

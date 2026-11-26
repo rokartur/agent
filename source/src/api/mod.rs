@@ -38,6 +38,7 @@ const RETRY_DELAYS_SECS: [u64; 4] = [2, 5, 15, 30];
 const RETRY_DELAYS_SECS: [u64; 4] = [0; 4];
 const THINKING_BETA: &str = "thinking-binding-controls-2026-08-01";
 const MESSAGE_THREADS_BETA: &str = "message-threads-2026-08-12";
+const CONTEXT_MANAGEMENT_BETA: &str = "context-management-2025-06-27";
 const ANTHROPIC_API: &str = "https://api.anthropic.com";
 /// pi-ai sends OAuth requests as Claude Code: this user agent, its beta flags and its identity as the first system block.
 pub const CLAUDE_CODE_USER_AGENT: &str = "claude-cli/2.1.321";
@@ -106,6 +107,8 @@ pub struct Reply {
     pub model: String,
     /// Tool calls whose arguments were not valid JSON; their `input` in `message` is `{}` and they must not run.
     pub bad_tool_inputs: Vec<BadToolInput>,
+    /// Input tokens Anthropic's context editing cleared from this request before the model read it.
+    pub cleared_tokens: u64,
 }
 
 pub struct BadToolInput {
@@ -242,7 +245,9 @@ impl Client {
         self.send_on_account(request, None, abort, &mut |_| {}, false)
     }
 
-    fn send_on_account(&self, request: &Value, mut thread: Option<&mut MessageThread>, abort: &AtomicBool, on_delta: &mut dyn FnMut(Delta), shown: bool) -> Result<Reply, String> {
+    fn send_on_account(&self, request: &Value, thread: Option<&mut MessageThread>, abort: &AtomicBool, on_delta: &mut dyn FnMut(Delta), shown: bool) -> Result<Reply, String> {
+        // A create with a clear_tool_uses edit fails with thread_unsupported_request.
+        let mut thread = thread.filter(|_| request.get("context_management").is_none());
         let mut request = request.clone();
         let mut fell_back = false;
         let mut rate_limited: Vec<String> = Vec::new();
@@ -546,6 +551,13 @@ impl Client {
             without_google_thoughts = drop_google_thoughts(request);
             &without_google_thoughts
         };
+        let cleared_here;
+        let request = if account.provider == "anthropic" || request.get("context_management").is_none() {
+            request
+        } else {
+            cleared_here = request::clear_tool_uses(request);
+            &cleared_here
+        };
         let mut fallback = None;
         let (call, body, parser) = match (account.provider.as_str(), &account.secret) {
             (_, Secret::ApiKey(key)) if let Some(custom) = &custom => {
@@ -575,9 +587,12 @@ impl Client {
                     body["speed"] = json!("fast");
                 }
                 // Every request of a thread names its beta; the API compares the set with the create's.
-                let thread_beta = if body.get("thread").is_some() { format!(",{MESSAGE_THREADS_BETA}") } else { String::new() };
+                let mut betas = if body.get("thread").is_some() { format!(",{MESSAGE_THREADS_BETA}") } else { String::new() };
+                if body.get("context_management").is_some() {
+                    betas.push_str(&format!(",{CONTEXT_MANAGEMENT_BETA}"));
+                }
                 match secret {
-                    Secret::ApiKey(key) => (call.header("x-api-key", key).header("anthropic-beta", format!("{THINKING_BETA}{thread_beta}")), body, Parser::Messages),
+                    Secret::ApiKey(key) => (call.header("x-api-key", key).header("anthropic-beta", format!("{THINKING_BETA}{betas}")), body, Parser::Messages),
                     Secret::OAuth(tokens) => {
                         // A continue carries no system: the thread keeps the create's, identity block included.
                         if body["thread"]["type"] != "continue" {
@@ -587,7 +602,7 @@ impl Client {
                         }
                         let call = call
                             .header("authorization", format!("Bearer {}", tokens.access))
-                            .header("anthropic-beta", format!("claude-code-20250219,oauth-2025-04-20,{THINKING_BETA}{thread_beta}"))
+                            .header("anthropic-beta", format!("claude-code-20250219,oauth-2025-04-20,{THINKING_BETA}{betas}"))
                             .header("user-agent", CLAUDE_CODE_USER_AGENT)
                             .header("x-app", "cli")
                             .header("anthropic-dangerous-direct-browser-access", "true");

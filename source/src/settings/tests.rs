@@ -1,17 +1,6 @@
 use super::*;
 
 #[test]
-fn condense_batches_below_the_floor_are_raised_to_it() {
-    let home = std::env::temp_dir().join(format!("agent-condense-floor-{}", std::process::id()));
-    std::fs::create_dir_all(path(&home).parent().unwrap()).unwrap();
-    for (written, loaded) in [(1000, CONDENSE_MIN_BATCH_CHARS), (40_000, 40_000)] {
-        std::fs::write(path(&home), json!({"condense": {"min_batch_chars": written}}).to_string()).unwrap();
-        assert_eq!(load(&home).unwrap().condense_min_batch_chars, loaded);
-    }
-    std::fs::remove_dir_all(&home).unwrap();
-}
-
-#[test]
 fn a_worktree_shares_its_main_checkouts_trust_and_a_planted_git_file_does_not() {
     let dir = crate::process::canonicalize(std::env::temp_dir()).unwrap().join(format!("agent-trust-worktree-{}", std::process::id()));
     let (main, linked, planted) = (dir.join("main"), dir.join("linked"), dir.join("planted"));

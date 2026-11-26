@@ -26,7 +26,7 @@ fn changing_a_settings_row_changes_that_row_and_no_other() {
     let all = all_settings();
     use Setting::*;
     // These open their own panel; Ponytail and Caveman would download their rules.
-    let skipped = [Model, CondenseModel, FallbackModel, ReviewerModel, SubagentModel, SmallModel, ContextWindow, HeadroomUrl, HeadroomToken, Ponytail, Caveman];
+    let skipped = [Model, FallbackModel, ReviewerModel, SubagentModel, SmallModel, ContextWindow, HeadroomUrl, HeadroomToken, Ponytail, Caveman];
     let values = |app: &App| all.iter().map(|&row| text(&app.setting_value(row))).collect::<Vec<_>>();
     let mut changed = Vec::new();
     for &row in all.iter().filter(|row| !skipped.contains(row)) {
@@ -57,7 +57,7 @@ fn settings_rows_keep_their_labels() {
         ("Auto-compact", |s| s.auto_compact.to_string()),
         ("Compaction reserve", |s| s.reserve_tokens.to_string()),
         ("Keep recent context", |s| s.keep_recent_tokens.to_string()),
-        ("Condense tool output", |s| s.condense.to_string()),
+        ("Clear old tool output", |s| s.condense.to_string()),
         ("rtk", |s| s.rtk.to_string()),
         ("Headroom proxy", |s| s.headroom.to_string()),
         ("Notifications", |s| s.notifications.to_string()),
@@ -103,14 +103,14 @@ fn model_search_matches_provider_account_or_id_ignoring_case() {
     assert_eq!(ids(&settings, Setting::Model, "plus"), ["gpt-6-luna"]);
     assert_eq!(model_owners(&catalog[1]), "openai-codex · pro, plus");
     assert_eq!(ids(&settings, Setting::Model, "").len(), catalog.len());
-    assert_eq!(ids(&settings, Setting::CondenseModel, "").len(), catalog.len() + 1);
+    assert_eq!(ids(&settings, Setting::ReviewerModel, "").len(), catalog.len() + 1);
     assert_eq!(ids(&settings, Setting::FallbackModel, "aut"), ["auto", "gpt-6-luna"]);
-    assert!(ids(&settings, Setting::CondenseModel, "xyz").is_empty());
+    assert!(ids(&settings, Setting::ReviewerModel, "xyz").is_empty());
     settings.provider_sort = "manual".into();
     settings.provider_order = vec!["openai-codex".into()];
-    assert_eq!(ids(&settings, Setting::CondenseModel, ""), ["auto", "gpt-6-luna", "gpt-6-sol", "claude-haiku-5-5"]);
+    assert_eq!(ids(&settings, Setting::ReviewerModel, ""), ["auto", "gpt-6-luna", "gpt-6-sol", "claude-haiku-5-5"]);
     settings.pinned_models = vec!["openai-codex/gpt-6-sol".into()];
-    assert_eq!(ids(&settings, Setting::CondenseModel, ""), ["auto", "gpt-6-sol", "gpt-6-luna", "claude-haiku-5-5"]);
+    assert_eq!(ids(&settings, Setting::ReviewerModel, ""), ["auto", "gpt-6-sol", "gpt-6-luna", "claude-haiku-5-5"]);
 }
 
 #[test]

@@ -24,6 +24,9 @@ pub fn reply_entry(reply: &Reply, timestamp: u64) -> Value {
     if let Some(tokens) = reply.cache_write_1h {
         entry["cache_write_1h"] = json!(tokens);
     }
+    if reply.cleared_tokens > 0 {
+        entry["cleared"] = json!(reply.cleared_tokens);
+    }
     if let Some(billed) = reply.billed {
         entry["billed"] = json!(billed);
     }

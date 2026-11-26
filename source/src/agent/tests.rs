@@ -116,25 +116,6 @@ fn a_tool_search_the_api_never_ran_is_left_out() {
 }
 
 #[test]
-fn resumed_session_gives_the_provider_the_same_condensed_view() {
-    let dir = std::env::temp_dir().join(format!("agent-condense-{}", std::process::id()));
-    let session = Session::start(&dir, true, Path::new("/w"), "m").unwrap();
-    let messages = [
-        json!({"role": "assistant", "content": [{"type": "tool_use", "id": "a", "name": "Bash", "input": {}}]}),
-        json!({"role": "user", "content": [{"type": "tool_result", "tool_use_id": "a", "content": "raw", "is_error": false}]}),
-    ];
-    for message in &messages {
-        session.append(&json!({"type": "message", "message": message})).unwrap();
-    }
-    let batch = Condensed { refs: vec![("t1".into(), "a".into())], summary: "`t1` ran".into() };
-    session.append(&condense::entry(&batch)).unwrap();
-    let (_, Saved { history, .. }) = Session::resume(&dir, &session.id).unwrap();
-    std::fs::remove_dir_all(&dir).unwrap();
-    assert_eq!(history.messages, messages);
-    assert_eq!(condense::view(&history.messages, &history.condensed), condense::view(&messages, &[batch]));
-}
-
-#[test]
 fn resumed_session_sums_the_time_and_tokens_spent() {
     let dir = std::env::temp_dir().join(format!("agent-spent-{}", std::process::id()));
     let session = Session::start(&dir, true, Path::new("/w"), "m").unwrap();
@@ -237,6 +218,30 @@ fn resuming_a_compaction_past_the_saved_messages_fails_instead_of_panicking() {
 }
 
 #[test]
+fn a_resume_clears_old_tool_results_only_once_the_prompt_cache_has_expired() {
+    let home = std::env::temp_dir().join(format!("agent-resume-clearing-{}", std::process::id()));
+    std::fs::create_dir_all(&home).unwrap();
+    let settings = crate::settings::load(&home).unwrap();
+    let session = Session::start(&home.join("sessions"), false, &home, "m").unwrap();
+    let mut agent = Agent::new(Client::new(&home).unwrap(), &settings, home.clone(), home.clone(), session, home.join("sessions"), None);
+    let mut messages = Vec::new();
+    for n in 0..12 {
+        let id = format!("r{n}");
+        messages.push(json!({"role": "assistant", "content": [{"type": "tool_use", "id": id, "name": "Read", "input": {}}]}));
+        messages.push(json!({"role": "user", "content": [{"type": "tool_result", "tool_use_id": id, "content": "x"}]}));
+    }
+    let mut resume = |minutes_ago: u64| {
+        agent.load(Saved { history: History { messages: messages.clone(), ..History::default() }, last_reply_ms: Some(now_ms() - minutes_ago * 60_000), ..Saved::default() });
+        agent.advance_clearing(&agent.provider_view())
+    };
+    let warm = resume(1);
+    let cold = resume(6);
+    std::fs::remove_dir_all(&home).unwrap();
+    assert_eq!(warm, None);
+    assert_eq!(cold.unwrap()["edits"][0]["keep"]["value"], 10);
+}
+
+#[test]
 fn a_live_session_and_its_resume_hold_the_same_history() {
     let home = std::env::temp_dir().join(format!("agent-live-resume-{}", std::process::id()));
     std::fs::create_dir_all(&home).unwrap();
@@ -249,7 +254,8 @@ fn a_live_session_and_its_resume_hold_the_same_history() {
     agent.record(json!({"type": "tool_checkpoint", "index": 1, "before": "t0", "after": "t1"})).unwrap();
     agent.record(json!({"type": "file_checkpoint", "index": 3, "path": "/w/a", "before": "b0", "after": null})).unwrap();
     agent.record(json!({"type": "compaction", "summary": "S", "cut": 2})).unwrap();
-    agent.record(condense::entry(&Condensed { refs: vec![("t1".into(), "a".into())], summary: "`t1` ran".into() })).unwrap();
+    // Sessions from before condense cleared results hold summary entries; they load and change nothing.
+    agent.record(json!({"type": "condense", "refs": {"t1": "a"}, "summary": "`t1` ran"})).unwrap();
     agent.record(json!({"type": "rewind", "index": 3})).unwrap();
     let resumed = Session::history(agent.session.path.as_ref().unwrap()).unwrap().history;
     std::fs::remove_dir_all(&home).unwrap();

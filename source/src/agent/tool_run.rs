@@ -96,7 +96,7 @@ impl Agent {
             blocks.extend(extra_blocks);
             json!(blocks)
         };
-        // Video puts its transcript in text blocks between the frames; the UI, plugins and condense read it too.
+        // Video puts its transcript in text blocks between the frames; the UI and plugins read it too.
         let output = crate::acp::result_text(&content);
         self.end_call(id, name, started, &output, is_error, emit)?;
         Ok((content, output, is_error))
@@ -146,7 +146,6 @@ impl Agent {
             }
         }
         let result = match name {
-            "ContextTreeQuery" => condense::query(&self.history.messages, &self.history.condensed, input),
             "Todo" => self.todo(input),
             "EnterPlanMode" => self.enter_plan(emit),
             "ExitPlanMode" => self.complete_plan(input),
@@ -155,7 +154,7 @@ impl Agent {
             "ExitWorktree" => self.exit_worktree(input, emit),
             "Goal" => self.goal_tool(input),
             "Bash" if input["run_in_background"] == true => self.terminals.lock().unwrap().start(input, &self.cwd, &self.follow_ups),
-            "TaskOutput" => self.terminals.lock().unwrap().status_of(input, &self.follow_ups),
+            "TaskOutput" => self.task_output(input),
             "TaskStop" => self.task_stop(input),
             "SendMessage" => self.send_message(input, emit),
             "ListAgents" => self.list_agents(),

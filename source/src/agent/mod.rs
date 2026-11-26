@@ -48,7 +48,6 @@ use crate::tools::hashline::Anchors;
 use crate::tools::plan::{self, Plan};
 use crate::tools::rtk::Rtk;
 use crate::tools::todo::Todos;
-use condense::Condensed;
 use permissions::{Decision, Grants, Mode, Request, Step, Verdict};
 use snapshots::Snapshots;
 use subagent::{Launch, Runs};
@@ -140,8 +139,6 @@ pub enum Event {
 
 /// Messages typed mid-turn with their pasted images, read after each tool batch.
 pub type Steering = Arc<Mutex<Vec<(String, Vec<Value>)>>>;
-/// A summarizer thread: the batch, the size of the outputs it replaces, and the reply for the usage books.
-type CondenseJob = JoinHandle<Result<(Condensed, usize, api::Reply), String>>;
 
 /// Work that finished in the background; it reaches the model after the current tool batch or turn, or starts a turn when idle.
 pub struct FollowUp {
@@ -192,7 +189,7 @@ pub struct Agent {
     /// `context_window` can be a smaller /context-window budget for compaction, which should not cut the output.
     provider_window: u64,
     pub max_tokens: u64,
-    /// `small_model` from settings, else the provider's cheapest: titles, Video descriptions, and by default condense summaries.
+    /// `small_model` from settings, else the provider's cheapest: titles and Video descriptions.
     pub cheap_model: String,
     /// Auto-mode reviews: `reviewer_model` from settings, else `cheap_model`.
     pub reviewer_model: String,
@@ -205,12 +202,12 @@ pub struct Agent {
     pub reserve_tokens: u64,
     pub keep_recent_tokens: u64,
     pub last_context_tokens: u64,
-    pub condense: condense::Config,
-    /// Number of the next short ref (`t7`).
-    pub next_ref: usize,
-    pub pending_condense: Vec<CondenseJob>,
-    /// Finished summaries not applied yet, each with the size of the outputs it replaces.
-    pub held_condensed: Vec<(Condensed, usize)>,
+    /// The `condense` setting: old tool results are cleared.
+    pub condense: bool,
+    /// The newest tool use whose result is cleared, with every clearable one before it.
+    pub cleared_through: Option<String>,
+    /// When the last main-model reply came; the prompt cache expires `cache_ttl` after it.
+    last_reply_at: Option<Instant>,
     pub pending_title: Option<JoinHandle<Result<String, String>>>,
     pub usage: Usage,
     pub turns: u64,
@@ -329,8 +326,6 @@ pub struct Compaction {
 #[derive(Default, Debug, PartialEq)]
 pub struct History {
     pub messages: Vec<Value>,
-    /// Summarized batches; the provider sees their stubs, `messages` keeps the originals.
-    pub condensed: Vec<Condensed>,
     /// Files changed by this session's own tool calls, oldest first.
     pub checkpoints: Vec<Checkpoint>,
     pub file_checkpoints: Vec<FileCheckpoint>,
@@ -375,7 +370,6 @@ impl History {
                 }
                 self.compactions.push(Compaction { cut, summary: summary.to_string() });
             }
-            "condense" => self.condensed.push(condense::from_entry(&entry).ok_or_else(|| missing("refs or summary"))?),
             _ => {}
         }
         Ok(())
@@ -394,6 +388,8 @@ pub struct Saved {
     pub accounts: HashMap<String, String>,
     pub extra_dirs: Vec<PathBuf>,
     pub config: Option<SessionConfig>,
+    /// When the last reply came, in ms since the epoch: a resume within `cache_ttl` finds the prompt cache warm.
+    pub last_reply_ms: Option<u64>,
 }
 
 /// What an opened session brings besides its state: messages for the transcript, the accounts that served it and the
@@ -459,7 +455,7 @@ impl Agent {
             images: Vec::new(),
             model: settings.model.clone(),
             effort: settings.thinking.clone(),
-            // settle_model fills these four and condense once the model lists arrive.
+            // settle_model fills these once the model lists arrive.
             context_window: 0,
             provider_window: 0,
             max_tokens: 0,
@@ -472,10 +468,9 @@ impl Agent {
             reserve_tokens: settings.reserve_tokens,
             keep_recent_tokens: settings.keep_recent_tokens,
             last_context_tokens: 0,
-            condense: condense::Config::new(settings, ""),
-            next_ref: 1,
-            pending_condense: Vec::new(),
-            held_condensed: Vec::new(),
+            condense: settings.condense,
+            cleared_through: None,
+            last_reply_at: None,
             pending_title: None,
             usage: Usage::default(),
             turns: 0,
@@ -692,7 +687,6 @@ impl Agent {
                     emit(Event::Compacted { summary });
                 }
             }
-            self.collect_condensed(emit)?;
             let messages = self.provider_view();
             let (system, tools) = self.system_and_tools();
             let input = context::estimate(&format!("{system}{}", self.cwd_section()), &tools, &messages);
@@ -700,6 +694,9 @@ impl Agent {
             let mut request = api::request(&self.model, max_tokens, &self.effort, &self.cache_ttl, &system, &self.cwd_section(), &tools, &messages);
             if self.speed != "standard" {
                 request["speed"] = json!(self.speed);
+            }
+            if let Some(edits) = self.advance_clearing(&messages) {
+                request["context_management"] = edits;
             }
             let sent = self.client.send_in_thread(&request, &mut self.message_thread, &self.abort, self.text_to_stdout, &mut |delta| match delta {
                 Delta::Text(text) => emit(Event::Text(text.to_string())),
@@ -726,6 +723,7 @@ impl Agent {
                 goal.tokens_used += reply.usage.input + reply.usage.cache_write + reply.usage.output;
             }
             self.last_context_tokens = reply.context_tokens;
+            self.last_reply_at = Some(Instant::now());
             emit(Event::TurnEnd { usage: reply.usage, context_tokens: reply.context_tokens, stop_reason: reply.stop_reason.clone() });
             let aborted = reply.stop_reason == "aborted";
             if aborted {
@@ -772,15 +770,12 @@ impl Agent {
                 self.session.append(&json!({"type": "bad_tool_input", "id": bad.id, "error": bad.error, "raw": bad.raw}))?;
             }
             let mut results = Vec::new();
-            let mut finished = Vec::new();
             for call in calls {
-                let id = call["id"].as_str().unwrap_or_default().to_string();
-                let name = call["name"].as_str().unwrap_or_default().to_string();
-                let input = call["input"].clone();
+                let id = call["id"].as_str().unwrap_or_default();
+                let name = call["name"].as_str().unwrap_or_default();
                 let bad_input = reply.bad_tool_inputs.iter().find(|bad| bad.id == id).map(|bad| bad.error.as_str());
-                let (content, output, is_error) = self.run_call(&id, &name, &input, bad_input, emit)?;
+                let (content, _, is_error) = self.run_call(id, name, &call["input"], bad_input, emit)?;
                 results.push(json!({"type": "tool_result", "tool_use_id": id, "content": content, "is_error": is_error}));
-                finished.push(condense::Call { id, name, input, output, is_error });
             }
             // An aborted turn leaves steering queued, so the idle TUI sends it as the next turn.
             let stopped = self.abort.load(Ordering::Relaxed);
@@ -792,7 +787,6 @@ impl Agent {
                 emit(Event::Notice(ABORTED.into()));
                 return Ok(answer);
             }
-            self.start_condense(&answer, finished);
         }
     }
 
@@ -873,7 +867,7 @@ impl Agent {
         self.auto_compact = settings.auto_compact;
         self.reserve_tokens = settings.reserve_tokens;
         self.keep_recent_tokens = settings.keep_recent_tokens;
-        self.condense = condense::Config::new(settings, cheap_model);
+        self.condense = settings.condense;
         self.subagent_concurrency = settings.subagent_concurrency;
         self.subagents.lock().unwrap().max_running = settings.max_subagents;
         self.subagent_effort = settings.subagent_effort.clone();
@@ -970,18 +964,15 @@ impl Agent {
     }
 
     fn tool_schemas(&self) -> Value {
-        // Condensed batches of a resumed session keep their originals reachable after condense is turned off.
-        let context_tree_query = self.condense.enabled || !self.history.condensed.is_empty();
         tools::schemas(
             &subagent::swarm_prompt(&self.agent_dir, &self.cwd, prompt::is_trusted(&self.trusted_projects, &self.cwd), &self.subagent_effort),
-            context_tree_query,
             self.client.generates_images(&self.image_model),
             self.code_mode,
         )
     }
 
     fn provider_view(&self) -> Vec<Value> {
-        answer_missing_results(condense::view(&self.compacted(), &self.history.condensed))
+        answer_missing_results(self.compacted())
     }
 
     pub fn summary(&self, answer: &str) -> Value {
