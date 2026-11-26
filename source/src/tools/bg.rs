@@ -132,7 +132,7 @@ impl Terminals {
             }
         });
         Ok(format!(
-            "Started background terminal {id} \"{title}\" (pid {pid}, {cwd}).\nIt runs in the background with no stdin. You'll get a message when it exits, or use TaskOutput(task_id: \"{id}\") to peek, TaskStop to stop it, TaskOutput without task_id to see all.",
+            "Started background terminal {id} \"{title}\" (pid {pid}, {cwd}).\nIt runs in the background with no stdin. You'll get a message when it exits, or use TaskOutput(task_id: \"{id}\") to peek, with block: true to wait for the exit, TaskStop to stop it, TaskOutput without task_id to see all.",
             id = terminal.id,
             title = terminal.title,
             pid = terminal.pid,
@@ -187,6 +187,18 @@ pub fn kill(terminals: &[Arc<Terminal>], follow_ups: &Arc<Mutex<Vec<FollowUp>>>,
         });
     }
     lines.join("\n")
+}
+
+/// TaskOutput with `block`: returns once the terminal exits, `timeout` passes or the user aborts.
+pub fn wait_for_exit(terminal: &Terminal, timeout: Duration, abort: &AtomicBool) -> Result<(), String> {
+    let deadline = Instant::now() + timeout;
+    while terminal.status() == Status::Running && Instant::now() < deadline {
+        if abort.load(Ordering::Relaxed) {
+            return Err(crate::agent::ABORTED.into());
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    Ok(())
 }
 
 impl Terminal {
@@ -357,6 +369,24 @@ mod tests {
         assert_eq!(kill(&targets, &follow_ups, &abort), format!("Killed bt-1 \"sleep 30 & sleep 30\" ({how})."));
         assert!(follow_ups.lock().unwrap().is_empty());
         assert_eq!(kill(&targets, &follow_ups, &abort), format!("bt-1 \"sleep 30 & sleep 30\" was already killed ({how})."));
+    }
+
+    #[test]
+    fn a_blocking_wait_ends_at_the_exit_the_timeout_or_an_abort() {
+        let dir = std::env::temp_dir();
+        let follow_ups = Arc::default();
+        let mut terminals = Terminals::default();
+        terminals.start(&json!({"command": "sleep 0.3"}), &dir, &follow_ups).unwrap();
+        terminals.start(&json!({"command": "sleep 30"}), &dir, &follow_ups).unwrap();
+        let (quick, slow) = (terminals.find("bt-1").unwrap(), terminals.find("bt-2").unwrap());
+        let not_aborted = AtomicBool::new(false);
+        wait_for_exit(&quick, Duration::from_secs(10), &not_aborted).unwrap();
+        assert!(quick.status() == Status::Done);
+        let started = Instant::now();
+        wait_for_exit(&slow, Duration::from_millis(200), &not_aborted).unwrap();
+        assert!(slow.status() == Status::Running && started.elapsed() < Duration::from_secs(5));
+        assert_eq!(wait_for_exit(&slow, Duration::from_secs(10), &AtomicBool::new(true)).unwrap_err(), crate::agent::ABORTED);
+        kill(&[slow], &follow_ups, &not_aborted);
     }
 
     #[test]

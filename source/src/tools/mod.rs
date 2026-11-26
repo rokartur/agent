@@ -131,9 +131,7 @@ pub fn undeclared_params(schemas: &Value, name: &str, input: &Value) -> Option<S
         return None;
     }
     let listed: Vec<String> = undeclared.iter().map(|path| format!("`{path}`")).collect();
-    let waits = name == "TaskOutput" && (undeclared.contains("block") || undeclared.contains("timeout"));
-    let hint = if waits { " It never waits: a background task's output arrives as a message when the task exits." } else { "" };
-    Some(format!("{name} does not take {}.{hint}", listed.join(", ")))
+    Some(format!("{name} does not take {}.", listed.join(", ")))
 }
 
 fn collect_undeclared(value: &Value, schema: &Value, at: &str, undeclared: &mut BTreeSet<String>) {
@@ -753,10 +751,7 @@ mod tests {
         let undeclared = |name: &str, input: Value| undeclared_params(&tools, name, &input);
         assert_eq!(undeclared("Grep", json!({"pattern": "x", "head_limit": 5, "-n": true})).unwrap(), "Grep does not take `head_limit`.");
         assert_eq!(undeclared("Grep", json!({"pattern": "x", "-n": true})), None);
-        assert_eq!(
-            undeclared("TaskOutput", json!({"task_id": "bt-1", "block": true, "timeout": 300000})).unwrap(),
-            "TaskOutput does not take `block`, `timeout`. It never waits: a background task's output arrives as a message when the task exits."
-        );
+        assert_eq!(undeclared("TaskOutput", json!({"task_id": "bt-1", "block": true, "timeout": 300000})), None);
         assert_eq!(undeclared("TaskOutput", json!({"task_id": "bt-1", "tail": 5})).unwrap(), "TaskOutput does not take `tail`.");
         let edits = json!({"file_path": "a", "edits": [{"old_string": "a", "new_string": "b", "replace_all": true}, {"old_string": "c", "new_string": "d", "replace_all": true}]});
         assert_eq!(undeclared("Edit", edits).unwrap(), "Edit does not take `edits.replace_all`.");

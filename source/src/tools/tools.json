@@ -67,7 +67,7 @@
   },
   {
     "name": "Bash",
-    "description": "Run a bash command in the cwd; stderr merged, no stdin. A lone `cd DIR` moves the session. Output keeps the last 2000 lines or 50KB. `run_in_background` returns a task id; its output arrives when it exits.",
+    "description": "Run a bash command in the cwd; stderr merged, no stdin. A lone `cd DIR` moves the session, so later commands need no `cd DIR &&` prefix. Output keeps the last 2000 lines or 50KB. `run_in_background` returns a task id; its output arrives when it exits.",
     "eager_input_streaming": true,
     "input_schema": {
       "additionalProperties": false,
@@ -385,10 +385,14 @@
   },
   {
     "name": "TaskOutput",
-    "description": "A background Bash task's status and output tail, without blocking; without `task_id`, lists every task with pid, elapsed time, exit status and output sizes.",
+    "description": "A background Bash task's status and output tail; with `block`, after it exits or `timeout` passes, so one call replaces a loop of polls. Without `task_id`, lists every task with pid, elapsed time, exit status and output sizes.",
     "input_schema": {
       "type": "object",
-      "properties": { "task_id": { "type": "string", "description": "Task id, e.g. \"bt-1\"" } }
+      "properties": {
+        "task_id": { "type": "string", "description": "Task id, e.g. \"bt-1\"" },
+        "block": { "type": "boolean", "description": "Wait for the task to exit. Default false" },
+        "timeout": { "type": "number", "description": "Milliseconds `block` waits at most. Default 30000, max 600000" }
+      }
     }
   },
   {

@@ -155,7 +155,7 @@ impl Agent {
             "ExitWorktree" => self.exit_worktree(input, emit),
             "Goal" => self.goal_tool(input),
             "Bash" if input["run_in_background"] == true => self.terminals.lock().unwrap().start(input, &self.cwd, &self.follow_ups),
-            "TaskOutput" => self.terminals.lock().unwrap().status_of(input, &self.follow_ups),
+            "TaskOutput" => self.task_output(input),
             "TaskStop" => self.task_stop(input),
             "SendMessage" => self.send_message(input, emit),
             "ListAgents" => self.list_agents(),
