@@ -167,7 +167,7 @@ impl Agent {
         }
         *ran += 1;
         // The script parses what Bash prints, so the command runs as written: rtk turns the `total` row of `wc -l` into `Σ 9`.
-        let rtk = std::mem::replace(&mut self.rtk, Rtk::OFF);
+        let rtk = std::mem::replace(&mut self.rtk, Rtk::SCRIPT);
         self.in_script = true;
         let call = self.run_call(&format!("{id}-{ran}"), name, input, None, emit);
         self.in_script = false;
@@ -213,7 +213,9 @@ impl Agent {
                 }
             };
             let (Ok(output) | Err(output)) = &outcome;
-            self.end_call(&call, "Bash", started, output, outcome.is_err(), emit)?;
+            // The script gets the whole output; the row gets the tail, as `end_call` gives `script_call`'s Bash.
+            let shown = tools::shown_tail(output.clone());
+            self.end_call(&call, "Bash", started, &shown, outcome.is_err(), emit)?;
             outcomes.push(outcome);
         }
         Ok(outcomes)
@@ -227,7 +229,7 @@ impl Agent {
     }
 }
 
-/// The results of `inputs` in their order, `BASH_AT_ONCE` commands running at a time and as written, without rtk.
+/// The results of `inputs` in their order, `BASH_AT_ONCE` commands running at a time, as written and whole.
 /// shortcut: a chunk waits for its slowest command before the next chunk starts; a work queue once scripts fan out past 8 long commands.
 fn bash_at_once(inputs: &[&Value], cwd: &Path, abort: &AtomicBool) -> Vec<Result<String, String>> {
     let mut results = Vec::new();
@@ -245,7 +247,7 @@ fn bash_unless_stopped(input: &Value, cwd: &Path, abort: &AtomicBool) -> Result<
     if abort.load(Ordering::Relaxed) {
         return Err(ABORTED.into());
     }
-    tools::bash(input, cwd, &Rtk::OFF, abort, None)
+    tools::bash(input, cwd, &Rtk::SCRIPT, abort, None)
 }
 
 /// Globals the script sees: the harness and the native hooks it calls. Then starts the script as one async function, so its body can `await` and `return`.
@@ -322,6 +324,29 @@ mod tests {
         assert_eq!(edited, [cwd.join("it's a.txt")], "the edit hooks at the prompt's end see the script's edits");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn a_script_gets_the_whole_output_of_a_long_command_and_its_rows_the_tail() {
+        let (mut agent, home) = agent("whole");
+        let code = r#"
+            const together = await Promise.all([$`seq 1 100000`, $`seq 1 100000`]);
+            const alone = await tool("Bash", { command: "seq 1 100000" });
+            return [...together, alone].map((out) => out.trim().split("\n").length);
+        "#;
+        let mut rows = Vec::new();
+        let result = agent.code("c1", &json!({"code": code}), &mut |event| {
+            if let Event::ToolEnd { output, .. } = event {
+                rows.push(output);
+            }
+        });
+        std::fs::remove_dir_all(&home).unwrap();
+        assert_eq!(result.unwrap(), "[100000,100000,100000]");
+        assert_eq!(rows.len(), 3);
+        for row in rows {
+            assert!(row.len() < tools::MAX_BYTES + 200 && row.contains("[Showing lines 98001-100000 of 100000."), "{}", &row[row.len() - 120..]);
+        }
+    }
+
     #[test]
     fn a_script_calls_only_the_tools_offered_to_the_model() {
         let (mut agent, home) = agent("offered");
@@ -392,11 +417,11 @@ mod tests {
     #[test]
     fn what_a_script_logs_comes_back_before_its_value_or_error() {
         let (mut agent, home) = agent("logs");
-        let both = run(&mut agent, "console.log('found', { n: 2 }); console.error(new Error('odd')); return [1];");
+        let both = run(&mut agent, "console.log('found', { n: 2 }, new TextEncoder().encode('zé').length); console.error(new Error('odd')); return [1, { a: 2 }];");
         let only_logs = run(&mut agent, "console.log('done');");
         let thrown = run(&mut agent, "console.log('step 1'); throw new Error('boom');").unwrap_err();
         std::fs::remove_dir_all(&home).unwrap();
-        assert_eq!(both.unwrap(), "found {\"n\":2}\nError: odd\n[\n  1\n]");
+        assert_eq!(both.unwrap(), "found {\"n\":2} 3\nError: odd\n[1,{\"a\":2}]");
         assert_eq!(only_logs.unwrap(), "done");
         assert!(thrown.starts_with("step 1\nError: boom"), "{thrown}");
     }

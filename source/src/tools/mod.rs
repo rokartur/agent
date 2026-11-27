@@ -219,7 +219,7 @@ pub fn bash(input: &Value, cwd: &Path, rtk: &Rtk, abort: &AtomicBool, terminal: 
     // A timeout too large for an Instant is no timeout.
     let deadline = Instant::now().checked_add(Duration::try_from_secs_f64(timeout / 1000.0).unwrap_or(Duration::MAX));
     let script = format!("exec 2>&1; {command}");
-    let mut capture = Capture::default();
+    let mut capture = Capture { keep: KEEP_BYTES.max(rtk.max_bytes), ..Capture::default() };
     let (code, killed) = match terminal {
         Some((terminal, call)) => {
             let (output, code, killed) = terminal.run(call, &script, cwd, abort, deadline)?;
@@ -232,7 +232,7 @@ pub fn bash(input: &Value, cwd: &Path, rtk: &Rtk, abort: &AtomicBool, terminal: 
             (exit_code(status), killed)
         }
     };
-    let output = truncate_tail(rtk.strip(String::from_utf8_lossy(&capture.text).into_owned()), rtk.max_bytes, capture.spilled());
+    let output = truncate_tail(rtk.strip(String::from_utf8_lossy(&capture.text).into_owned()), rtk.max_bytes, rtk.max_lines, capture.spilled());
     match killed {
         Some(Killed::Timeout) => return Err(append_status(&output, &format!("Command timed out after {timeout} ms. Pass a larger `timeout` for a long build or test, or `run_in_background: true`."))),
         Some(Killed::Aborted) => return Err(append_status(&output, "Command aborted")),
@@ -312,13 +312,14 @@ fn read_chunks(mut pipe: impl Read + Send + 'static) -> mpsc::Receiver<Vec<u8>> 
     chunks
 }
 
-/// Bash keeps at most this much output in memory; beyond it the whole stream goes to a spill file.
+/// Bash keeps at least this much output in memory; beyond its `keep` the whole stream goes to a spill file.
 const KEEP_BYTES: usize = 4 * MAX_BYTES;
 
-/// A command's output: all of it, or its last KEEP_BYTES once it outgrew them.
+/// A command's output: all of it, or its last `keep` bytes once it outgrew them.
 #[derive(Default)]
 struct Capture {
     text: Vec<u8>,
+    keep: usize,
     dropped_lines: usize,
     spill: Option<SpillFile>,
 }
@@ -328,14 +329,14 @@ impl Capture {
         self.text.extend_from_slice(chunk);
         match &mut self.spill {
             Some(spill) => spill.write(chunk),
-            None if self.text.len() > KEEP_BYTES => {
+            None if self.text.len() > self.keep => {
                 let mut spill = SpillFile::create("bash");
                 spill.write(&self.text);
                 self.spill = Some(spill);
             }
             None => return,
         }
-        let cut = self.text.len().saturating_sub(KEEP_BYTES);
+        let cut = self.text.len().saturating_sub(self.keep);
         self.dropped_lines += self.text[..cut].iter().filter(|&&byte| byte == b'\n').count();
         self.text.drain(..cut);
     }
@@ -571,17 +572,17 @@ fn cut_head(text: &str, label: &str) -> Option<Head> {
         return None;
     }
     let path = spill(text, label);
-    let (lines, bytes) = fit(text.split_inclusive('\n'), MAX_BYTES);
+    let (lines, bytes) = fit(text.split_inclusive('\n'), MAX_BYTES, MAX_LINES);
     if lines == 0 {
         return Some(Head { bytes: text.floor_char_boundary(MAX_BYTES), lines: 1, total, path });
     }
     Some(Head { bytes: text[..bytes].strip_suffix('\n').map_or(bytes, str::len), lines, total, path })
 }
 
-/// How many of `lines`, at most MAX_LINES, fit whole in `max_bytes`, and their bytes.
-fn fit<'a>(lines: impl Iterator<Item = &'a str>, max_bytes: usize) -> (usize, usize) {
+/// How many of `lines`, at most `max_lines`, fit whole in `max_bytes`, and their bytes.
+fn fit<'a>(lines: impl Iterator<Item = &'a str>, max_bytes: usize, max_lines: usize) -> (usize, usize) {
     let (mut count, mut bytes) = (0, 0);
-    for line in lines.take(MAX_LINES) {
+    for line in lines.take(max_lines) {
         if bytes + line.len() > max_bytes {
             break;
         }
@@ -591,20 +592,25 @@ fn fit<'a>(lines: impl Iterator<Item = &'a str>, max_bytes: usize) -> (usize, us
     (count, bytes)
 }
 
-/// Keeps the last MAX_LINES / `max_bytes` of `text`, like pi's bash tool. `spilled` is the part of the stream
+/// The tail a direct Bash call shows, for a script's Bash whose whole output went to the script.
+pub fn shown_tail(text: String) -> String {
+    truncate_tail(text, MAX_BYTES, MAX_LINES, None)
+}
+
+/// Keeps the last `max_lines` / `max_bytes` of `text`, like pi's bash tool. `spilled` is the part of the stream
 /// before `text` that was already let go of.
-fn truncate_tail(text: String, max_bytes: usize, spilled: Option<Spilled>) -> String {
+fn truncate_tail(text: String, max_bytes: usize, max_lines: usize, spilled: Option<Spilled>) -> String {
     let body = text.trim_end_matches('\n');
     let dropped_lines = spilled.as_ref().map_or(0, |spilled| spilled.lines);
     let total = dropped_lines + body.lines().count();
-    if spilled.is_none() && total <= MAX_LINES && text.len() <= max_bytes {
+    if spilled.is_none() && total <= max_lines && text.len() <= max_bytes {
         return text;
     }
     let path = match spilled {
         Some(spilled) => spilled.path,
         None => spill(&text, "bash"),
     };
-    let (kept, bytes) = fit(body.split_inclusive('\n').rev(), max_bytes);
+    let (kept, bytes) = fit(body.split_inclusive('\n').rev(), max_bytes, max_lines);
     if kept == 0 {
         let start = body.ceil_char_boundary(body.len().saturating_sub(max_bytes));
         return format!("{}\n\n[Showing the last {} of line {total}. Full output: {path}]", &body[start..], format_size(body.len() - start));
@@ -804,31 +810,31 @@ mod tests {
     #[test]
     fn tail_truncation_keeps_the_end() {
         let text: String = (1..=2500).map(|i| format!("{i}\n")).collect();
-        let out = truncate_tail(text, MAX_BYTES, None);
+        let out = truncate_tail(text, MAX_BYTES, MAX_LINES, None);
         assert!(out.starts_with("501\n"));
         assert!(out.contains("[Showing lines 501-2500 of 2500."));
     }
 
     #[test]
     fn tail_truncation_cuts_one_long_line_on_a_char_boundary() {
-        let out = truncate_tail(format!("{}x", "é".repeat(10)), 6, None);
+        let out = truncate_tail(format!("{}x", "é".repeat(10)), 6, MAX_LINES, None);
         assert!(out.starts_with("ééx\n\n[Showing the last 5B of line 1."), "{out}");
     }
 
     #[test]
     fn tail_truncation_ignores_trailing_blank_lines_and_carriage_returns() {
-        let out = truncate_tail(format!("{}\n\n", "a".repeat(13_000)), 12_000, None);
+        let out = truncate_tail(format!("{}\n\n", "a".repeat(13_000)), 12_000, MAX_LINES, None);
         assert!(out.starts_with(&"a".repeat(12_000)), "{}", &out[..40]);
-        let out = truncate_tail(format!("{}\nok\n\n\n", "é".repeat(10)), 6, None);
+        let out = truncate_tail(format!("{}\nok\n\n\n", "é".repeat(10)), 6, MAX_LINES, None);
         assert!(out.starts_with("ok\n\n[Showing lines 2-2 of 2."), "{out}");
-        let out = truncate_tail("éé\r\n".repeat(3000), 12_000, None);
+        let out = truncate_tail("éé\r\n".repeat(3000), 12_000, MAX_LINES, None);
         assert!(out.starts_with("éé\r\n") && out.contains("[Showing lines 1001-3000 of 3000."), "{}", &out[out.len() - 120..]);
     }
 
     #[test]
     fn tail_of_a_spilled_stream_counts_the_lines_it_dropped() {
         let spilled = Spilled { lines: 7000, path: "/tmp/full.log".into() };
-        let out = truncate_tail("x\ny\n".into(), MAX_BYTES, Some(spilled));
+        let out = truncate_tail("x\ny\n".into(), MAX_BYTES, MAX_LINES, Some(spilled));
         assert_eq!(out, "x\ny\n\n[Showing lines 7001-7002 of 7002. Full output: /tmp/full.log]");
     }
 

@@ -38,6 +38,24 @@ Fixes since release, from the changelog. They show where the feature broke in re
 
 Open requests: Code Mode in Agent SDK sessions (#109679) and in Remote Control (#109847); mods that only observe tool calls turn Code Mode off (#110180, #110367).
 
+### Since 2.1.326 (checked 2026-11-27, up to 2.1.332 of 2026-11-25)
+
+From the changelog and from the strings of the 2.1.332 `darwin-arm64` binary. The binary's prompt shows a different design from the agent's:
+
+- `REPL` replaces the tools: "Your one tool is `REPL`" (two with the wait tool). The built-in tools are TypeScript declarations in the prompt; MCP and other tools are found from inside a script with `searchTools()` and `describeTool()`, so their schemas enter the context only when a script returns them.
+- One VM for the whole session: "the value itself stays in the REPL whether you return it or not. So return what you want to read now, keep the rest in variables". Resume tells Claude the variables are gone (2.1.332).
+- Output: each returned value is cut at its head and tail, `preview()` shows a slice, and the prompt prices it: "About 150 lines of output cost as much as one more call". A script that runs past a few seconds returns `(dispatched #N)` and its result arrives later as an event.
+- Helpers: `edit(path, old, new)` and a batch form, `write`, `file(path)` slices, and a `$` result with `.text()`, `.lines()`, `.json()`, `.timeout()`.
+
+Fixes that also applied to the agent, and what it does now:
+
+- 2.1.331 "losing the middle of a long script output". The agent's `$` gave a script only the last 50KB or 2,000 lines of a command, so scripts that ran `` $`cat port/ledger.md` `` on a 278KB file parsed its tail and failed on a row that was not there ("cannot read property 'split' of undefined": 4 scripts in the logs, at least 3 of them after `cat` of a file). Now `$` and `tool("Bash")` in a script get the whole output up to 64 MiB (`Rtk::SCRIPT`); the model still sees only what the script returns, under the usual cap.
+- 2.1.328 "Claude is told where a failed edit matches or comes closest". The agent's `E_NO_MATCH` said only that the text was missing, 173 times in two weeks of logs, and the model read the file again. Now it shows the lines that share the most with `old_string`, for `Edit` called directly too.
+- 2.1.328 "shorter tool descriptions". The agent's script result was JSON indented by two spaces; now it is compact, as its token count is what the model pays for.
+- `TextEncoder` (7 failed scripts in the logs): QuickJS has none; the harness adds one.
+
+Not taken: `REPL` as the only tool and the session-long VM. Both change how every turn works, and the measurement below shows Code mode pays off on repeated edits only. In two weeks of the agent's logs (97,850 requests), `Code` was 4,716 calls against 68,018 `Bash` calls, and tool results were 2% `Code`, 31% `Read` and 58% `Bash` by bytes. Cache reads were 52% of the cost and cache writes 32%, so the cache bug in `docs/condense-upstream.md` cost more than every Code Mode difference together.
+
 ## What X adds
 
 - The widely shared "37% fewer tokens" is not about Code Mode. It is Anthropic's figure for Programmatic Tool Calling on the API: 43,588 to 27,297 tokens on complex research tasks (advanced-tool-use post). Several posts point this out.

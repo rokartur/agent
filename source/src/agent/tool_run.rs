@@ -118,8 +118,10 @@ impl Agent {
         self.tool_calls += 1;
         // Includes the LSP check after an edit: the whole wait before the next tool.
         self.session.append(&json!({"type": "tool_time", "id": id, "name": name, "ms": started.elapsed().as_millis() as u64}))?;
+        // A script's Bash returns up to 64 MiB to the script; the row, Zed and plugins get the tail a direct call shows.
+        let output = if self.in_script && name == "Bash" { tools::shown_tail(output.to_string()) } else { output.to_string() };
         self.plugins.event(json!({"type": "tool_result", "name": name, "output": output, "isError": is_error, "context": self.plugin_context()}));
-        emit(Event::ToolEnd { id: id.into(), output: output.into(), is_error });
+        emit(Event::ToolEnd { id: id.into(), output, is_error });
         Ok(())
     }
 

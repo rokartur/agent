@@ -40,12 +40,19 @@ const __logged = (value) => (typeof value === "object" && !(value instanceof Err
 globalThis.console = {};
 for (const level of ["log", "info", "warn", "error", "debug"]) console[level] = (...values) => void __logs.push(values.map(__logged).join(" "));
 
+// QuickJS has no TextEncoder either; scripts reach for it to count bytes.
+globalThis.TextEncoder = class TextEncoder {
+  encode(text = "") {
+    return Uint8Array.from(unescape(encodeURIComponent(text)), (char) => char.charCodeAt(0));
+  }
+};
+
 // What reaches the model: the lines the script logged, then its value (a string as is, anything else as JSON) or its error.
 globalThis.__done = (ok, value) => {
   let last = [];
   if (!ok) last = [value && value.stack ? `${value}\n${value.stack}` : String(value)];
   else if (typeof value === "string") last = [value];
-  else if (value !== undefined) last = [JSON.stringify(value, null, 2) ?? String(value)];
+  else if (value !== undefined) last = [JSON.stringify(value) ?? String(value)];
   else if (__logs.length === 0) last = ["The script returned no value."];
   __finish(ok, [...__logs, ...last].join("\n"));
 };

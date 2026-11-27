@@ -1,18 +1,22 @@
 use std::time::Duration;
 
-/// The model's bash calls: the command goes through `rtk rewrite`, the output loses ANSI codes and keeps its last `max_bytes`.
+/// The model's bash calls: the command goes through `rtk rewrite`, the output loses ANSI codes and keeps its last `max_bytes` and `max_lines`.
 /// shortcut: pi's build/test/git/linter output filters are not ported; `rtk rewrite` already routes those commands through rtk.
 pub struct Rtk {
     enabled: bool,
     /// The byte cap on the kept tail of bash output; the full output goes to a temp file.
     pub max_bytes: usize,
+    pub max_lines: usize,
 }
 
 impl Rtk {
     /// The same tail as pi's bash: at 24KB, printing a 1000-line source file took a second call for its head.
-    pub const ON: Rtk = Rtk { enabled: true, max_bytes: super::MAX_BYTES };
+    pub const ON: Rtk = Rtk { enabled: true, max_bytes: super::MAX_BYTES, max_lines: super::MAX_LINES };
     /// For `!` commands the user typed and for every call when the rtk setting is off: no rewrite, no ANSI strip, the MAX_BYTES tail.
-    pub const OFF: Rtk = Rtk { enabled: false, max_bytes: super::MAX_BYTES };
+    pub const OFF: Rtk = Rtk { enabled: false, max_bytes: super::MAX_BYTES, max_lines: super::MAX_LINES };
+    /// A Code script's `$`: the whole output as written, so `cat` of a 278KB ledger is not parsed from its last 50KB.
+    /// The model still sees only what the script returns, under the usual cap.
+    pub const SCRIPT: Rtk = Rtk { enabled: false, max_bytes: 64 << 20, max_lines: usize::MAX };
 
     /// The command bash runs: rtk's rewrite of `command`, or `command` itself when rtk is off, missing, slow, refuses or has no rewrite.
     pub fn rewrite(&self, command: &str) -> String {
