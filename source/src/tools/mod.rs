@@ -661,9 +661,15 @@ fn private_file(stem: &str, extension: &str) -> Result<(File, PathBuf), String> 
     static CREATED: AtomicUsize = AtomicUsize::new(0);
     let dir = spill_dir();
     crate::process::private_dir(&dir)?;
-    let path = dir.join(format!("{stem}-{}.{extension}", CREATED.fetch_add(1, Ordering::Relaxed)));
-    let file = crate::process::private_file().write(true).create_new(true).open(&path).map_err(|e| format!("Cannot create {}: {e}", path.display()))?;
-    Ok((file, path))
+    loop {
+        let path = dir.join(format!("{stem}-{}.{extension}", CREATED.fetch_add(1, Ordering::Relaxed)));
+        match crate::process::private_file().write(true).create_new(true).open(&path) {
+            Ok(file) => return Ok((file, path)),
+            // /reload keeps the dir and its terminals' logs, and the server it execs counts from 0 again.
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(format!("Cannot create {}: {e}", path.display())),
+        }
+    }
 }
 
 /// Spill files are only for this run, so quitting removes them.

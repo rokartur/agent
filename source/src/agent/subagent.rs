@@ -53,6 +53,8 @@ pub struct Run {
     worker: Mutex<Option<Worker>>,
     /// One JSON string per line: the task, then what the user types to the run.
     stdin: Mutex<Option<Box<dyn Write + Send>>>,
+    /// The child's stdin and stdout while its pipes are open, which /reload hands over.
+    fds: Mutex<Option<Fds>>,
     pub state: Mutex<RunState>,
     pub launch: Launch,
     /// SendMessage resumed the finished run, so its next answer arrives as a message.
@@ -137,6 +139,9 @@ impl Run {
 enum Worker {
     Here(Child),
     There(TcpStream),
+    /// A child here that the server before /reload started.
+    #[cfg(unix)]
+    Adopted(u32),
 }
 
 impl Worker {
@@ -145,12 +150,28 @@ impl Worker {
             Worker::Here(child) => crate::process::signal_group(child.id(), signal),
             // The host stops the process once the connection ends.
             Worker::There(stream) => _ = stream.shutdown(Shutdown::Both),
+            #[cfg(unix)]
+            Worker::Adopted(pid) => crate::process::signal_group(*pid, signal),
         }
     }
 
     fn wait(self) {
-        if let Worker::Here(mut child) = self {
-            let _ = child.wait();
+        match self {
+            Worker::Here(mut child) => _ = child.wait(),
+            Worker::There(_) => {}
+            // SAFETY: waitpid with a null status pointer only reaps.
+            #[cfg(unix)]
+            Worker::Adopted(pid) => _ = unsafe { libc::waitpid(pid as i32, std::ptr::null_mut(), 0) },
+        }
+    }
+
+    #[cfg(unix)]
+    fn pid(&self) -> Option<u32> {
+        match self {
+            Worker::Here(child) => Some(child.id()),
+            Worker::There(_) => None,
+            #[cfg(unix)]
+            Worker::Adopted(pid) => Some(*pid),
         }
     }
 }
@@ -245,6 +266,7 @@ pub fn spawn(runs: &Arc<Mutex<Runs>>, launch: Launch, background: bool, workflow
             started: Instant::now(),
             worker: Mutex::default(),
             stdin: Mutex::default(),
+            fds: Mutex::default(),
             state: Mutex::default(),
             launch,
             resumed: AtomicBool::new(false),
@@ -330,11 +352,12 @@ fn start(run: &Arc<Run>, message: &str, resume: Option<&str>, runs: &Arc<Mutex<R
     if let Some(session) = resume {
         args.extend(["--resume", session]);
     }
-    let (worker, mut stdin, stdout): Pipes = match &launch.on {
+    let (worker, mut stdin, stdout, fds): Pipes = match &launch.on {
         Some((environment, settings)) => {
             let (reader, stream) = crate::tailnet::subagent(settings, environment, &launch.cwd, &args)?;
             let writer = stream.try_clone().map_err(|e| format!("Cannot reach {environment}: {e}"))?;
-            (Worker::There(stream), Box::new(writer), Box::new(reader))
+            let fds = fds_of(&writer, reader.get_ref());
+            (Worker::There(stream), Box::new(writer), Box::new(reader), fds)
         }
         None => here(launch, args)?,
     };
@@ -346,9 +369,18 @@ fn start(run: &Arc<Run>, message: &str, resume: Option<&str>, runs: &Arc<Mutex<R
     }
     *run.worker.lock().unwrap() = Some(worker);
     *run.stdin.lock().unwrap() = Some(stdin);
-    let (watched, runs, follow_ups) = (run.clone(), runs.clone(), follow_ups.clone());
+    *run.fds.lock().unwrap() = Some(fds);
+    follow(run.clone(), stdout, runs.clone(), follow_ups.clone());
+    Ok(())
+}
+
+/// Reads the child's JSONL on a thread until it exits, then records its answer.
+fn follow(watched: Arc<Run>, mut stdout: Box<dyn BufRead + Send>, runs: Arc<Mutex<Runs>>, follow_ups: Arc<Mutex<Vec<FollowUp>>>) {
     std::thread::spawn(move || {
-        let result = read_events(stdout, &watched, &mut |to, text| route(&watched, to, text, &runs, &follow_ups));
+        let result = read_events(&mut stdout, &watched, &mut |to, text| route(&watched, to, text, &runs, &follow_ups));
+        // Before stdout closes, so /reload never duplicates a descriptor number the process already reused.
+        *watched.fds.lock().unwrap() = None;
+        drop(stdout);
         // Taken out first: holding the lock through `wait` would block `Run::stop` until the child exits.
         let worker = watched.worker.lock().unwrap().take();
         if let Some(worker) = worker {
@@ -363,11 +395,24 @@ fn start(run: &Arc<Run>, message: &str, resume: Option<&str>, runs: &Arc<Mutex<R
             }
         }
     });
-    Ok(())
 }
 
-/// A child's runner, its stdin and its stdout.
-type Pipes = (Worker, Box<dyn Write + Send>, Box<dyn BufRead + Send>);
+/// A child's runner, its stdin, its stdout and their descriptors.
+type Pipes = (Worker, Box<dyn Write + Send>, Box<dyn BufRead + Send>, Fds);
+
+/// Stdin and stdout of a child.
+#[cfg(unix)]
+type Fds = [std::os::fd::RawFd; 2];
+#[cfg(not(unix))]
+type Fds = ();
+
+#[cfg(unix)]
+fn fds_of(stdin: &impl std::os::fd::AsRawFd, stdout: &impl std::os::fd::AsRawFd) -> Fds {
+    [stdin.as_raw_fd(), stdout.as_raw_fd()]
+}
+
+#[cfg(not(unix))]
+fn fds_of<A, B>(_: &A, _: &B) -> Fds {}
 
 /// The child as a process here. Only it gets the parent's account, --add-dir list and editor MCP servers: a child on
 /// another computer uses that computer's own.
@@ -391,7 +436,106 @@ fn here<'a>(launch: &'a Launch, mut args: Vec<&'a str>) -> Result<Pipes, String>
         .map_err(|e| format!("Cannot start subagent: {e}"))?;
     let stdin = child.stdin.take().expect("stdin is piped");
     let stdout = child.stdout.take().expect("stdout is piped");
-    Ok((Worker::Here(child), Box::new(stdin), Box::new(BufReader::new(stdout))))
+    let fds = fds_of(&stdin, &stdout);
+    Ok((Worker::Here(child), Box::new(stdin), Box::new(BufReader::new(stdout)), fds))
+}
+
+/// The children here of the runs `hand_over` lists, which /reload leaves running.
+#[cfg(unix)]
+pub fn pids_here(runs: &Runs) -> Vec<u32> {
+    let handed = runs.list.iter().filter(|run| run.workflow.is_none() && run.is_running());
+    handed.filter_map(|run| run.worker.lock().unwrap().as_ref().and_then(Worker::pid)).collect()
+}
+
+/// /reload: the running runs, with copies of their pipes that survive exec, for `adopt` in the server it execs.
+#[cfg(unix)]
+pub fn hand_over(runs: &Runs) -> Value {
+    let mut list = Vec::new();
+    for run in runs.list.iter().filter(|run| run.workflow.is_none() && run.is_running()) {
+        let fds = run.fds.lock().unwrap();
+        let Some(fds) = *fds else { continue };
+        // SAFETY: dup copies descriptors this process holds open under the lock; a copy lacks FD_CLOEXEC, so exec keeps it.
+        let [stdin, stdout] = fds.map(|fd| unsafe { libc::dup(fd) });
+        if stdin < 0 || stdout < 0 {
+            continue;
+        }
+        let pid = run.worker.lock().unwrap().as_ref().and_then(Worker::pid);
+        let state = run.state.lock().unwrap();
+        let launch = &run.launch;
+        list.push(serde_json::json!({
+            "id": run.id, "background": run.background, "elapsed_ms": run.started.elapsed().as_millis() as u64,
+            "pid": pid, "stdin": stdin, "stdout": stdout,
+            "resumed": run.resumed.load(Ordering::Relaxed), "reply_to": *run.reply_to.lock().unwrap(),
+            "tool_calls": state.tool_calls, "last_tool": state.last_tool, "session": state.session,
+            "launch": {
+                "label": launch.label, "task": launch.task, "cwd": launch.cwd, "model": launch.model, "thinking": launch.thinking,
+                "mode": launch.mode.label(), "parent_session": launch.parent_session, "explore": launch.explore, "account": launch.account,
+                "extra_dirs": launch.extra_dirs, "trusted": launch.trusted, "web": launch.web, "client_mcp": launch.client_mcp,
+                "on": launch.on.as_ref().map(|(environment, _)| environment), "script": launch.script,
+            },
+        }));
+    }
+    serde_json::json!({"spawned": runs.spawned, "list": list})
+}
+
+/// The runs `hand_over` listed before /reload, followed again; `settings` reach the computers remote runs are on.
+#[cfg(unix)]
+pub fn adopt(runs: &Arc<Mutex<Runs>>, handed: &Value, settings: &Settings, follow_ups: &Arc<Mutex<Vec<FollowUp>>>) {
+    use std::os::fd::FromRawFd;
+    runs.lock().unwrap().spawned = handed["spawned"].as_u64().unwrap_or_default() as usize;
+    for item in handed["list"].as_array().into_iter().flatten() {
+        let text = |value: &Value| value.as_str().unwrap_or_default().to_string();
+        let saved = &item["launch"];
+        let launch = Launch {
+            label: text(&saved["label"]),
+            task: text(&saved["task"]),
+            cwd: PathBuf::from(text(&saved["cwd"])),
+            model: text(&saved["model"]),
+            thinking: text(&saved["thinking"]),
+            mode: Mode::parse(&text(&saved["mode"])).unwrap_or(Mode::Auto),
+            parent_session: text(&saved["parent_session"]),
+            explore: saved["explore"] == true,
+            account: saved["account"].as_str().map(String::from),
+            extra_dirs: saved["extra_dirs"].as_array().into_iter().flatten().map(|dir| PathBuf::from(text(dir))).collect(),
+            trusted: saved["trusted"] == true,
+            web: saved["web"] == true,
+            client_mcp: saved["client_mcp"].clone(),
+            on: saved["on"].as_str().map(|environment| (environment.to_string(), settings.clone())),
+            script: saved["script"] == true,
+        };
+        let fds = [item["stdin"].as_i64().unwrap_or(-1) as i32, item["stdout"].as_i64().unwrap_or(-1) as i32];
+        // SAFETY: hand_over duplicated these descriptors for this process, and nothing else here owns them.
+        let (writer, reader) = unsafe { (std::fs::File::from_raw_fd(fds[0]), std::fs::File::from_raw_fd(fds[1])) };
+        let worker = match &launch.on {
+            Some(_) => match writer.try_clone() {
+                Ok(socket) => Worker::There(TcpStream::from(std::os::fd::OwnedFd::from(socket))),
+                Err(_) => continue,
+            },
+            None => Worker::Adopted(item["pid"].as_u64().unwrap_or_default() as u32),
+        };
+        let elapsed = Duration::from_millis(item["elapsed_ms"].as_u64().unwrap_or_default());
+        let state =
+            RunState { tool_calls: item["tool_calls"].as_u64().unwrap_or_default(), last_tool: text(&item["last_tool"]), session: item["session"].as_str().map(String::from), ..RunState::default() };
+        let run = Arc::new(Run {
+            id: text(&item["id"]),
+            label: launch.label.clone(),
+            task: launch.task.clone(),
+            model: launch.model.clone(),
+            thinking: launch.thinking.clone(),
+            background: item["background"] == true,
+            workflow: None,
+            started: Instant::now().checked_sub(elapsed).unwrap_or_else(Instant::now),
+            worker: Mutex::new(Some(worker)),
+            stdin: Mutex::new(Some(Box::new(writer))),
+            fds: Mutex::new(Some(fds)),
+            state: Mutex::new(state),
+            launch,
+            resumed: AtomicBool::new(item["resumed"] == true),
+            reply_to: Mutex::new(item["reply_to"].as_str().map(String::from)),
+        });
+        runs.lock().unwrap().list.push(run.clone());
+        follow(run, Box::new(BufReader::new(reader)), runs.clone(), follow_ups.clone());
+    }
 }
 
 /// A child's SendMessage: `main` gets it as a message, a sibling through `send`.
@@ -528,6 +672,7 @@ pub(crate) fn scan_run() -> Run {
         started: Instant::now(),
         worker: Mutex::new(None),
         stdin: Mutex::new(None),
+        fds: Mutex::new(None),
         state: Mutex::default(),
         launch: test_launch(),
         resumed: AtomicBool::new(false),
@@ -623,6 +768,31 @@ mod tests {
     #[test]
     fn a_run_on_another_computer_names_it_in_the_summary() {
         assert_eq!(scan_run_on("arturs-mac-studio").summary(), "sa-1 scan on arturs-mac-studio running: 0 tool calls, 0s");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_run_handed_over_keeps_its_pipes_after_the_old_ones_close() {
+        let script = r#"read task; echo '{"type":"tool","name":"Read"}'; read message; echo '{"type":"done","answer":"ok"}'"#;
+        let mut child = crate::process::command("sh").args(["-c", script]).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
+        let (stdin, stdout) = (child.stdin.take().unwrap(), child.stdout.take().unwrap());
+        let run = Run { worker: Mutex::new(Some(Worker::Here(child))), fds: Mutex::new(Some(fds_of(&stdin, &stdout))), ..scan_run() };
+        *run.stdin.lock().unwrap() = Some(Box::new(stdin));
+        run.message("task").unwrap();
+        let runs = Runs { list: vec![Arc::new(run)], spawned: 1, ..Runs::default() };
+        let handed = hand_over(&runs);
+        drop((runs, stdout));
+
+        let (adopted, follow_ups) = (Arc::new(Mutex::new(Runs::default())), Arc::default());
+        adopt(&adopted, &handed, &crate::settings::load(Path::new("/nonexistent/agent-subagent-test")).unwrap(), &follow_ups);
+        let run = adopted.lock().unwrap().named("sa-1").unwrap();
+        run.message("hi").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while run.is_running() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(run.result_text(), "ok");
+        assert_eq!((run.state.lock().unwrap().tool_calls, adopted.lock().unwrap().spawned), (1, 1));
     }
 
     #[test]

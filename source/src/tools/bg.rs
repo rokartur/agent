@@ -106,31 +106,8 @@ impl Terminals {
         let id = format!("bt-{}", self.counter);
         let terminal = Arc::new(Terminal { id, title, cwd: cwd.to_path_buf(), pid, started: Instant::now(), stdout, stderr, state: Mutex::default() });
         self.list.push(terminal.clone());
-        let follow_ups = follow_ups.clone();
-        let watched = terminal.clone();
-        std::thread::spawn(move || {
-            // shortcut: every settled `sh` stays a zombie until the agent exits, so `stop` and `kill_all` never signal a
-            // reused group; reap once the group is empty if a session starts thousands of terminals.
-            let status = crate::process::wait_unreaped(pid);
-            // Held until here: on Windows its handle is all that keeps a fast `sh`'s pid from being reused before the wait opens one.
-            drop(child);
-            // follow_ups before state, the order TaskOutput and TaskStop use, so neither sees the exit before its report is queued.
-            let mut queued = follow_ups.lock().unwrap();
-            let mut state = watched.state.lock().unwrap();
-            let exit = match status {
-                Ok(status) if state.killed && !status.success() => (Status::Killed, exit_text(status.code(), crate::process::signal_of(status))),
-                Ok(status) if status.success() => (Status::Done, "exit 0".to_string()),
-                Ok(status) => (Status::Failed, exit_text(status.code(), crate::process::signal_of(status))),
-                Err(e) => (Status::Failed, format!("wait failed: {e}")),
-            };
-            state.exit = Some(exit);
-            state.settled = Some(Instant::now());
-            let report = !state.reported;
-            drop(state);
-            if report {
-                queued.push(FollowUp { source: watched.id.clone(), text: watched.result_text() });
-            }
-        });
+        let (watched, follow_ups) = (terminal.clone(), follow_ups.clone());
+        std::thread::spawn(move || watch(&watched, Some(child), &follow_ups));
         Ok(format!(
             "Started background terminal {id} \"{title}\" (pid {pid}, {cwd}).\nIt runs in the background with no stdin. You'll get a message when it exits, or use TaskOutput(task_id: \"{id}\") to peek, with block: true to wait for the exit, TaskStop to stop it, TaskOutput without task_id to see all.",
             id = terminal.id,
@@ -164,6 +141,67 @@ impl Terminals {
     /// Running shells first, each group newest first.
     pub fn running_first(&mut self) {
         self.list.sort_by_key(|t| (t.status() != Status::Running, std::cmp::Reverse(t.started)));
+    }
+
+    /// /reload: the running terminals, for `adopt` in the server it execs. Their `sh` stays our child across exec.
+    #[cfg(unix)]
+    pub fn hand_over(&self) -> Value {
+        let running = self.list.iter().filter(|t| t.status() == Status::Running).map(|t| {
+            let state = t.state.lock().unwrap();
+            serde_json::json!({
+                "id": t.id, "title": t.title, "cwd": t.cwd, "pid": t.pid, "elapsed_ms": t.started.elapsed().as_millis() as u64,
+                "stdout": t.stdout, "stderr": t.stderr, "killed": state.killed, "reported": state.reported,
+            })
+        });
+        serde_json::json!({"counter": self.counter, "list": running.collect::<Vec<_>>()})
+    }
+
+    #[cfg(unix)]
+    pub fn adopt(&mut self, handed: &Value, follow_ups: &Arc<Mutex<Vec<FollowUp>>>) {
+        self.counter = handed["counter"].as_u64().unwrap_or_default();
+        for item in handed["list"].as_array().into_iter().flatten() {
+            let path = |key: &str| PathBuf::from(item[key].as_str().unwrap_or_default());
+            let elapsed = Duration::from_millis(item["elapsed_ms"].as_u64().unwrap_or_default());
+            let state = State { killed: item["killed"] == true, reported: item["reported"] == true, ..State::default() };
+            let terminal = Arc::new(Terminal {
+                id: item["id"].as_str().unwrap_or_default().into(),
+                title: item["title"].as_str().unwrap_or_default().into(),
+                cwd: path("cwd"),
+                pid: item["pid"].as_u64().unwrap_or_default() as u32,
+                started: Instant::now().checked_sub(elapsed).unwrap_or_else(Instant::now),
+                stdout: path("stdout"),
+                stderr: path("stderr"),
+                state: Mutex::new(state),
+            });
+            self.list.push(terminal.clone());
+            let follow_ups = follow_ups.clone();
+            std::thread::spawn(move || watch(&terminal, None, &follow_ups));
+        }
+    }
+}
+
+/// Waits for the terminal's `sh` and records how it ended; `child` is None for one adopted after /reload.
+fn watch(watched: &Terminal, child: Option<std::process::Child>, follow_ups: &Mutex<Vec<FollowUp>>) {
+    // shortcut: every settled `sh` stays a zombie until the agent exits, so `stop` and `kill_all` never signal a
+    // reused group; reap once the group is empty if a session starts thousands of terminals.
+    let status = crate::process::wait_unreaped(watched.pid);
+    // Held until here: on Windows its handle is all that keeps a fast `sh`'s pid from being reused before the wait opens one.
+    drop(child);
+    // follow_ups before state, the order TaskOutput and TaskStop use, so neither sees the exit before its report is queued.
+    let mut queued = follow_ups.lock().unwrap();
+    let mut state = watched.state.lock().unwrap();
+    let exit = match status {
+        Ok(status) if state.killed && !status.success() => (Status::Killed, exit_text(status.code(), crate::process::signal_of(status))),
+        Ok(status) if status.success() => (Status::Done, "exit 0".to_string()),
+        Ok(status) => (Status::Failed, exit_text(status.code(), crate::process::signal_of(status))),
+        Err(e) => (Status::Failed, format!("wait failed: {e}")),
+    };
+    state.exit = Some(exit);
+    state.settled = Some(Instant::now());
+    let report = !state.reported;
+    drop(state);
+    if report {
+        queued.push(FollowUp { source: watched.id.clone(), text: watched.result_text() });
     }
 }
 
@@ -401,6 +439,26 @@ mod tests {
         for terminal in &terminals.list {
             assert!(terminal.status() == Status::Done, "{}", terminal.result_text());
         }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_running_terminal_handed_over_reports_its_exit_once_adopted() {
+        let dir = std::env::temp_dir();
+        let follow_ups = Arc::default();
+        let mut terminals = Terminals::default();
+        terminals.start(&json!({"command": "exit 0"}), &dir, &follow_ups).unwrap();
+        terminals.start(&json!({"command": "sleep 0.5; echo late", "description": "slow"}), &dir, &follow_ups).unwrap();
+        wait_until(|| follow_ups.lock().unwrap().len() == 1);
+        let handed = terminals.hand_over();
+        let (adopted_follow_ups, mut adopted) = (Arc::default(), Terminals::default());
+        adopted.adopt(&handed, &adopted_follow_ups);
+        assert_eq!(adopted.list.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(), ["bt-2"]);
+        wait_until(|| !adopted_follow_ups.lock().unwrap().is_empty());
+        let text = adopted_follow_ups.lock().unwrap().first().expect("no exit report within 5s").text.clone();
+        assert!(text.starts_with("Background terminal bt-2 \"slow\" exited (exit 0)") && text.contains("late"), "{text}");
+        adopted.start(&json!({"command": "exit 0"}), &dir, &adopted_follow_ups).unwrap();
+        assert_eq!(adopted.list.last().unwrap().id, "bt-3");
     }
 
     #[test]

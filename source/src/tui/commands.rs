@@ -343,7 +343,8 @@ impl App {
         }
     }
 
-    /// /reload execs this server again on the same pid (`reload_server` in main.rs), which ends its background work.
+    /// /reload execs this server again on the same pid (`reload_server` in main.rs); `handover` keeps its terminals,
+    /// subagents and scheduled tasks, but a workflow's script runs in this process and would end.
     fn reload(&mut self) {
         if cfg!(windows) {
             self.push(Item::Error(format!("/reload needs Unix exec. Quit and run `agent --resume {}`.", self.session_id)));
@@ -353,9 +354,9 @@ impl App {
             self.push(Item::Error("This session is not saved, so a restart could not reopen it.".into()));
             return;
         }
-        let running = self.terminals.lock().unwrap().running() + self.subagents.lock().unwrap().running() + self.workflows.lock().unwrap().iter().filter(|run| run.is_running()).count();
+        let running = self.workflows.lock().unwrap().iter().filter(|run| run.is_running()).count();
         if running > 0 {
-            self.push(Item::Error(format!("{running} background tasks still run and a restart would end them. Stop them in /tasks or /workflows, or wait, then /reload.")));
+            self.push(Item::Error(format!("{running} workflows still run and a restart would end them. Stop them in /workflows, or wait, then /reload.")));
             return;
         }
         // The restarted server would not have them, and Msg::Reload refuses then anyway, after the turn was already cut.

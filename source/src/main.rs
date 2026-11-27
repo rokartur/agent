@@ -4,6 +4,8 @@
 mod acp;
 mod agent;
 mod api;
+#[cfg(unix)]
+mod handover;
 mod headroom;
 mod image;
 mod local_socket;
@@ -755,6 +757,10 @@ fn run(options: Options) -> Result<(), String> {
     // Its card is how `agent attach` finds this session, so a session server without one would be unreachable.
     agent.inbox = Some(agent::peers::open(&home, &agent.follow_ups).map_err(|error| format!("Cannot list this session for agent attach: {error}"))?);
     agent.started_by = options.started_by;
+    #[cfg(unix)]
+    if let Err(error) = handover::adopt(&mut agent, &settings) {
+        eprintln!("{error}");
+    }
     if let Some(title) = options.title {
         agent.session.rename(&title)?;
         agent.title = title;
@@ -789,18 +795,11 @@ fn run(options: Options) -> Result<(), String> {
 }
 
 /// /reload: the same pid becomes the binary on disk, so its socket path, cross-session card and log stay, and exec
-/// closes the session file's lock with every other descriptor before the new server takes it.
+/// closes the session file's lock with every other descriptor before the new server takes it. `handover::prepare`
+/// already ended the children the new server does not take over.
 #[cfg(unix)]
 fn reload_server(mut command: std::process::Command) -> Result<(), String> {
     use std::os::unix::process::CommandExt;
-    // MCP servers, plugins and language servers run in sessions of their own, so closed pipes alone may not end them.
-    process::hang_up_children();
-    // The new server knows none of them, so a child left unreaped would stay a zombie for the rest of the session.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
-    // SAFETY: waitpid with a null status pointer only reaps; -1 means no child is left.
-    while std::time::Instant::now() < deadline && unsafe { libc::waitpid(-1, std::ptr::null_mut(), libc::WNOHANG) } != -1 {
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
     Err(format!("Cannot restart the session server: {}", command.exec()))
 }
 

@@ -56,6 +56,7 @@ pub fn command(program: impl AsRef<OsStr>) -> Command {
     command.env_remove(crate::mcp::CLIENT_SERVERS_ENV);
     // Set for a session's process only: an `agent acp` its Bash starts routes again.
     command.env_remove(crate::acp::SESSION_ENV);
+    command.env_remove(crate::handover::ENV);
     command.envs(super::NO_HISTORY);
     // SAFETY: the hook only calls setsid, which is async-signal-safe.
     unsafe { command.pre_exec(new_session) };
@@ -198,8 +199,13 @@ pub fn exit_on_signal(cleanup: fn()) {
 /// Sends SIGHUP, then SIGKILL for those that ignore it (`nohup`), to the group of every direct child. Zombies count:
 /// a bg terminal whose `sh` exited (`wait_unreaped`) may still have members; macOS `pgrep -P` skips zombies, `ps` does not.
 pub fn hang_up_children() {
+    hang_up_children_except(&[]);
+}
+
+/// `hang_up_children`, leaving the groups of `keep` running; returns the children it signalled.
+pub fn hang_up_children_except(keep: &[u32]) -> Vec<u32> {
     // Bounded: a hung `ps` on a loaded host must not keep the agent from killing its children and exiting.
-    let Ok(Some(output)) = output_within(command("ps").args(["-A", "-o", "pid=,ppid=,comm="]), Duration::from_secs(2)) else { return };
+    let Ok(Some(output)) = output_within(command("ps").args(["-A", "-o", "pid=,ppid=,comm="]), Duration::from_secs(2)) else { return Vec::new() };
     let agent = std::process::id().to_string();
     let mut groups: Vec<u32> = Vec::new();
     for line in String::from_utf8_lossy(&output.stdout).lines() {
@@ -210,6 +216,7 @@ pub fn hang_up_children() {
             && program != "ps"
             && !program.ends_with("/ps")
             && let Ok(pid) = pid.parse()
+            && !keep.contains(&pid)
         {
             groups.push(pid);
         }
@@ -221,9 +228,10 @@ pub fn hang_up_children() {
     // SIGKILL ends them.
     let headless = std::env::args().any(|arg| arg == "--headless");
     std::thread::sleep(Duration::from_millis(if headless { 200 } else { 600 }));
-    for group in groups {
+    for &group in &groups {
         signal_group(group, SIGKILL);
     }
+    groups
 }
 
 /// Whether `binary` is an executable file in some PATH directory; rtk and headroom are optional installs.

@@ -557,16 +557,23 @@ pub fn run(agent: Agent, setup: Setup, model_lists: JoinHandle<Vec<String>>, soc
     if let Some(cmux) = app.cmux.take() {
         cmux.finish();
     }
-    app.terminals.lock().unwrap().kill_all();
-    app.subagents.lock().unwrap().stop_all();
-    crate::tools::remove_spills();
+    let reload = app.reload.take();
+    // A reload keeps them, and the spill dir that holds the terminals' logs.
+    if reload.is_none() || result.is_err() {
+        app.terminals.lock().unwrap().kill_all();
+        app.subagents.lock().unwrap().stop_all();
+        crate::tools::remove_spills();
+    }
     if let Some(recording) = app.recording.take() {
         recording.cancel();
     }
     let _ = std::fs::remove_file(socket);
     // No goodbye: the terminals see the connection drop and reconnect to the same pid once the new server listens.
-    if app.reload.is_some() {
-        return result.map(|()| app.reload.take());
+    if let Some(command) = reload {
+        result?;
+        #[cfg(unix)]
+        let command = crate::handover::prepare(command, &app.terminals, &app.subagents, &app.crons, &app.follow_ups, &app.first_session);
+        return Ok(Some(command));
     }
     let summary = match &app.session_path {
         Some(path) if std::fs::read_to_string(path).is_ok_and(|text| text.contains(r#""type":"message""#)) => exit_summary(&app, Path::new(path)),
