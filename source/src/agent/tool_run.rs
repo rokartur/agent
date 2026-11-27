@@ -221,10 +221,8 @@ impl Agent {
             output = format!("{output}\n\n{hint}");
         }
         if name == "Read" && !is_error {
-            let paths = match input["paths"].as_array() {
-                Some(paths) => paths.iter().filter_map(|entry| entry.as_str().or(entry["path"].as_str())).collect(),
-                None => vec![input["path"].as_str().unwrap_or_default()],
-            };
+            let ranges = input["paths"].as_array().into_iter().flatten().map(|entry| if entry.is_object() { &entry["file_path"] } else { entry });
+            let paths = ranges.chain([&input["file_path"]]).filter_map(Value::as_str).filter(|path| !path.is_empty());
             for path in paths {
                 let path = tools::hashline::resolve(&self.cwd, path);
                 self.record_skill_read(&path);
