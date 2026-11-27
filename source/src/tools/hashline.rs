@@ -550,7 +550,10 @@ fn replace_once(file: &mut Text, first: usize, last: usize, edit: &Value, path: 
     let region = file.lines[first..=last].join("\n");
     let matches = region.matches(old).count();
     if matches == 0 {
-        return Err(format!("[E_NO_MATCH] old_string was not found in lines {}-{} of {}. Copy the fragment exactly from the file.", first + 1, last + 1, path.display()));
+        let hint = closest(&file.lines[first..=last], old)
+            .map(|(start, end)| format!(" Lines {}-{} come closest:\n{}\n", first + start + 1, first + end, file.lines[first + start..first + end].join("\n")))
+            .unwrap_or_default();
+        return Err(format!("[E_NO_MATCH] old_string was not found in lines {}-{} of {}.{hint} Copy the fragment exactly from the file.", first + 1, last + 1, path.display()));
     }
     if matches > 1 {
         return Err(format!("[E_AMBIGUOUS] old_string occurs {matches} times in lines {}-{} of {}. Add surrounding text or narrow the range so it occurs once.", first + 1, last + 1, path.display()));
@@ -565,6 +568,21 @@ fn replace_once(file: &mut Text, first: usize, last: usize, edit: &Value, path: 
     }
     file.lines.splice(first..=last, lines);
     Ok(())
+}
+
+/// The window of `lines` sharing the most trimmed lines with `old`, start and end, so a failed edit is retried without
+/// reading the file again. At most 40 lines; lines under 4 characters such as `}` do not count, and none at all means no window.
+fn closest(lines: &[String], old: &str) -> Option<(usize, usize)> {
+    let wanted: Vec<&str> = old.lines().map(str::trim).take(40).collect();
+    let mut best = (0, 0);
+    for start in 0..lines.len() {
+        let shared = wanted.iter().zip(&lines[start..]).filter(|(want, line)| want.len() >= 4 && line.contains(**want)).count();
+        if shared > best.0 {
+            best = (shared, start);
+        }
+    }
+    let (shared, start) = best;
+    (shared > 0).then(|| (start, (start + wanted.len()).min(lines.len())))
 }
 
 /// Replacement text to lines: one trailing line break ends the last line instead of adding a blank one.
@@ -854,6 +872,17 @@ mod tests {
         let error = anchors.replace_match(Path::new("/"), &json!({"file_path": path, "edits": edits})).unwrap_err();
         assert!(error.starts_with("[E_NO_MATCH]") && error.contains("edits[1]"), "{error}");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "1\ntwo\n3\n");
+    }
+
+    #[test]
+    fn a_missed_edit_shows_the_lines_that_come_closest() {
+        let path = temp_file("closest", "fn a() {\n    let x = 1;\n    call(x);\n}\nfn b() {}\n");
+        let mut anchors = Anchors::new("s");
+        let stale = json!({"file_path": path, "old_string": "  let x = 2;\n  call(x);", "new_string": "y"});
+        let error = anchors.replace_match(Path::new("/"), &stale).unwrap_err();
+        assert!(error.contains("Lines 2-3 come closest:\n    let x = 1;\n    call(x);\n"), "{error}");
+        let unrelated = json!({"file_path": path, "old_string": "}\nnothing here", "new_string": "y"});
+        assert!(!anchors.replace_match(Path::new("/"), &unrelated).unwrap_err().contains("come closest"));
     }
 
     #[test]
