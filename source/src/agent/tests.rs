@@ -230,6 +230,7 @@ fn a_resume_clears_old_tool_results_only_once_the_prompt_cache_has_expired() {
         messages.push(json!({"role": "assistant", "content": [{"type": "tool_use", "id": id, "name": "Read", "input": {}}]}));
         messages.push(json!({"role": "user", "content": [{"type": "tool_result", "tool_use_id": id, "content": "x"}]}));
     }
+    messages.extend([json!({"role": "assistant", "content": "done"}), json!({"role": "user", "content": "next"})]);
     let mut resume = |minutes_ago: u64| {
         agent.load(Saved { history: History { messages: messages.clone(), ..History::default() }, last_reply_ms: Some(now_ms() - minutes_ago * 60_000), ..Saved::default() });
         agent.advance_clearing(&agent.provider_view())

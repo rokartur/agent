@@ -2,19 +2,31 @@ use super::thread::THREAD_IDLE;
 use super::*;
 
 #[test]
-fn a_clear_tool_uses_edit_is_applied_here_to_the_oldest_unexcluded_results() {
+fn a_clear_tool_uses_edit_is_applied_here_to_the_oldest_unexcluded_results_before_the_turn_in_progress() {
+    let prompt = |text: &str| json!({"role": "user", "content": text});
     let call = |id: &str, name: &str| json!({"role": "assistant", "content": [{"type": "tool_use", "id": id, "name": name, "input": {}}]});
     let result = |id: &str| json!({"role": "user", "content": [{"type": "tool_result", "tool_use_id": id, "content": "output"}]});
     let request = json!({
-        "messages": [call("a", "Read"), result("a"), call("b", "Todo"), result("b"), call("c", "Bash"), result("c"), call("d", "Bash"), result("d")],
+        "messages": [prompt("go"), call("a", "Read"), result("a"), call("b", "Todo"), result("b"), call("c", "Bash"), result("c"), call("d", "Bash"), result("d"), json!({"role": "assistant", "content": "done"}), prompt("next"), call("e", "Bash"), result("e")],
         "context_management": {"edits": [{"type": "clear_tool_uses_20250919", "keep": {"type": "tool_uses", "value": 1}, "exclude_tools": ["Todo"]}]},
     });
     let cleared = request::clear_tool_uses(&request);
-    let contents: Vec<&str> = cleared["messages"].as_array().unwrap().iter().skip(1).step_by(2).map(|m| m["content"][0]["content"].as_str().unwrap()).collect();
-    assert_eq!(contents[1], "output");
-    assert_eq!(contents[3], "output");
-    assert!(contents[0].starts_with("[Old tool result cleared") && contents[2].starts_with("[Old tool result cleared"));
+    let results: Vec<&str> = cleared["messages"].as_array().unwrap().iter().filter_map(|m| m["content"][0]["content"].as_str()).collect();
+    let [a, b, c, d, e] = results[..] else { panic!("{results:?}") };
+    assert!(a.starts_with("[Old tool result cleared") && c.starts_with("[Old tool result cleared"));
+    assert_eq!([b, d, e], ["output"; 3]);
     assert!(cleared.get("context_management").is_none());
+}
+
+#[test]
+fn a_note_after_a_tool_result_continues_the_turn_as_the_api_merges_it() {
+    let user = |content: Value| json!({"role": "user", "content": content});
+    let call = |id: &str| json!({"role": "assistant", "content": [{"type": "tool_use", "id": id, "name": "Bash", "input": {}}]});
+    let result = |id: &str| user(json!([{"type": "tool_result", "tool_use_id": id, "content": "x"}]));
+    let mut messages = vec![user(json!("go")), call("a"), result("a"), user(json!("queued")), call("b"), result("b")];
+    assert_eq!(turn_start(&messages), 0);
+    messages.extend([json!({"role": "assistant", "content": "done"}), user(json!("next")), user(json!("more"))]);
+    assert_eq!(turn_start(&messages), 7);
 }
 
 #[test]

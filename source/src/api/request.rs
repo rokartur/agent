@@ -64,13 +64,30 @@ pub fn request(model: &str, max_tokens: u64, thinking: &str, cache_ttl: &str, sy
     request
 }
 
+/// Index of the message that opened the turn in progress: the first of the last run of user messages without a tool result.
+/// The API merges a run of user messages into one, so a note after a tool result continues the turn (checked 2026-11-27).
+/// Anthropic's `clear_tool_uses` never clears the tool uses after it, and its `keep` does not count them.
+pub fn turn_start(messages: &[Value]) -> usize {
+    let is_user = |message: &Value| message["role"] == "user";
+    let has_result = |message: &Value| message["content"].as_array().is_some_and(|c| c.iter().any(|b| b["type"] == "tool_result"));
+    let mut start = 0;
+    for (index, message) in messages.iter().enumerate() {
+        let run_begins = is_user(message) && (index == 0 || !is_user(&messages[index - 1]));
+        if run_begins && !messages[index..].iter().take_while(|m| is_user(m)).any(has_result) {
+            start = index;
+        }
+    }
+    start
+}
+
 /// Anthropic's `clear_tool_uses` edit applied here, for providers without context editing: the same results become a note.
 pub(super) fn clear_tool_uses(request: &Value) -> Value {
     let mut request = request.clone();
     let Some(edits) = request.as_object_mut().expect("a request is an object").remove("context_management") else { return request };
     let edit = &edits["edits"][0];
     let excluded = edit["exclude_tools"].as_array().cloned().unwrap_or_default();
-    let blocks = request["messages"].as_array().into_iter().flatten().flat_map(|message| message["content"].as_array().into_iter().flatten());
+    let messages = request["messages"].as_array().map_or(&[][..], Vec::as_slice);
+    let blocks = messages[..turn_start(messages)].iter().flat_map(|message| message["content"].as_array().into_iter().flatten());
     let clearable: Vec<String> = blocks.filter(|block| block["type"] == "tool_use" && !excluded.contains(&block["name"])).filter_map(|block| block["id"].as_str().map(String::from)).collect();
     let keep = edit["keep"]["value"].as_u64().unwrap_or(0) as usize;
     let cleared = &clearable[..clearable.len().saturating_sub(keep)];

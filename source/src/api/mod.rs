@@ -20,7 +20,7 @@ mod request;
 mod stream;
 mod thread;
 
-pub use request::{plain_request, request};
+pub use request::{plain_request, request, turn_start};
 pub use thread::MessageThread;
 
 use catalog::fetch_models;
