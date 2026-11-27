@@ -403,8 +403,9 @@ type Pipes = (Worker, Box<dyn Write + Send>, Box<dyn BufRead + Send>, Fds);
 /// Stdin and stdout of a child.
 #[cfg(unix)]
 type Fds = [std::os::fd::RawFd; 2];
+/// Windows has no /reload, so nothing to hand over.
 #[cfg(not(unix))]
-type Fds = ();
+type Fds = [u64; 0];
 
 #[cfg(unix)]
 fn fds_of(stdin: &impl std::os::fd::AsRawFd, stdout: &impl std::os::fd::AsRawFd) -> Fds {
@@ -412,7 +413,9 @@ fn fds_of(stdin: &impl std::os::fd::AsRawFd, stdout: &impl std::os::fd::AsRawFd)
 }
 
 #[cfg(not(unix))]
-fn fds_of<A, B>(_: &A, _: &B) -> Fds {}
+fn fds_of<A, B>(_: &A, _: &B) -> Fds {
+    []
+}
 
 /// The child as a process here. Only it gets the parent's account, --add-dir list and editor MCP servers: a child on
 /// another computer uses that computer's own.
