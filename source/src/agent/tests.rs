@@ -322,6 +322,26 @@ fn workspace_add_expands_a_tilde_to_the_home_directory() {
 }
 
 #[test]
+fn a_read_by_file_path_or_range_brings_the_nested_agents_md() {
+    let home = std::env::temp_dir().join(format!("agent-read-nested-{}", std::process::id()));
+    let cwd = home.join("project");
+    std::fs::create_dir_all(cwd.join("web")).unwrap();
+    std::fs::create_dir_all(cwd.join("api")).unwrap();
+    std::fs::write(cwd.join("web/AGENTS.md"), "web rules").unwrap();
+    std::fs::write(cwd.join("web/a.ts"), "a").unwrap();
+    std::fs::write(cwd.join("api/AGENTS.md"), "api rules").unwrap();
+    std::fs::write(cwd.join("api/b.rs"), "b").unwrap();
+    let settings = crate::settings::load(&home).unwrap();
+    let session = Session::start(&home.join("sessions"), false, &cwd, "m").unwrap();
+    let mut agent = Agent::new(Client::new(&home).unwrap(), &settings, home.clone(), cwd, session, home.join("sessions"), None);
+    let (by_file_path, _) = agent.run_tool("t1", "Read", &json!({"file_path": "web/a.ts"}), &[], &mut |_| {});
+    let (by_range, _) = agent.run_tool("t2", "Read", &json!({"paths": [{"file_path": "api/b.rs", "offset": 1}]}), &[], &mut |_| {});
+    std::fs::remove_dir_all(&home).unwrap();
+    assert!(by_file_path.contains("web rules"), "{by_file_path}");
+    assert!(by_range.contains("api rules"), "{by_range}");
+}
+
+#[test]
 fn page_is_offered_only_to_an_interactive_session_and_saves_into_its_session() {
     let home = std::env::temp_dir().join(format!("agent-page-tool-{}", std::process::id()));
     let cwd = home.join("project");

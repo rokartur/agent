@@ -15,7 +15,7 @@ pub fn is_pdf(path: &Path) -> bool {
 
 /// The text of the pages asked for, through poppler's pdftotext. No anchors: a PDF is not edited by line.
 pub fn read(path: &Path, input: &Value) -> Result<String, String> {
-    let (first, last) = page_range(input["pages"].as_str())?;
+    let (first, last) = page_range(input["pages"].as_str().filter(|pages| !pages.is_empty()))?;
     if !crate::process::installed("pdftotext") {
         return Err("Reading a PDF needs pdftotext. Install poppler: brew install poppler, apt-get install poppler-utils, or choco install poppler.".into());
     }

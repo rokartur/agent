@@ -41,7 +41,8 @@ pub fn request(anthropic: &Value, cache_key: &str) -> Value {
         .as_array()
         .into_iter()
         .flatten()
-        .map(|tool| json!({"type": "function", "name": tool["name"], "description": tool["description"], "parameters": tool["input_schema"]}))
+        // Codex CLI sends strict false too; without it every Read call filled each optional field (`paths: []`, `pages: ""`).
+        .map(|tool| json!({"type": "function", "name": tool["name"], "description": tool["description"], "parameters": tool["input_schema"], "strict": false}))
         .collect();
     let effort = match anthropic["output_config"]["effort"].as_str() {
         None => "none",
@@ -218,7 +219,7 @@ mod tests {
         let body = request(&anthropic, "key");
         assert_eq!(body["instructions"], "Be brief.");
         assert_eq!(body["reasoning"], json!({"effort": "xhigh", "summary": "auto"}));
-        assert_eq!(body["tools"], json!([{"type": "function", "name": "bash", "description": "Run", "parameters": {"type": "object"}}]));
+        assert_eq!(body["tools"], json!([{"type": "function", "name": "bash", "description": "Run", "parameters": {"type": "object"}, "strict": false}]));
         assert_eq!(
             body["input"],
             json!([

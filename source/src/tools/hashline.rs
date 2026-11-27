@@ -194,14 +194,12 @@ impl Anchors {
     }
 
     pub fn read(&mut self, cwd: &Path, input: &Value) -> Result<String, String> {
-        if !input["paths"].is_null() {
-            let Some(paths) = input["paths"].as_array().filter(|paths| !paths.is_empty()) else {
-                return Err("[E_BAD_SHAPE] \"paths\" must be a non-empty array of paths or {path, offset, limit} ranges.".into());
-            };
-            if !input["offset"].is_null() || !input["limit"].is_null() {
-                return Err("[E_BAD_SHAPE] With \"paths\", put \"offset\" and \"limit\" inside each entry: {path, offset, limit}.".into());
-            }
-            return self.read_many(cwd, paths);
+        // An empty `paths` is a placeholder some models send beside `file_path`.
+        match &input["paths"] {
+            Value::Null => {}
+            Value::Array(paths) if paths.is_empty() => {}
+            Value::Array(paths) => return self.read_many(cwd, paths, &input["offset"], &input["limit"]),
+            _ => return Err("[E_BAD_SHAPE] \"paths\" must be an array of paths or {file_path, offset, limit} ranges.".into()),
         }
         let path = existing_file(cwd, str_arg(input, "file_path")?)?;
         let text = self.load(&path)?;
@@ -235,17 +233,18 @@ impl Anchors {
         Ok(self.rows(&path, start, limit))
     }
 
-    // A failed file reports its error under its header so the other files still arrive.
-    fn read_many(&mut self, cwd: &Path, paths: &[Value]) -> Result<String, String> {
+    /// A failed file reports its error under its header so the other files still arrive.
+    /// A top-level `offset` or `limit` applies to every entry that does not set its own.
+    fn read_many(&mut self, cwd: &Path, paths: &[Value], offset: &Value, limit: &Value) -> Result<String, String> {
         let mut out = Vec::new();
         for entry in paths {
             let (path, offset, limit) = match entry {
-                Value::String(path) => (path.as_str(), &Value::Null, &Value::Null),
+                Value::String(path) => (path.as_str(), offset, limit),
                 Value::Object(range) => match range.get("file_path").and_then(Value::as_str) {
-                    Some(path) => (path, &entry["offset"], &entry["limit"]),
-                    None => return Err("[E_BAD_SHAPE] A \"paths\" range needs a string \"path\".".into()),
+                    Some(path) => (path, range.get("offset").unwrap_or(offset), range.get("limit").unwrap_or(limit)),
+                    None => return Err("[E_BAD_SHAPE] A \"paths\" range needs a string \"file_path\".".into()),
                 },
-                _ => return Err("[E_BAD_SHAPE] Every entry in \"paths\" must be a path or {path, offset, limit}.".into()),
+                _ => return Err("[E_BAD_SHAPE] Every entry in \"paths\" must be a path or {file_path, offset, limit}.".into()),
             };
             let limit = if limit.is_null() { &json!(MAX_LINES) } else { limit };
             let body = self.read(cwd, &json!({"file_path": path, "offset": offset, "limit": limit})).unwrap_or_else(|e| e);
@@ -792,6 +791,18 @@ mod tests {
         assert_eq!(rows, ["two", "four"], "{out}");
         let bad = anchors.read(Path::new("/"), &json!({"paths": [{"offset": 2}]})).unwrap_err();
         assert!(bad.starts_with("[E_BAD_SHAPE]"), "{bad}");
+    }
+
+    #[test]
+    fn read_takes_the_placeholder_fields_a_model_fills_in() {
+        let path = temp_file("read_placeholders", "one\ntwo\nthree\n");
+        let mut anchors = Anchors::new("s");
+        let rows = |out: &str| -> Vec<String> { out.lines().filter_map(|line| line.split_once('│')).map(|(_, text)| text.to_string()).collect() };
+        let empty_paths = anchors.read(Path::new("/"), &json!({"file_path": path, "offset": 1, "limit": 2000, "pages": "", "paths": []})).unwrap();
+        assert_eq!(rows(&empty_paths), ["one", "two", "three"], "{empty_paths}");
+        let top_level_range = json!({"file_path": "", "offset": 2, "limit": 1, "paths": [path, {"file_path": path, "offset": 3}]});
+        let out = anchors.read(Path::new("/"), &top_level_range).unwrap();
+        assert_eq!(rows(&out), ["two", "three"], "{out}");
     }
 
     #[test]
